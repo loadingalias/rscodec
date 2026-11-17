@@ -1,0 +1,11 @@
+# These paths stay out of Git in every directory, member crates included.
+target/
+.DS_Store
+.zed/
+AGENTS.md
+**/.agents/skills/
+**/.claude/skills/
+# The designs and the task plan are local. User documentation in
+# docs/content/ is versioned.
+/docs/*
+!/docs/content/

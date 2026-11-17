@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+description = "Repository commands: cargo xtask fix, check, and test."
+edition.workspace = true
+license.workspace = true
+# A tool of this repository, not a library.
+publish = false
+
+[lints]
+workspace = true
