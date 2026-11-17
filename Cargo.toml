@@ -20,6 +20,51 @@ std = []
 [lints]
 workspace = true
 
+# The competitors of `benches/`. None enters the library closure. Each is pinned to a release at
+# least 7 days old, in its fastest configuration.
+[dev-dependencies]
+criterion = { version = "=0.8.2", default-features = false }
+# base-N
+base16ct = "=1.0.0"
+# `simd-unsafe`, a default feature, gives the `Simd` engine.
+base64 = "=0.23.1"
+base64-ng = { version = "=2.1.0", features = ["simd"] }
+base64-simd = "=0.8.0"
+# The SIMD kernels are always on. `unstable` exposes the AVX2 kernel, which the x86_64 rows select.
+base64-turbo = { version = "=0.6.0", features = ["unstable"] }
+base64ct = "=1.8.3"
+const-hex = "=1.19.3"
+data-encoding = "=2.11.1"
+encodify = "=1.0.2"
+faster-hex = { version = "=1.0.0", default-features = false, features = ["std"] }
+# JSON and float printers
+flexon = { version = "=0.4.9", features = ["nightly"] }
+# The `num-bigint` default feature only widens integers past i64.
+jiter = { version = "=0.19.0", default-features = false }
+ryu = "=1.0.23"
+# Without `float_roundtrip`, serde_json reads 11,975 of the 111,080 floats of canada.json 1 ULP
+# away from the correctly rounded value. The bar takes only correct output.
+serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
+# The default features without `runtime-detection`: `-C target-cpu=native` selects the kernel at
+# compile time, with no dispatch.
+simd-json = { version = "=0.19.0", default-features = false, features = ["serde_impl", "swar-number-parsing"] }
+# `avx512` takes effect only where `-C target-cpu` enables AVX-512.
+sonic-rs = { version = "=0.5.10", features = ["avx512"] }
+zmij = "=1.0.23"
+
+# simdutf, the C++ leader of base64 decode, through its binding crate. A build for MSVC cannot
+# compile it on another host, so `cargo xtask check --target x86_64-pc-windows-msvc` leaves it out.
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+simdutf = "=0.7.0"
+
+[[bench]]
+name = "base_n"
+harness = false
+
+[[bench]]
+name = "json"
+harness = false
+
 [workspace]
 resolver = "3"
 members = [".", "xtask"]
@@ -147,3 +192,8 @@ private_intra_doc_links = "deny"
 # saturating arithmetic uses explicit operations.
 [profile.release]
 overflow-checks = true
+
+# The competitors build as their users build them for release, without overflow checks. The
+# members of this workspace keep the checks in the benchmarks too.
+[profile.bench.package."*"]
+overflow-checks = false

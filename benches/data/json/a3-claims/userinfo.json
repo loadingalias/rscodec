@@ -1,0 +1,33 @@
+{
+  "sub": "248289761001",
+  "name": "Jane Doe",
+  "given_name": "Jane",
+  "family_name": "Doe",
+  "middle_name": "Ann",
+  "nickname": "Jay",
+  "preferred_username": "j.doe",
+  "profile": "https://example.com/janedoe",
+  "picture": "https://example.com/janedoe/me.jpg",
+  "website": "https://janedoe.example.com",
+  "email": "janedoe@example.com",
+  "email_verified": true,
+  "gender": "female",
+  "birthdate": "0000-10-31",
+  "zoneinfo": "Europe/Paris",
+  "locale": "fr-FR",
+  "phone_number": "+33 1 23 45 67 89",
+  "phone_number_verified": false,
+  "address": {
+    "formatted": "12 rue de l’Église\n75004 Paris\nFrance",
+    "street_address": "12 rue de l’Église",
+    "locality": "Paris",
+    "region": "Île-de-France",
+    "postal_code": "75004",
+    "country": "France"
+  },
+  "family_name#ja-Kana-JP": "ドウ",
+  "given_name#ja-Kana-JP": "ジェーン",
+  "family_name#ja-Hani-JP": "堂",
+  "name#el": "Τζέιν Ντόου",
+  "updated_at": 1311280970
+}

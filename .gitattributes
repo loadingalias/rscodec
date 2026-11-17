@@ -1,2 +1,4 @@
 # Every text file is LF in the repository and in every checkout.
 * text=auto eol=lf
+# Benchmark inputs keep their exact bytes, CRLF line breaks too.
+/benches/data/json/** -text

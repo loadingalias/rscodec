@@ -9,3 +9,6 @@ AGENTS.md
 # docs/content/ is versioned.
 /docs/*
 !/docs/content/
+# Benchmark corpora with no stated license. benches/data/README.md fetches
+# them.
+/benches/data/fetched/
