@@ -28,8 +28,9 @@ Commands
 
 fix, check, and test select the whole workspace, unless their arguments select
 packages with -p or --package. With the whole workspace, fix and check also
-lint rscodec with no default feature: its library on wasm32v1-none, a target
-with no `std`, and all of its targets, the tests too, on the host.
+lint rscodec with no default feature: its library with each codec on
+wasm32v1-none, a target with no `std`, and all of its targets, the tests too,
+on the host. rustdoc documents each codec.
 ";
 
 /// A target with no `std`, which rust-toolchain.toml names. A build for it
@@ -38,6 +39,10 @@ const NO_STD_TARGET: &str = "wasm32v1-none";
 
 /// The package whose library builds without `std`.
 const NO_STD_PACKAGE: &str = "rscodec";
+
+/// The leaf features of the codecs of `NO_STD_PACKAGE`. The lint without `std` selects each, and
+/// the tests and the benchmarks select each through the dev-dependency of the package on itself.
+const LEAVES: &str = "base64,hex";
 
 /// The selection of the whole workspace.
 const WORKSPACE: &[&str] = &["--workspace"];
@@ -173,6 +178,8 @@ impl Repo {
                 "--quiet",
                 "--lib",
                 "--no-default-features",
+                "--features",
+                LEAVES,
                 "--target",
                 NO_STD_TARGET,
                 "--package",
@@ -205,7 +212,8 @@ impl Repo {
         self.clippy_no_std(&scope)?;
         step(
             "rustdoc",
-            self.cargo(&["doc", "--locked", "--no-deps", "--quiet"]).args(&scope),
+            self.cargo(&["doc", "--locked", "--no-deps", "--all-features", "--quiet"])
+                .args(&scope),
         )
     }
 

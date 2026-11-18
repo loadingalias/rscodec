@@ -1,0 +1,76 @@
+//! The WebAssembly SIMD kernels: `i8x16.swizzle` maps each nibble to its digit, and compares
+//! classify each character. The decoder ANDs the valid lanes of each block into one vector, and
+//! tests it once after the last block.
+
+use core::arch::wasm32::*;
+
+use crate::simd::{
+    blocks,
+    wasm32::{load16, store16},
+};
+
+/// The digit of each nibble.
+const DIGITS: [u8; 16] = *b"0123456789abcdef";
+
+/// The nibbles of 16 characters, and the lanes that are digits, which are all ones.
+#[inline]
+fn nibbles(chars: v128) -> (v128, v128) {
+    let value = i8x16_sub(chars, u8x16_splat(b'0'));
+    let digit = u8x16_lt(value, u8x16_splat(10));
+    let letter = u8x16_lt(i8x16_sub(chars, u8x16_splat(b'a')), u8x16_splat(6));
+    // The step from `c - '0'` to the nibble of a letter.
+    (
+        i8x16_sub(value, v128_and(letter, u8x16_splat(39))),
+        v128_or(digit, letter),
+    )
+}
+
+/// The byte of each 16-bit lane of two nibbles, high nibble first, in its low 8 bits.
+#[inline]
+fn join(nibbles: v128) -> v128 {
+    v128_or(i16x8_shl(nibbles, 4), u16x8_shr(nibbles, 8))
+}
+
+pub(super) fn encode(bytes: &[u8], out: &mut [u8]) {
+    let digits = load16::<0, _>(&DIGITS);
+    blocks::<16, 32>(
+        bytes,
+        out,
+        16,
+        0,
+        |len| len * 2,
+        |src, dst| {
+            let src = load16::<0, _>(src);
+            let hi = i8x16_swizzle(digits, u8x16_shr(src, 4));
+            let lo = i8x16_swizzle(digits, v128_and(src, u8x16_splat(0x0f)));
+            store16::<0, _>(
+                dst,
+                u8x16_shuffle::<0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23>(hi, lo),
+            );
+            store16::<16, _>(
+                dst,
+                u8x16_shuffle::<8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31>(hi, lo),
+            );
+        },
+    );
+}
+
+pub(super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
+    let mut valid = u8x16_splat(0xff);
+    blocks::<32, 16>(
+        text,
+        out,
+        32,
+        b'0',
+        |len| len / 2,
+        |src, dst| {
+            let (first, first_valid) = nibbles(load16::<0, _>(src));
+            let (second, second_valid) = nibbles(load16::<16, _>(src));
+            valid = v128_and(valid, v128_and(first_valid, second_valid));
+            let bytes =
+                u8x16_shuffle::<0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30>(join(first), join(second));
+            store16::<0, _>(dst, bytes);
+        },
+    );
+    u8x16_all_true(valid)
+}

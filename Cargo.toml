@@ -13,9 +13,13 @@ include = ["/src", "/LICENSE", "/README.md"]
 
 [features]
 default = ["std"]
-# Without `std`, the crate needs only `core`. Each codec is a leaf feature, which the task of that
-# codec adds.
+# Without `std`, the crate needs only `core`, and it selects each SIMD backend at compile time
+# from `-C target-feature`. With `std`, it detects the CPU at run time.
 std = []
+# base64 (RFC 4648 section 4, padded) and base64url (section 5, no padding).
+base64 = []
+# Lowercase hex (RFC 4648 section 8).
+hex = []
 
 [lints]
 workspace = true
@@ -23,6 +27,8 @@ workspace = true
 # The competitors of `benches/`. None enters the library closure. Each is pinned to a release at
 # least 7 days old, in its fastest configuration.
 [dev-dependencies]
+# The tests and the benchmarks use each leaf. Only the builds of these targets enable them.
+rscodec = { path = ".", default-features = false, features = ["base64", "hex"] }
 criterion = { version = "=0.8.2", default-features = false }
 # base-N
 base16ct = "=1.0.0"
@@ -54,7 +60,8 @@ zmij = "=1.0.23"
 
 # simdutf, the C++ leader of base64 decode, through its binding crate. A build for MSVC cannot
 # compile it on another host, so `cargo xtask check --target x86_64-pc-windows-msvc` leaves it out.
-[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+# The WebAssembly targets have no C++ standard library, so their tests leave it out too.
+[target.'cfg(not(any(target_env = "msvc", target_family = "wasm")))'.dev-dependencies]
 simdutf = "=0.7.0"
 
 [[bench]]
@@ -87,7 +94,8 @@ invalid_runtime_symbol_definitions = "deny"
 raw_borrows_via_references = "deny"
 suspicious_runtime_symbol_definitions = "deny"
 unsafe_op_in_unsafe_fn = "deny"
-unexpected_cfgs = "deny"
+# `kani` selects the proofs of `cargo kani`.
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(kani)"] }
 # Unsafe code is denied everywhere. Each necessary unsafe region is the
 # smallest private module or item, with a reasoned `#[expect(unsafe_code)]`.
 unsafe_code = "deny"
@@ -197,3 +205,12 @@ overflow-checks = true
 # members of this workspace keep the checks in the benchmarks too.
 [profile.bench.package."*"]
 overflow-checks = false
+
+# The tests run each backend on millions of inputs. Optimization inlines the intrinsics of the
+# kernels, so the tests run the code of a release build. The checks of overflow and the debug
+# assertions stay on.
+[profile.test.package.rscodec]
+opt-level = 3
+
+[profile.test.package.data-encoding]
+opt-level = 3

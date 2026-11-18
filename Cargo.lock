@@ -863,6 +863,7 @@ dependencies = [
  "faster-hex",
  "flexon",
  "jiter",
+ "rscodec",
  "ryu",
  "serde_json",
  "simd-json",

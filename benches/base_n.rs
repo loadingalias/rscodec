@@ -3,6 +3,10 @@
 //!
 //! Each row writes into a buffer that the row owns. Before timing, each encode must give the text
 //! of data-encoding, and each decode must give the original bytes.
+//!
+//! rscodec has the row `rscodec`, its functions with no backend argument, and one row for each
+//! backend that the host runs, for example `rscodec-avx2`. On aarch64, `rscodec-neon-dit-held`
+//! gives the cost of `PSTATE.DIT` (see `backend_rows`).
 
 mod common;
 
@@ -10,6 +14,7 @@ use base64::Engine as _;
 use base64ct::Encoding as _;
 use common::Group;
 use criterion::{Criterion, Throughput};
+use rscodec::{Backend, Isa, base64::Profile, hex};
 
 /// The raw sizes in bytes.
 const SIZES: [usize; 6] = [16, 32, 64, 256, 4096, 65536];
@@ -79,7 +84,10 @@ fn encode_row(group: &mut Group<'_>, case: &Case, codec: &str, mut encode: impl 
         &case.label,
         vec![0; case.text.len()],
         |output| encode(&case.raw, output),
-        |written, output| assert_eq!(&output[..written], case.text, "{codec} encodes {}", case.label),
+        |written, output| {
+            assert_eq!(&output[..written], case.text, "{codec} encodes {}", case.label);
+            report_place(codec, case, &case.raw, output);
+        },
     );
 }
 
@@ -100,8 +108,82 @@ fn decode_row(
         |written, output| {
             let written = written.expect("valid text decodes");
             assert_eq!(&output[..written], case.raw, "{codec} decodes {}", case.label);
+            report_place(codec, case, &case.text, output);
         },
     );
+}
+
+/// Prints the offsets of the input and the output of a row in their 4 KiB pages. A load or a store
+/// across a page or a cache line costs more, so the offsets can explain a slow row.
+#[expect(
+    clippy::print_stdout,
+    reason = "a benchmark binary reports the place of the buffers of each row on standard output, beside Criterion"
+)]
+fn report_place(codec: &str, case: &Case, input: &[u8], output: &[u8]) {
+    let page = |bytes: &[u8]| bytes.as_ptr().addr() % 4096;
+    println!(
+        "place {codec}/{} input={} output={}",
+        case.label,
+        page(input),
+        page(output)
+    );
+}
+
+/// A function that runs the registration of a row, which also runs the row.
+type Scope = fn(&mut dyn FnMut());
+
+/// The rows of rscodec for each backend that the host runs, for example `rscodec-avx2`, each with
+/// the scope that runs it. `same_kernel` names the backends that run the kernel of another
+/// backend, which have no row.
+///
+/// On aarch64 with DIT, the row `rscodec-neon-dit-held` runs the Neon backend while the benchmark
+/// holds `PSTATE.DIT` set. The codec then only reads DIT, so this row against `rscodec-neon` gives
+/// the cost of the two writes of DIT in each call.
+fn backend_rows(same_kernel: &[Isa]) -> Vec<(String, Backend, Scope)> {
+    let plain: Scope = |register| register();
+    #[cfg_attr(not(target_arch = "aarch64"), expect(unused_mut, reason = "only aarch64 adds a row"))]
+    let mut rows: Vec<_> = Isa::ALL
+        .iter()
+        .filter(|isa| !same_kernel.contains(isa))
+        .filter_map(|&isa| Backend::new(isa))
+        .map(|backend| (format!("rscodec-{:?}", backend.isa()).to_lowercase(), backend, plain))
+        .collect();
+    #[cfg(target_arch = "aarch64")]
+    if let Some(neon) = Backend::new(Isa::Neon)
+        && std::arch::is_aarch64_feature_detected!("dit")
+    {
+        rows.push(("rscodec-neon-dit-held".to_owned(), neon, dit::held));
+    }
+    rows
+}
+
+/// `PSTATE.DIT`, which has no intrinsic. The system register `S3_3_C4_C2_5` is DIT, and bit 24 is
+/// its value.
+#[cfg(target_arch = "aarch64")]
+#[expect(
+    unsafe_code,
+    reason = "the asm reads and writes only PSTATE.DIT, which changes no value, on a CPU that has DIT"
+)]
+mod dit {
+    /// Runs `register` with `PSTATE.DIT` set, then restores its earlier value.
+    pub(crate) fn held(register: &mut dyn FnMut()) {
+        let earlier: u64;
+        // SAFETY: `backend_rows` checked that the CPU has DIT, so the instructions are defined.
+        unsafe {
+            core::arch::asm!(
+                "mrs {earlier}, S3_3_C4_C2_5",
+                "msr S3_3_C4_C2_5, {on}",
+                earlier = out(reg) earlier,
+                on = in(reg) 1_u64 << 24,
+                options(nostack, preserves_flags),
+            );
+        }
+        register();
+        // SAFETY: as above.
+        unsafe {
+            core::arch::asm!("msr S3_3_C4_C2_5, {earlier}", earlier = in(reg) earlier, options(nostack, preserves_flags))
+        };
+    }
 }
 
 /// The engines of `base64`: `GeneralPurpose`, the row `base64-engine-gp`, and `Simd`, the row
@@ -123,6 +205,17 @@ fn base64_encode(criterion: &mut Criterion) {
     for case in &base64_cases() {
         group.throughput(Throughput::Bytes(case.raw.len().try_into().expect("a length fits u64")));
         let g = &mut group;
+        let profile = if case.url { Profile::Url } else { Profile::Standard };
+        encode_row(g, case, "rscodec", |raw, out| {
+            profile.encode(raw, out).expect("room").len()
+        });
+        for (row, backend, scope) in backend_rows(&[]) {
+            scope(&mut || {
+                encode_row(g, case, &row, |raw, out| {
+                    profile.encode_with(backend, raw, out).expect("room").len()
+                });
+            });
+        }
         let turbo = if case.url {
             base64_turbo::URL_SAFE_NO_PAD
         } else {
@@ -184,7 +277,7 @@ fn base64_encode(criterion: &mut Criterion) {
                 base64ct::Base64::encode(raw, out).expect("room").len()
             });
         }
-        #[cfg(not(target_env = "msvc"))]
+        #[cfg(not(any(target_env = "msvc", target_family = "wasm")))]
         {
             let options = simdutf_base64::options(case.url);
             encode_row(g, case, "simdutf", |raw, out| simdutf_base64::encode(raw, out, options));
@@ -199,6 +292,17 @@ fn base64_decode(criterion: &mut Criterion) {
         let g = &mut group;
         // Each decoder may need room for the bytes of a full last quantum.
         let room = case.raw.len() + 3;
+        let profile = if case.url { Profile::Url } else { Profile::Standard };
+        decode_row(g, case, "rscodec", room, |text, out| {
+            profile.decode(text, out).ok().map(|bytes| bytes.len())
+        });
+        for (row, backend, scope) in backend_rows(&[]) {
+            scope(&mut || {
+                decode_row(g, case, &row, room, |text, out| {
+                    profile.decode_with(backend, text, out).ok().map(|bytes| bytes.len())
+                });
+            });
+        }
         let turbo = if case.url {
             base64_turbo::URL_SAFE_NO_PAD
         } else {
@@ -262,7 +366,7 @@ fn base64_decode(criterion: &mut Criterion) {
                 base64ct::Base64::decode(text, out).ok().map(<[u8]>::len)
             });
         }
-        #[cfg(not(target_env = "msvc"))]
+        #[cfg(not(any(target_env = "msvc", target_family = "wasm")))]
         {
             let options = simdutf_base64::options(case.url);
             decode_row(g, case, "simdutf", room, |text, out| {
@@ -272,11 +376,27 @@ fn base64_decode(criterion: &mut Criterion) {
     }
 }
 
+/// The hex kernels of AVX-512 VBMI are those of AVX-512BW.
+#[cfg(target_arch = "x86_64")]
+const HEX_SAME_KERNEL: &[Isa] = &[Isa::Avx512Vbmi];
+#[cfg(not(target_arch = "x86_64"))]
+const HEX_SAME_KERNEL: &[Isa] = &[];
+
 fn hex_encode(criterion: &mut Criterion) {
     let mut group = Group::new(criterion, "hex-encode");
     for case in &hex_cases() {
         group.throughput(Throughput::Bytes(case.raw.len().try_into().expect("a length fits u64")));
         let g = &mut group;
+        encode_row(g, case, "rscodec", |raw, out| {
+            hex::encode(raw, out).expect("room").len()
+        });
+        for (row, backend, scope) in backend_rows(HEX_SAME_KERNEL) {
+            scope(&mut || {
+                encode_row(g, case, &row, |raw, out| {
+                    hex::encode_with(backend, raw, out).expect("room").len()
+                });
+            });
+        }
         encode_row(g, case, "const-hex", |raw, out| {
             const_hex::encode_to_slice(raw, out).expect("room");
             out.len()
@@ -296,6 +416,16 @@ fn hex_decode(criterion: &mut Criterion) {
         group.throughput(Throughput::Bytes(case.raw.len().try_into().expect("a length fits u64")));
         let g = &mut group;
         let room = case.raw.len();
+        decode_row(g, case, "rscodec", room, |text, out| {
+            hex::decode(text, out).ok().map(|bytes| bytes.len())
+        });
+        for (row, backend, scope) in backend_rows(HEX_SAME_KERNEL) {
+            scope(&mut || {
+                decode_row(g, case, &row, room, |text, out| {
+                    hex::decode_with(backend, text, out).ok().map(|bytes| bytes.len())
+                });
+            });
+        }
         decode_row(g, case, "const-hex", room, |text, out| {
             const_hex::decode_to_slice(text, out).ok().map(|()| out.len())
         });
@@ -309,7 +439,7 @@ fn hex_decode(criterion: &mut Criterion) {
 }
 
 /// The base64 functions of simdutf, which take raw pointers, behind slice bounds.
-#[cfg(not(target_env = "msvc"))]
+#[cfg(not(any(target_env = "msvc", target_family = "wasm")))]
 #[expect(
     unsafe_code,
     reason = "simdutf has only raw-pointer functions, and each call passes the bounds of live slices"
