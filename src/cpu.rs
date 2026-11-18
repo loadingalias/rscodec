@@ -3,7 +3,8 @@
 //! It has the shape of `rscrypto::platform` (selected on 2026-11-18). [`Caps`] is a set of single
 //! CPU features. [`caps_static`] is the set that `-C target-feature` turns on, as a constant. With
 //! `std`, [`caps`] detects the CPU once for each process and includes the static set. Without
-//! `std`, [`caps`] is [`caps_static`].
+//! `std`, [`caps`] is [`caps_static`]. Each set holds a feature only with each feature that it
+//! implies, because a `#[target_feature]` function can run each implied feature.
 //!
 //! Each codec owns the table of its kernels. Each kernel names the features that it needs and its
 //! [`Timing`] class. A codec chooses its kernel for each class from these facts: at compile time
@@ -15,18 +16,18 @@ use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 /// A set of CPU features. Each constant of `x86`, `aarch64`, and `wasm32` holds one feature. A
 /// build has the features of one architecture, so each architecture numbers its features from bit 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Caps(u16);
+pub(crate) struct Caps(u32);
 
 impl Caps {
     /// No feature.
     pub(crate) const NONE: Self = Self(0);
 
     /// Each feature: the set of a CPU that has all of them.
-    pub(crate) const ALL: Self = Self(u16::MAX >> 1);
+    pub(crate) const ALL: Self = Self(u32::MAX >> 1);
 
-    /// The feature of bit `bit`. Bit 15 is not a feature, so that [`caps`] can mark its cache.
+    /// The feature of bit `bit`. Bit 31 is not a feature, so that [`caps`] can mark its cache.
     const fn bit(bit: u8) -> Self {
-        assert!(bit < 15);
+        assert!(bit < 31);
         Self(1 << bit)
     }
 
@@ -40,6 +41,13 @@ impl Caps {
     #[inline(always)]
     pub(crate) const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
+    }
+
+    /// The features of the set that are not in `other`. Only the detection removes features.
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[inline(always)]
+    pub(crate) const fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 }
 
@@ -68,6 +76,18 @@ pub(crate) mod x86 {
     pub(crate) const AVX512VBMI: Caps = Caps::bit(8);
     /// AVX-512 VBMI2: `vpcompressb` and the double shifts.
     pub(crate) const AVX512VBMI2: Caps = Caps::bit(9);
+    /// SSE3, which SSSE3 implies.
+    pub(crate) const SSE3: Caps = Caps::bit(10);
+    /// SSE4.1, which SSE4.2 implies.
+    pub(crate) const SSE41: Caps = Caps::bit(11);
+    /// SSE4.2, which AVX implies.
+    pub(crate) const SSE42: Caps = Caps::bit(12);
+    /// AVX: the floating-point operations on 32-byte vectors, which AVX2 implies.
+    pub(crate) const AVX: Caps = Caps::bit(13);
+    /// FMA: the fused multiply-add, which AVX-512F implies.
+    pub(crate) const FMA: Caps = Caps::bit(14);
+    /// F16C: the conversions of half-precision floats, which AVX-512F implies.
+    pub(crate) const F16C: Caps = Caps::bit(15);
 }
 
 /// The features of aarch64.
@@ -129,6 +149,12 @@ features!(is_x86_feature_detected:
     "avx512vl" => x86::AVX512VL,
     "avx512vbmi" => x86::AVX512VBMI,
     "avx512vbmi2" => x86::AVX512VBMI2,
+    "sse3" => x86::SSE3,
+    "sse4.1" => x86::SSE41,
+    "sse4.2" => x86::SSE42,
+    "avx" => x86::AVX,
+    "fma" => x86::FMA,
+    "f16c" => x86::F16C,
 );
 
 #[cfg(target_arch = "aarch64")]
@@ -161,21 +187,66 @@ pub(crate) const DETECTS: bool = cfg!(all(
 pub(crate) fn caps() -> Caps {
     cfg_select! {
         all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")) => {
-            use core::sync::atomic::AtomicU16;
-            /// The features with bit 15 set, or zero before the first call. Each call that stores
+            use core::sync::atomic::AtomicU32;
+            /// The features with bit 31 set, or zero before the first call. Each call that stores
             /// it stores the same value.
-            static DETECTED: AtomicU16 = AtomicU16::new(0);
-            const KNOWN: u16 = 1 << 15;
+            static DETECTED: AtomicU32 = AtomicU32::new(0);
+            const KNOWN: u32 = 1 << 31;
             let detected = DETECTED.load(Relaxed);
             if detected != 0 {
                 return Caps(detected & !KNOWN);
             }
-            let caps = caps_static().union(runnable(detect()));
+            let caps = close_implications(caps_static().union(runnable(detect())));
             DETECTED.store(caps.0 | KNOWN, Relaxed);
             caps
         }
         _ => caps_static(),
     }
+}
+
+/// Removes each feature whose implied features are not all in `caps`: the rule of
+/// `rscrypto::platform`. A `#[target_feature(enable = "...")]` function can run the instructions of
+/// each feature that its features imply, so detection reports a feature only with all of them.
+/// [`caps_static`] needs no closure, because the compiler closes `cfg(target_feature)`.
+///
+/// Each entry of `IMPLIED` pairs a feature with the features that rustc turns on with it:
+/// `rustc --print cfg --target <target> -C target-feature=+<feature>` on the pinned toolchain
+/// (1.101.0-nightly, 3e92e1a2d 2026-11-01), less the features of the target without it. The sets
+/// are transitive, so one comparison with `caps` is enough. On x86_64, BMI1, BMI2, PCLMULQDQ, and
+/// SSE3 imply no other feature. On aarch64, Neon and DIT imply no other feature, and AES implies
+/// Neon (the target `aarch64-unknown-none-softfloat` shows it).
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub(crate) fn close_implications(caps: Caps) -> Caps {
+    #[cfg(target_arch = "x86_64")]
+    const IMPLIED: &[(Caps, Caps)] = {
+        use x86::{
+            AVX, AVX2, AVX512BW, AVX512F, AVX512VBMI, AVX512VBMI2, AVX512VL, F16C, FMA, SSE3, SSE41, SSE42, SSSE3,
+        };
+        const THROUGH_SSE42: Caps = SSE3.union(SSSE3).union(SSE41).union(SSE42);
+        const THROUGH_AVX: Caps = THROUGH_SSE42.union(AVX);
+        const THROUGH_AVX512F: Caps = THROUGH_AVX.union(AVX2).union(FMA).union(F16C).union(AVX512F);
+        const THROUGH_AVX512BW: Caps = THROUGH_AVX512F.union(AVX512BW);
+        &[
+            (SSSE3, SSE3),
+            (SSE41, SSE3.union(SSSE3)),
+            (SSE42, SSE3.union(SSSE3).union(SSE41)),
+            (AVX, THROUGH_SSE42),
+            (AVX2, THROUGH_AVX),
+            (FMA, THROUGH_AVX),
+            (F16C, THROUGH_AVX),
+            (AVX512F, THROUGH_AVX.union(AVX2).union(FMA).union(F16C)),
+            (AVX512BW, THROUGH_AVX512F),
+            (AVX512VL, THROUGH_AVX512F),
+            (AVX512VBMI, THROUGH_AVX512BW),
+            (AVX512VBMI2, THROUGH_AVX512BW),
+        ]
+    };
+    #[cfg(target_arch = "aarch64")]
+    const IMPLIED: &[(Caps, Caps)] = &[(aarch64::AES, aarch64::NEON)];
+    IMPLIED
+        .iter()
+        .filter(|&&(_, implied)| !caps.has(implied))
+        .fold(caps, |closed, &(feature, _)| closed.difference(feature))
 }
 
 /// Whether the CPU has each feature of `required`. The compiler folds the check of a feature of
@@ -334,5 +405,61 @@ mod dit {
             unsafe { asm!("msr S3_3_C4_C2_5, {earlier}", earlier = in(reg) earlier, options(nostack, preserves_flags)) }
         });
         call()
+    }
+}
+
+#[cfg(all(test, feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod tests {
+    use super::{Caps, close_implications};
+
+    /// A feature without one of the features that it implies is not reported, because a
+    /// `#[target_feature]` function of the feature can run the implied feature. The implications
+    /// are those of rustc on the pinned toolchain.
+    #[test]
+    fn a_feature_without_a_feature_that_it_implies_is_not_reported() {
+        let without = |missing: Caps| close_implications(Caps::ALL.difference(missing));
+        assert_eq!(without(Caps::NONE), Caps::ALL);
+        #[cfg(target_arch = "x86_64")]
+        {
+            use super::x86::{
+                AVX, AVX2, AVX512BW, AVX512F, AVX512VBMI, AVX512VBMI2, AVX512VL, BMI1, BMI2, F16C, FMA, PCLMULQDQ,
+                SSE3, SSE41, SSE42, SSSE3,
+            };
+            // AVX-512F implies AVX2, FMA, and F16C, and each other AVX-512 feature implies AVX-512F.
+            for missing in [AVX2, FMA, F16C] {
+                let caps = without(missing);
+                for avx512 in [AVX512F, AVX512BW, AVX512VL, AVX512VBMI, AVX512VBMI2] {
+                    assert!(!caps.has(avx512), "{avx512:?} without {missing:?}");
+                }
+            }
+            assert!(!without(AVX512BW).has(AVX512VBMI2));
+            assert!(without(AVX512VBMI).has(AVX512VBMI2));
+            // Each vector feature implies SSE3, and one pass removes each of them.
+            let caps = without(SSE3);
+            for vector in [
+                SSSE3,
+                SSE41,
+                SSE42,
+                AVX,
+                AVX2,
+                FMA,
+                F16C,
+                AVX512F,
+                AVX512BW,
+                AVX512VL,
+                AVX512VBMI,
+                AVX512VBMI2,
+            ] {
+                assert!(!caps.has(vector), "{vector:?} without SSE3");
+            }
+            assert!(caps.has(BMI1.union(BMI2).union(PCLMULQDQ)));
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            use super::aarch64::{AES, DIT, NEON};
+            assert!(!without(NEON).has(AES));
+            assert!(without(NEON).has(DIT));
+            assert!(without(DIT).has(AES));
+        }
     }
 }

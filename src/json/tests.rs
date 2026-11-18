@@ -325,38 +325,49 @@ fn each_byte_in_each_lane_has_its_class() {
 }
 
 /// The selection gives a kernel only to a CPU that has each feature of its `#[target_feature]`
-/// functions. A kernel on a CPU without one of its features is undefined behavior. WebAssembly
-/// selects at compile time, so it has no case.
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+/// functions, with each feature that they imply. A kernel on a CPU without one of them is
+/// undefined behavior. WebAssembly selects at compile time, so it has no case.
+#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
 fn the_selection_gives_a_kernel_only_with_each_of_its_features() {
-    use crate::cpu::Caps;
-    let fastest = |features: &[Caps]| {
-        Kernel::ALL[Kernel::fastest(features.iter().fold(Caps::NONE, |all, &feature| all.union(feature)))]
-    };
-    let check = |features: &[Caps], kernel: Kernel, without: &[Kernel]| {
-        assert_eq!(fastest(features), kernel);
-        for (missing, &expected) in without.iter().enumerate() {
-            let mut fewer = features.to_vec();
-            fewer.remove(missing);
-            assert_eq!(fastest(&fewer), expected, "{kernel:?} without its feature {missing}");
-        }
-    };
+    use crate::cpu::{Caps, close_implications};
+    // The kernel of a CPU that has each feature but `missing`, after the detection removes each
+    // feature whose implied features are not all present.
+    let without = |missing: Caps| Kernel::ALL[Kernel::fastest(close_implications(Caps::ALL.difference(missing)))];
+    assert_eq!(without(Caps::NONE), Kernel::ALL[0]);
     #[cfg(target_arch = "x86_64")]
     {
-        use crate::cpu::x86::{AVX2, AVX512BW, AVX512F, AVX512VBMI2, AVX512VL, BMI1, BMI2, PCLMULQDQ};
-        let (avx2, swar, avx512) = (Kernel::Avx2, Kernel::Swar, Kernel::Avx512);
-        check(&[AVX2, PCLMULQDQ, BMI1, BMI2], avx2, &[swar; 4]);
-        check(
-            &[AVX512F, AVX512BW, AVX512VL, AVX512VBMI2, AVX2, PCLMULQDQ, BMI1, BMI2],
-            avx512,
-            &[avx2, avx2, avx2, avx2, swar, swar, swar, swar],
-        );
+        use crate::cpu::x86::{
+            AVX, AVX2, AVX512BW, AVX512F, AVX512VBMI, AVX512VBMI2, AVX512VL, BMI1, BMI2, F16C, FMA, PCLMULQDQ, SSE3,
+            SSE41, SSE42, SSSE3,
+        };
+        let cases = [
+            (AVX512VBMI, Kernel::Avx512),
+            (AVX512F, Kernel::Avx2),
+            (AVX512BW, Kernel::Avx2),
+            (AVX512VL, Kernel::Avx2),
+            (AVX512VBMI2, Kernel::Avx2),
+            (FMA, Kernel::Avx2),
+            (F16C, Kernel::Avx2),
+            (AVX2, Kernel::Swar),
+            (AVX, Kernel::Swar),
+            (SSE42, Kernel::Swar),
+            (SSE41, Kernel::Swar),
+            (SSSE3, Kernel::Swar),
+            (SSE3, Kernel::Swar),
+            (PCLMULQDQ, Kernel::Swar),
+            (BMI1, Kernel::Swar),
+            (BMI2, Kernel::Swar),
+        ];
+        for (missing, kernel) in cases {
+            assert_eq!(without(missing), kernel, "without {missing:?}");
+        }
     }
     #[cfg(target_arch = "aarch64")]
     {
-        use crate::cpu::aarch64::{AES, NEON};
-        check(&[NEON, AES], Kernel::NeonPmull, &[Kernel::Swar, Kernel::Neon]);
+        use crate::cpu::aarch64::{AES, DIT, NEON};
+        for (missing, kernel) in [(DIT, Kernel::NeonPmull), (AES, Kernel::Neon), (NEON, Kernel::Swar)] {
+            assert_eq!(without(missing), kernel, "without {missing:?}");
+        }
     }
-    assert_eq!(fastest(&[]), Kernel::Swar);
 }

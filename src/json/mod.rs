@@ -75,20 +75,17 @@ impl Kernel {
         Self::Swar,
     ];
 
-    /// The CPU features that the kernel needs: the features of its `#[target_feature]` functions,
-    /// also each feature that they imply and that [`Caps`] names. AVX-512BW implies AVX-512F, and
-    /// AVX-512F implies AVX2, so the compiler can use AVX2 in the AVX-512 kernel.
+    /// The CPU features that the kernel needs: the features of its `#[target_feature]` functions.
+    /// The detection reports a feature only with each feature that it implies.
     const fn needs(self) -> Caps {
         #[cfg(target_arch = "x86_64")]
-        use crate::cpu::x86::{AVX2, AVX512BW, AVX512F, AVX512VBMI2, AVX512VL, BMI1, BMI2, PCLMULQDQ};
+        use crate::cpu::x86::{AVX2, AVX512BW, AVX512VBMI2, AVX512VL, BMI1, BMI2, PCLMULQDQ};
         match self {
             Self::Swar => Caps::NONE,
             #[cfg(target_arch = "x86_64")]
-            Self::Avx512 => AVX512F
-                .union(AVX512BW)
+            Self::Avx512 => AVX512BW
                 .union(AVX512VL)
                 .union(AVX512VBMI2)
-                .union(AVX2)
                 .union(PCLMULQDQ)
                 .union(BMI1)
                 .union(BMI2),
