@@ -113,6 +113,20 @@ jobs:
         shell: bash
         run: cargo xtask check
 
+      # The tests of the JSON kernels read the corpora that benches/data/README.md
+      # fetches.
+      - name: Fetch the corpora
+        shell: bash
+        working-directory: benches/data
+        run: |
+          set -euo pipefail
+          mkdir -p fetched
+          for name in twitter citm_catalog canada; do
+            curl -fsSL -o "fetched/$name.json" \
+              "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/$name.json"
+          done
+          sha256sum -c corpora.sha256
+
       - name: cargo xtask test
         shell: bash
         run: cargo xtask test

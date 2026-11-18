@@ -6,5 +6,6 @@ nextest-run = ["nextest", "run"]
 
 # The tests for wasm32-wasip1 run in Wasmtime, which `machine` pins. A test
 # that panics stops its process, and Nextest reports that test as failed.
+# `--dir .` lets the tests read the corpora in benches/data.
 [target.wasm32-wasip1]
-runner = "wasmtime"
+runner = ["wasmtime", "--dir", "."]

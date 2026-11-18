@@ -22,7 +22,7 @@ value is a real key or a real account.
 ## Fetched files
 
 These standard corpora state no license, so the repository does not hold them. Fetch them into
-`fetched/`, which Git ignores, before a benchmark run:
+`fetched/`, which Git ignores, before the tests or a benchmark run:
 
 ```sh
 cd benches/data

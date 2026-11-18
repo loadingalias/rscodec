@@ -30,7 +30,8 @@ fix, check, and test select the whole workspace, unless their arguments select
 packages with -p or --package. With the whole workspace, fix and check also
 lint rscodec with no default feature: its library with each codec on
 wasm32v1-none, a target with no `std`, and all of its targets, the tests too,
-on the host. rustdoc documents each codec.
+on the host. They also lint its library with each codec alone, on
+wasm32v1-none and with `std` on the host. rustdoc documents each codec.
 ";
 
 /// A target with no `std`, which rust-toolchain.toml names. A build for it
@@ -42,7 +43,7 @@ const NO_STD_PACKAGE: &str = "rscodec";
 
 /// The leaf features of the codecs of `NO_STD_PACKAGE`. The lint without `std` selects each, and
 /// the tests and the benchmarks select each through the dev-dependency of the package on itself.
-const LEAVES: &str = "base64,hex";
+const LEAVES: &str = "base64,hex,json";
 
 /// The selection of the whole workspace.
 const WORKSPACE: &[&str] = &["--workspace"];
@@ -161,10 +162,12 @@ impl Repo {
 
     /// Lints `NO_STD_PACKAGE` with no default feature: its library on
     /// `NO_STD_TARGET`, and all of its targets on the host, so that a test that
-    /// uses `std` outside the `std` feature also fails. It runs only when
-    /// `scope` is the whole workspace, and it says when it does not run. It
-    /// takes no argument of the caller: a feature or target argument applies to
-    /// the other steps.
+    /// uses `std` outside the `std` feature also fails. Then it lints the
+    /// library with each leaf alone, on `NO_STD_TARGET` and with `std` on the
+    /// host, so that a build that selects one codec also builds. It runs only
+    /// when `scope` is the whole workspace, and it says when it does not run.
+    /// It takes no argument of the caller: a feature or target argument applies
+    /// to the other steps.
     fn clippy_no_std(&self, scope: &[&str]) -> Result<(), Failure> {
         if !scope.contains(&"--workspace") {
             eprintln!("── clippy without std\n   not run: the arguments select packages; run with no -p or --package");
@@ -197,7 +200,28 @@ impl Repo {
                 "--package",
                 NO_STD_PACKAGE,
             ]),
-        )
+        )?;
+        for leaf in LEAVES.split(',') {
+            let with_std = format!("std,{leaf}");
+            for (features, target) in [(leaf, &["--target", NO_STD_TARGET][..]), (&with_std, &[])] {
+                step(
+                    &format!("clippy {features} alone"),
+                    self.cargo(&[
+                        "clippy",
+                        "--locked",
+                        "--quiet",
+                        "--lib",
+                        "--no-default-features",
+                        "--features",
+                        features,
+                        "--package",
+                        NO_STD_PACKAGE,
+                    ])
+                    .args(target),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Checks formatting, lints, and rustdoc. It changes no file.

@@ -20,6 +20,8 @@ std = []
 base64 = []
 # Lowercase hex (RFC 4648 section 8).
 hex = []
+# JSON (RFC 8259). In development: the kernels and the block cursor of the reader.
+json = []
 
 [lints]
 workspace = true
@@ -28,7 +30,7 @@ workspace = true
 # least 7 days old, in its fastest configuration.
 [dev-dependencies]
 # The tests and the benchmarks use each leaf. Only the builds of these targets enable them.
-rscodec = { path = ".", default-features = false, features = ["base64", "hex"] }
+rscodec = { path = ".", default-features = false, features = ["base64", "hex", "json"] }
 criterion = { version = "=0.8.2", default-features = false }
 # base-N
 base16ct = "=1.0.0"

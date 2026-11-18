@@ -18,7 +18,7 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(any(feature = "base64", feature = "hex"))]
+#[cfg(any(feature = "base64", feature = "hex", feature = "json"))]
 mod cpu;
 #[cfg(any(feature = "base64", feature = "hex"))]
 mod ct;
@@ -36,3 +36,5 @@ mod simd;
 pub mod base64;
 #[cfg(feature = "hex")]
 pub mod hex;
+#[cfg(feature = "json")]
+mod json;

@@ -234,7 +234,8 @@ const fn runnable(detected: Caps) -> Caps {
 }
 
 /// The timing class of a kernel, and of a function of a codec (selected on 2026-11-18,
-/// [CODEC Base-N]).
+/// [CODEC Base-N]). Only the base-N codecs have a secret class.
+#[cfg(any(feature = "base64", feature = "hex"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Timing {
     /// For public data, for example a digest or a signature. A function of the class runs the
@@ -248,6 +249,7 @@ pub(crate) enum Timing {
     Secret,
 }
 
+#[cfg(any(feature = "base64", feature = "hex"))]
 impl Timing {
     /// Whether a function of this class can run a kernel of class `kernel`.
     #[inline(always)]
@@ -285,14 +287,14 @@ impl Kept {
 /// Runs `call` with data independent timing (DIT) on, if the CPU has it ([CODEC Base-N]). Arm
 /// guarantees the timing of its DIT instructions only while `PSTATE.DIT` is 1. Only the secret
 /// functions of the codecs run in it.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", any(feature = "base64", feature = "hex")))]
 #[inline]
 pub(crate) fn data_independent_timing<T>(call: impl FnOnce() -> T) -> T {
     if has(aarch64::DIT) { dit::run(call) } else { call() }
 }
 
 /// Runs `call`. Only Arm has a timing mode that a program can turn on.
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(all(not(target_arch = "aarch64"), any(feature = "base64", feature = "hex")))]
 #[inline(always)]
 pub(crate) fn data_independent_timing<T>(call: impl FnOnce() -> T) -> T {
     call()
@@ -300,7 +302,7 @@ pub(crate) fn data_independent_timing<T>(call: impl FnOnce() -> T) -> T {
 
 /// `PSTATE.DIT`, which has no intrinsic. The system register `S3_3_C4_C2_5` is DIT, and bit 24 is
 /// its value.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", any(feature = "base64", feature = "hex")))]
 #[expect(
     unsafe_code,
     reason = "the asm reads and writes only PSTATE.DIT, which changes no value, and only on a CPU that has DIT"
