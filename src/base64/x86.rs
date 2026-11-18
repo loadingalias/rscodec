@@ -14,9 +14,12 @@
 use core::arch::x86_64::*;
 
 use super::{Profile, Tables, bytes_len, symbols_len};
-use crate::simd::{
-    blocks, whole_blocks,
-    x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
+use crate::{
+    ct::Class,
+    simd::{
+        blocks, whole_blocks,
+        x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
+    },
 };
 
 /// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.
@@ -42,16 +45,16 @@ pub(super) mod ssse3 {
     use core::arch::x86_64::*;
 
     use super::{
-        DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, HIGH_SHIFTS, LOW_SEXTETS, LOW_SHIFTS, PAIRS, Profile, Tables, WORDS,
-        blocks, bytes_len, load16, store16, symbols_len,
+        Class, DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, HIGH_SHIFTS, LOW_SEXTETS, LOW_SHIFTS, PAIRS, Profile, Tables,
+        WORDS, blocks, bytes_len, load16, store16, symbols_len,
     };
 
     #[target_feature(enable = "ssse3")]
-    pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+    pub(in super::super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
         let tables = &Tables::of(profile).nibbles;
         let shift = load16::<0, _>(&tables.shift);
         let order = load16::<0, _>(&ENCODE_ORDER);
-        blocks::<16, 16>(bytes, out, 12, 0, symbols_len, |src, dst| {
+        blocks::<16, 16>(class, bytes, out, 12, 0, symbols_len, |src, dst| {
             let input = _mm_shuffle_epi8(load16::<0, _>(src), order);
             let high = _mm_mulhi_epu16(
                 _mm_and_si128(input, _mm_set1_epi32(HIGH_SEXTETS)),
@@ -72,7 +75,7 @@ pub(super) mod ssse3 {
     }
 
     #[target_feature(enable = "ssse3")]
-    pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+    pub(in super::super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let tables = &Tables::of(profile).nibbles;
         let (lo_classes, hi_classes) = (load16::<0, _>(&tables.lo), load16::<0, _>(&tables.hi));
         let roll = load16::<0, _>(&tables.roll);
@@ -81,7 +84,7 @@ pub(super) mod ssse3 {
         let order = load16::<0, _>(&DECODE_ORDER);
         let nibble = _mm_set1_epi8(0x0f);
         let mut invalid = _mm_setzero_si128();
-        blocks::<16, 16>(text, out, 16, b'A', bytes_len, |src, dst| {
+        blocks::<16, 16>(class, text, out, 16, b'A', bytes_len, |src, dst| {
             let src = load16::<0, _>(src);
             let hi = _mm_and_si128(_mm_srli_epi32(src, 4), nibble);
             let lo = _mm_and_si128(src, nibble);
@@ -100,8 +103,8 @@ pub(super) mod avx2 {
     use core::arch::x86_64::*;
 
     use super::{
-        DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, HIGH_SHIFTS, LOW_SEXTETS, LOW_SHIFTS, PAIRS, Profile, Tables, WORDS,
-        bytes_len, load16, load32, ssse3, store32, symbols_len, whole_blocks,
+        Class, DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, HIGH_SHIFTS, LOW_SEXTETS, LOW_SHIFTS, PAIRS, Profile, Tables,
+        WORDS, bytes_len, load16, load32, ssse3, store32, symbols_len, whole_blocks,
     };
 
     /// A table of 16 bytes in each 128-bit lane.
@@ -112,7 +115,7 @@ pub(super) mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+    pub(in super::super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
         let shift = each_lane(&Tables::of(profile).nibbles.shift);
         let order = each_lane(&ENCODE_ORDER);
         // The 12 bytes of each 128-bit lane: the 32-bit words 0 to 2 and 3 to 5.
@@ -135,11 +138,11 @@ pub(super) mod avx2 {
             store32::<0, _>(dst, _mm256_add_epi8(sextets, _mm256_shuffle_epi8(shift, class)));
         });
         // The rest, in vectors of 16 bytes.
-        ssse3::encode(profile, &bytes[read..], &mut out[written..]);
+        ssse3::encode(class, profile, &bytes[read..], &mut out[written..]);
     }
 
     #[target_feature(enable = "avx2")]
-    pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+    pub(in super::super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let tables = &Tables::of(profile).nibbles;
         let (lo_classes, hi_classes) = (each_lane(&tables.lo), each_lane(&tables.hi));
         let roll = each_lane(&tables.roll);
@@ -168,7 +171,7 @@ pub(super) mod avx2 {
             );
         });
         // The rest, in vectors of 16 bytes.
-        let rest_valid = ssse3::decode(profile, &text[read..], &mut out[written..]);
+        let rest_valid = ssse3::decode(class, profile, &text[read..], &mut out[written..]);
         (_mm256_movemask_epi8(_mm256_cmpeq_epi8(invalid, _mm256_setzero_si256())) == -1) & rest_valid
     }
 }

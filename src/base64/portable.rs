@@ -2,7 +2,7 @@
 //! table on the data.
 
 use super::Profile;
-use crate::ct::{in_range, low, past};
+use crate::ct::{Class, in_range, low, past};
 
 /// The two characters of a profile after `9`, and the steps of the encoder to them.
 #[derive(Clone, Copy)]
@@ -101,39 +101,44 @@ pub(super) const fn symbol(profile: Profile, value: i16) -> u8 {
 }
 
 /// Encodes `bytes` into the characters `out`, with no padding. `out` has the length of the text.
-pub(super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
     let alphabet = Alphabet::of(profile);
     let (blocks, rest) = bytes.as_chunks::<3>();
     let (chunks, tail) = out.as_chunks_mut::<4>();
-    for (&block, chunk) in blocks.iter().zip(chunks) {
-        *chunk = alphabet.encode_block(block);
+    for (block, chunk) in blocks.iter().zip(chunks) {
+        *chunk = alphabet.encode_block(*block);
     }
     if !rest.is_empty() {
         let mut block = [0; 3];
         block[..rest.len()].copy_from_slice(rest);
-        tail.copy_from_slice(&alphabet.encode_block(block)[..tail.len()]);
+        let mut chars = alphabet.encode_block(block);
+        tail.copy_from_slice(&chars[..tail.len()]);
+        class.clear(&mut block);
+        class.clear(&mut chars);
     }
 }
 
 /// Decodes the characters `text`, which have no padding, into `out`, which has the length of the
 /// bytes. Gives whether each character is in the alphabet. It does not check the trailing bits.
-pub(super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
     let alphabet = Alphabet::of(profile);
     let (blocks, rest) = text.as_chunks::<4>();
     let (chunks, tail) = out.as_chunks_mut::<3>();
     let mut values = 0;
-    for (&block, chunk) in blocks.iter().zip(chunks) {
+    for (block, chunk) in blocks.iter().zip(chunks) {
         let block_values;
-        (*chunk, block_values) = alphabet.decode_block(block);
+        (*chunk, block_values) = alphabet.decode_block(*block);
         values |= block_values;
     }
     if !rest.is_empty() {
         // 'A', which is zero, in place of the characters that are not there.
         let mut block = [b'A'; 4];
         block[..rest.len()].copy_from_slice(rest);
-        let (bytes, block_values) = alphabet.decode_block(block);
+        let (mut bytes, block_values) = alphabet.decode_block(block);
         values |= block_values;
         tail.copy_from_slice(&bytes[..tail.len()]);
+        class.clear(&mut block);
+        class.clear(&mut bytes);
     }
     values >= 0
 }

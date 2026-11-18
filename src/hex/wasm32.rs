@@ -4,9 +4,12 @@
 
 use core::arch::wasm32::*;
 
-use crate::simd::{
-    blocks,
-    wasm32::{load16, store16},
+use crate::{
+    ct::Class,
+    simd::{
+        blocks,
+        wasm32::{load16, store16},
+    },
 };
 
 /// The digit of each nibble.
@@ -31,9 +34,10 @@ fn join(nibbles: v128) -> v128 {
     v128_or(i16x8_shl(nibbles, 4), u16x8_shr(nibbles, 8))
 }
 
-pub(super) fn encode(bytes: &[u8], out: &mut [u8]) {
+pub(super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
     let digits = load16::<0, _>(&DIGITS);
     blocks::<16, 32>(
+        class,
         bytes,
         out,
         16,
@@ -55,9 +59,10 @@ pub(super) fn encode(bytes: &[u8], out: &mut [u8]) {
     );
 }
 
-pub(super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
+pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
     let mut valid = u8x16_splat(0xff);
     blocks::<32, 16>(
+        class,
         text,
         out,
         32,

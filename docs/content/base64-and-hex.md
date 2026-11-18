@@ -22,9 +22,42 @@ rscodec = { version = "0.1.0-alpha.2", features = ["base64", "hex"] }
 The first release with these codecs, `0.1.0-alpha.2`, is not on crates.io yet.
 
 The `std` feature is on by default. Without it (`default-features = false`), the crate needs only
-`core`, and it selects the SIMD backend at compile time from `-C target-feature`.
+`core`, and it selects each kernel at compile time from `-C target-feature`.
+
+## Select the timing class
+
+Each operation has a function for public data and a function for secret data:
+
+| Data | Examples | base64 | hex |
+| --- | --- | --- | --- |
+| Public | A digest, a signature, a public key, a challenge | `Profile::encode`, `Profile::decode` | `hex::encode`, `hex::decode` |
+| Secret | A private key, a bearer token, a session secret | `Profile::encode_secret`, `Profile::decode_secret` | `hex::encode_secret`, `hex::decode_secret` |
+
+Both classes give the same result and the same error for each input. They differ in four ways:
+
+- **Kernel.** The public functions run the fastest kernel of the CPU. The secret functions run only
+  the kernels whose instructions Intel lists with data operand independent timing (DOIT) and Arm
+  lists with data independent timing (DIT). On x86_64 with AVX-512 VBMI, public base64 runs the
+  VBMI kernel, and secret base64 runs the AVX-512BW kernel. hex runs the same kernel in each class.
+- **`PSTATE.DIT`.** On aarch64, a secret function sets `PSTATE.DIT` for the call, if the CPU has
+  DIT, and then restores it. A public function does not write it.
+- **Output after a refusal.** After `decode_secret` refuses a text for a character or for trailing
+  bits, each byte that it wrote is zero. After `decode` refuses, the output is unspecified.
+- **Temporary copies.** Before a secret function returns, on a result or a refusal, it writes zero
+  to each temporary array that held input or result bytes, for example the last block of a SIMD
+  kernel. The public functions do not.
+
+The secret functions clear with volatile stores and a compiler fence. The clear does not cover the
+input that you own, the result in your output, or the copies in registers and in the stack slots
+where the compiler spills registers.
+
+The secret functions can be slower. On aarch64, the two writes of `PSTATE.DIT` cost most on short
+inputs. On x86_64 with VBMI, the AVX-512BW kernel of base64 is slower than the VBMI kernel. If you
+are not sure that the data is public, use the secret functions.
 
 ## Decode a base64url token into a stack buffer
+
+A WebAuthn challenge is public, so `decode` reads it:
 
 ```rust
 use rscodec::base64::{Error, ErrorKind, Profile};
@@ -47,22 +80,65 @@ fn main() -> Result<(), Error> {
 `decode` gives the decoded bytes, which are the start of the buffer. The buffer can be longer than
 the result.
 
+## Decode a secret key
+
+A private key is secret, so `decode_secret` reads it:
+
+```rust
+use rscodec::{base64::Profile, hex};
+
+fn main() -> Result<(), Box<dyn core::error::Error>> {
+    let mut key = [0; 32];
+    let text = b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    assert_eq!(hex::decode_secret(text, &mut key)?[31], 0x1f);
+
+    // A refusal leaves zero in each byte that the decoder wrote.
+    assert!(Profile::Url.decode_secret(b"AAAA*AAA", &mut key).is_err());
+    assert_eq!(key[..6], [0; 6]);
+    Ok(())
+}
+```
+
+## Hold DIT for a loop of secrets
+
+A secret function writes `PSTATE.DIT` twice when DIT is clear. If DIT is set already, it writes
+nothing. To decode many secrets, set DIT one time for the loop with
+`rscrypto::traits::ct::with_data_independent_timing`. This needs a dependency on `rscrypto`:
+
+```rust
+use rscodec::base64::{Error, Profile};
+use rscrypto::traits::ct::with_data_independent_timing;
+
+fn decode_keys(tokens: &[&[u8]], keys: &mut [[u8; 32]]) -> Result<(), Error> {
+    with_data_independent_timing(|| {
+        for (token, key) in tokens.iter().zip(keys.iter_mut()) {
+            Profile::Url.decode_secret(token, key)?;
+        }
+        Ok(())
+    })
+}
+```
+
+On x86_64 and WebAssembly, and on an aarch64 CPU without DIT, the wrapper and the secret functions
+write no timing mode.
+
 ## Encode
 
 ```rust
 use rscodec::{base64::Profile, hex};
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
-    let key = [0xc0, 0xde, 0x01];
+    let digest = [0xc0, 0xde, 0x01];
     let mut text = [0; Profile::Standard.encoded_len(3).unwrap()];
-    assert_eq!(Profile::Standard.encode(&key, &mut text)?, b"wN4B");
+    assert_eq!(Profile::Standard.encode(&digest, &mut text)?, b"wN4B");
     let mut digits = [0; 6];
-    assert_eq!(hex::encode(&key, &mut digits)?, b"c0de01");
+    assert_eq!(hex::encode(&digest, &mut digits)?, b"c0de01");
     Ok(())
 }
 ```
 
-The text is ASCII, so `core::str::from_utf8` on it cannot fail.
+The text is ASCII, so `core::str::from_utf8` on it cannot fail. `encode_secret` takes the same
+arguments.
 
 ## Size the output
 
@@ -101,43 +177,47 @@ Each error has a kind and an offset, and it holds no byte of the input.
 The decoder checks the length first, then the output, then the characters. It reads all of the
 text before it refuses it for a character or for trailing bits.
 
-After an error, the bytes of the output slice are unspecified.
+A refusal for the length or the output writes no byte. After a refusal for a character or for
+trailing bits, `decode` leaves unspecified bytes in the output, and `decode_secret` leaves zero in
+the bytes of the result.
 
-## Backends
+## Kernels
 
-Each function without a `Backend` argument uses `Backend::detect()`, the fastest backend that the
-CPU runs. `encode_with` and `decode_with` take a backend. `Backend::new(isa)` gives the backend of
-an instruction set, or `None` if the CPU does not run it. Each backend gives the same result and the
-same error for each input.
+Each codec has a `Kernel` enum, `base64::Kernel` and `hex::Kernel`. `Backend::new(kernel)` of the
+same module gives the backend of a kernel, or `None` if the CPU does not have its features.
+`encode_with` and `decode_with` run the kernel of a backend, for example to compare the kernels.
+They are functions of the public class: they do not write `PSTATE.DIT`, and `decode_with` does not
+wipe its output.
 
 ```rust
-use rscodec::{Backend, Isa, base64::Profile};
+use rscodec::base64::{Backend, Kernel, Profile};
 
 fn main() -> Result<(), rscodec::base64::Error> {
-    let portable = Backend::new(Isa::Portable).expect("each CPU runs the portable backend");
+    let portable = Backend::new(Kernel::Portable).expect("each CPU runs the portable kernel");
     let mut text = [0; 4];
     assert_eq!(Profile::Url.encode_with(portable, b"\xfb\xff\xbf", &mut text)?, b"-_-_");
     Ok(())
 }
 ```
 
-| Target | Instruction sets (`Isa`), fastest first |
-| --- | --- |
-| x86_64 | `Avx512Vbmi`, `Avx512Bw`, `Avx2`, `Ssse3`, `Portable` |
-| aarch64 | `Neon`, `Portable` |
-| wasm32 with `-C target-feature=+simd128` | `Simd128`, `Portable` |
-| other targets | `Portable` |
+`Kernel::ALL` lists the kernels of the target, the fastest first:
 
-- With `std`, the crate detects the CPU at run time. Without `std`, a backend is available only if
-  `-C target-feature` turns on its features.
+| Target | `base64::Kernel` | `hex::Kernel` |
+| --- | --- | --- |
+| x86_64 | `Avx512Vbmi` (public class only), `Avx512Bw`, `Avx2`, `Ssse3`, `Portable` | `Avx512Bw`, `Avx2`, `Ssse3`, `Portable` |
+| aarch64 | `Neon`, `Portable` | `Neon`, `Portable` |
+| wasm32 with `-C target-feature=+simd128` | `Simd128`, `Portable` | `Simd128`, `Portable` |
+| other targets | `Portable` | `Portable` |
+
+- With `std`, the crate detects the CPU one time for each process. When `-C target-feature` turns
+  on the features of the fastest kernel of a class, the choice is made at compile time.
+- Without `std`, a kernel is available only if `-C target-feature` turns on its features.
 - WebAssembly has no run-time detection, so `Simd128` exists only with `+simd128`.
-- `Avx512Vbmi` and `Avx512Bw` run the same hex kernel.
-- On aarch64, each call sets `PSTATE.DIT` (data independent timing) if the CPU has it, and then
-  restores it. If DIT is set already, for example because the caller set it for its thread, the
-  call does not write it.
+- On an Intel hybrid CPU (Alder Lake to Arrow Lake), the AVX-512 kernels do not run, also if CPUID
+  reports AVX-512. Its efficient cores do not have AVX-512.
 
-The source of each backend has no branch and no table load that depends on the bytes or the
+The source of each kernel has no branch and no table load that depends on the bytes or the
 characters. The time is to depend only on the lengths, and for an error, on its offset. A check of
 the compiled code and a timing test of this rule are not complete yet, so this release makes no
-timing claim. `Avx512Vbmi` uses byte permutes that Intel does not list with data-independent timing.
-`Avx512Bw` uses only listed instructions.
+timing claim. WebAssembly has no list of instructions with data independent timing, so its kernels
+keep only this rule of the source.

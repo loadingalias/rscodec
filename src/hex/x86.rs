@@ -9,9 +9,12 @@
 
 use core::arch::x86_64::*;
 
-use crate::simd::{
-    blocks, whole_blocks,
-    x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
+use crate::{
+    ct::Class,
+    simd::{
+        blocks, whole_blocks,
+        x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
+    },
 };
 
 /// The digit of each nibble.
@@ -48,10 +51,11 @@ pub(super) mod ssse3 {
     }
 
     #[target_feature(enable = "ssse3")]
-    pub(in super::super) fn encode(bytes: &[u8], out: &mut [u8]) {
+    pub(in super::super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
         let digits = load16::<0, _>(&DIGITS);
         let nibble = _mm_set1_epi8(0x0f);
         blocks::<16, 32>(
+            class,
             bytes,
             out,
             16,
@@ -68,9 +72,10 @@ pub(super) mod ssse3 {
     }
 
     #[target_feature(enable = "ssse3")]
-    pub(in super::super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
+    pub(in super::super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
         let mut valid = _mm_set1_epi8(-1);
         blocks::<32, 16>(
+            class,
             text,
             out,
             32,
@@ -121,7 +126,7 @@ pub(super) mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    pub(in super::super) fn encode(bytes: &[u8], out: &mut [u8]) {
+    pub(in super::super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
         let digits = _mm256_broadcastsi128_si256(load16::<0, _>(&DIGITS));
         let nibble = _mm256_set1_epi8(0x0f);
         let (read, written) = whole_blocks::<32, 64>(
@@ -139,11 +144,11 @@ pub(super) mod avx2 {
             },
         );
         // The rest, in vectors of 16 bytes.
-        super::ssse3::encode(&bytes[read..], &mut out[written..]);
+        super::ssse3::encode(class, &bytes[read..], &mut out[written..]);
     }
 
     #[target_feature(enable = "avx2")]
-    pub(in super::super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
+    pub(in super::super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
         let mut valid = _mm256_set1_epi8(-1);
         let (read, written) = whole_blocks::<64, 32>(
             text,
@@ -160,7 +165,7 @@ pub(super) mod avx2 {
             },
         );
         // The rest, in vectors of 16 bytes.
-        let rest_valid = super::ssse3::decode(&text[read..], &mut out[written..]);
+        let rest_valid = super::ssse3::decode(class, &text[read..], &mut out[written..]);
         (_mm256_movemask_epi8(valid) == -1) & rest_valid
     }
 }

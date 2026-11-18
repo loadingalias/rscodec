@@ -9,9 +9,12 @@
 
 use core::arch::aarch64::*;
 
-use crate::simd::{
-    aarch64::{load16, store_pairs, store16},
-    blocks,
+use crate::{
+    ct::Class,
+    simd::{
+        aarch64::{load16, store_pairs, store16},
+        blocks,
+    },
 };
 
 /// The digit of each nibble.
@@ -32,9 +35,10 @@ fn nibbles(chars: uint8x16_t) -> (uint8x16_t, uint8x16_t) {
 }
 
 #[target_feature(enable = "neon")]
-pub(super) fn encode(bytes: &[u8], out: &mut [u8]) {
+pub(super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
     let digits = load16::<0, _>(&DIGITS);
     blocks::<16, 32>(
+        class,
         bytes,
         out,
         16,
@@ -50,9 +54,10 @@ pub(super) fn encode(bytes: &[u8], out: &mut [u8]) {
 }
 
 #[target_feature(enable = "neon")]
-pub(super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
+pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
     let mut valid = vdupq_n_u8(0xff);
     blocks::<32, 16>(
+        class,
         text,
         out,
         32,

@@ -1,186 +1,300 @@
-//! The CPU detection of the codecs (selected on 2026-11-17, [CODEC Layers]).
+//! The facts layer: the CPU features that the kernels of the codecs can use ([CODEC Layers]).
 //!
-//! With `std`, the crate detects the CPU at run time, through `std::arch`, which detects it once for
-//! each process. Without `std`, only the features of `-C target-feature` are on.
+//! It has the shape of `rscrypto::platform` (selected on 2026-11-18). [`Caps`] is a set of single
+//! CPU features. [`caps_static`] is the set that `-C target-feature` turns on, as a constant. With
+//! `std`, [`caps`] detects the CPU once for each process and includes the static set. Without
+//! `std`, [`caps`] is [`caps_static`].
+//!
+//! Each codec owns the table of its kernels. Each kernel names the features that it needs and its
+//! [`Timing`] class. A codec chooses its kernel for each class from these facts: at compile time
+//! where [`caps_static`] holds the features of the fastest kernel of the class, and otherwise once
+//! for each process, in a [`Kept`].
 
-/// An instruction set of a codec backend.
-///
-/// The set of variants depends on the target architecture.
+use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+
+/// A set of CPU features. Each constant of `x86`, `aarch64`, and `wasm32` holds one feature. A
+/// build has the features of one architecture, so each architecture numbers its features from bit 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Isa {
-    /// Scalar arithmetic with no table. It runs on each CPU.
-    Portable,
-    /// SSSE3, with 16-byte vectors.
-    #[cfg(target_arch = "x86_64")]
-    Ssse3,
-    /// AVX2, with 32-byte vectors.
-    #[cfg(target_arch = "x86_64")]
-    Avx2,
-    /// AVX-512F and AVX-512BW, with 64-byte vectors. The kernels use only the instructions that
-    /// Intel lists with data operand independent timing (DOIT).
-    #[cfg(target_arch = "x86_64")]
-    Avx512Bw,
-    /// AVX-512BW and AVX-512 VBMI. The base64 kernels use the byte permutes of VBMI, which the DOIT
-    /// list of Intel does not hold. The hex kernels are those of [`Isa::Avx512Bw`].
-    #[cfg(target_arch = "x86_64")]
-    Avx512Vbmi,
-    /// Neon (Advanced SIMD), with 16-byte vectors.
-    #[cfg(target_arch = "aarch64")]
-    Neon,
-    /// WebAssembly SIMD, with 16-byte vectors. It exists only with `-C target-feature=+simd128`,
-    /// because WebAssembly has no run-time detection.
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    Simd128,
-}
+pub(crate) struct Caps(u16);
 
-impl Isa {
-    /// Each instruction set of the target architecture, the fastest first.
-    pub const ALL: &[Self] = &[
-        #[cfg(target_arch = "x86_64")]
-        Self::Avx512Vbmi,
-        #[cfg(target_arch = "x86_64")]
-        Self::Avx512Bw,
-        #[cfg(target_arch = "x86_64")]
-        Self::Avx2,
-        #[cfg(target_arch = "x86_64")]
-        Self::Ssse3,
-        #[cfg(target_arch = "aarch64")]
-        Self::Neon,
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        Self::Simd128,
-        Self::Portable,
-    ];
+impl Caps {
+    /// No feature.
+    pub(crate) const NONE: Self = Self(0);
 
-    /// Whether this CPU runs the instruction set.
-    #[inline]
-    fn is_available(self) -> bool {
-        match self {
-            Self::Portable => true,
-            #[cfg(target_arch = "x86_64")]
-            Self::Ssse3 => x86!("ssse3"),
-            #[cfg(target_arch = "x86_64")]
-            Self::Avx2 => x86!("avx2"),
-            #[cfg(target_arch = "x86_64")]
-            Self::Avx512Bw => x86!("avx512f", "avx512bw"),
-            #[cfg(target_arch = "x86_64")]
-            Self::Avx512Vbmi => x86!("avx512f", "avx512bw", "avx512vbmi"),
-            #[cfg(target_arch = "aarch64")]
-            Self::Neon => aarch64!("neon"),
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            Self::Simd128 => true,
-        }
+    /// Each feature: the set of a CPU that has all of them.
+    pub(crate) const ALL: Self = Self(u16::MAX >> 1);
+
+    /// The feature of bit `bit`. Bit 15 is not a feature, so that [`caps`] can mark its cache.
+    const fn bit(bit: u8) -> Self {
+        assert!(bit < 15);
+        Self(1 << bit)
+    }
+
+    /// Whether the set holds each feature of `required`.
+    #[inline(always)]
+    pub(crate) const fn has(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+
+    /// The features of either set.
+    #[inline(always)]
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 
-/// An instruction set that this CPU runs. Each codec function with a `Backend` argument runs on its
-/// instruction set.
-///
-/// Only [`Backend::detect`] and [`Backend::new`] make a `Backend`, and each checks the CPU first.
-/// Thus a `Backend` exists only for an instruction set that the CPU has, and no safe call can run a
-/// kernel that the CPU does not support.
-///
-/// ```
-/// use rscodec::{Backend, Isa, hex};
-///
-/// // Each CPU runs the portable backend. `Backend::new` gives `None` for an instruction set that
-/// // the CPU does not have.
-/// let portable = Backend::new(Isa::Portable).expect("each CPU runs the portable backend");
-/// let mut text = [0; 2];
-/// assert_eq!(hex::encode_with(portable, &[0xc0], &mut text)?, b"c0");
-/// # Ok::<(), hex::Error>(())
-/// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Backend(Isa);
+/// The features of x86_64.
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod x86 {
+    use super::Caps;
 
-impl Backend {
-    /// The fastest backend that this CPU runs. Each codec function without a `Backend` argument
-    /// uses it. With `std`, the first call detects it, and each later call reads the result.
-    #[inline]
-    #[must_use]
-    pub fn detect() -> Self {
-        let fastest = || Isa::ALL.iter().position(|isa| isa.is_available());
-        let isa = |index: usize| Self(Isa::ALL.get(index).copied().unwrap_or(Isa::Portable));
-        cfg_select! {
-            feature = "std" => {
-                use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
-                /// One more than the index in `Isa::ALL` of the fastest instruction set, or zero
-                /// before the first call. Each call that stores it stores the same value.
-                static DETECTED: AtomicU8 = AtomicU8::new(0);
-                if let Some(index) = usize::from(DETECTED.load(Relaxed)).checked_sub(1) {
-                    return isa(index);
-                }
-                let index = fastest().unwrap_or(Isa::ALL.len() - 1);
-                DETECTED.store(u8::try_from(index + 1).unwrap_or(0), Relaxed);
-                isa(index)
+    /// SSSE3: `pshufb` and `pmaddubsw` on 16-byte vectors.
+    pub(crate) const SSSE3: Caps = Caps::bit(0);
+    /// AVX2: the integer operations on 32-byte vectors.
+    pub(crate) const AVX2: Caps = Caps::bit(1);
+    /// BMI1: `blsr` and `tzcnt`.
+    pub(crate) const BMI1: Caps = Caps::bit(2);
+    /// BMI2: `pdep` and `pext`.
+    pub(crate) const BMI2: Caps = Caps::bit(3);
+    /// PCLMULQDQ: the carry-less multiply.
+    pub(crate) const PCLMULQDQ: Caps = Caps::bit(4);
+    /// AVX-512F: the foundation of AVX-512, with 64-byte vectors.
+    pub(crate) const AVX512F: Caps = Caps::bit(5);
+    /// AVX-512BW: the byte and word operations.
+    pub(crate) const AVX512BW: Caps = Caps::bit(6);
+    /// AVX-512VL: the AVX-512 operations on 16-byte and 32-byte vectors.
+    pub(crate) const AVX512VL: Caps = Caps::bit(7);
+    /// AVX-512 VBMI: the byte permutes `vpermb` and `vpermi2b`, and `vpmultishiftqb`.
+    pub(crate) const AVX512VBMI: Caps = Caps::bit(8);
+    /// AVX-512 VBMI2: `vpcompressb` and the double shifts.
+    pub(crate) const AVX512VBMI2: Caps = Caps::bit(9);
+}
+
+/// The features of aarch64.
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64 {
+    use super::Caps;
+
+    /// Neon (Advanced SIMD).
+    pub(crate) const NEON: Caps = Caps::bit(0);
+    /// FEAT_AES and FEAT_PMULL, which the `aes` feature of Rust holds together.
+    pub(crate) const AES: Caps = Caps::bit(1);
+    /// FEAT_DIT: data independent timing, with `PSTATE.DIT`.
+    pub(crate) const DIT: Caps = Caps::bit(2);
+}
+
+/// The features of WebAssembly. WebAssembly has no run-time detection, so each feature is a
+/// feature of the build.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod wasm32 {
+    use super::Caps;
+
+    /// WebAssembly SIMD, with 16-byte vectors.
+    pub(crate) const SIMD128: Caps = Caps::bit(0);
+}
+
+/// Defines [`caps_static`] from one list: the name of each feature in `-C target-feature`, and its
+/// constant. With the name of the detection macro of `std::arch`, it also defines `detect` for
+/// `std`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "wasm32"))]
+macro_rules! features {
+    ($detected:ident: $($name:tt => $feature:expr),+ $(,)?) => {
+        features!($($name => $feature),+);
+
+        /// The features that `std::arch` detects on this CPU.
+        #[cfg(feature = "std")]
+        fn detect() -> Caps {
+            Caps::NONE $(.union(if std::arch::$detected!($name) { $feature } else { Caps::NONE }))+
+        }
+    };
+    ($($name:tt => $feature:expr),+) => {
+        /// The features that `-C target-feature` turns on. The compiler can use them in each
+        /// function, so each CPU that runs the program has them.
+        #[inline(always)]
+        pub(crate) const fn caps_static() -> Caps {
+            Caps::NONE $(.union(if cfg!(target_feature = $name) { $feature } else { Caps::NONE }))+
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+features!(is_x86_feature_detected:
+    "ssse3" => x86::SSSE3,
+    "avx2" => x86::AVX2,
+    "bmi1" => x86::BMI1,
+    "bmi2" => x86::BMI2,
+    "pclmulqdq" => x86::PCLMULQDQ,
+    "avx512f" => x86::AVX512F,
+    "avx512bw" => x86::AVX512BW,
+    "avx512vl" => x86::AVX512VL,
+    "avx512vbmi" => x86::AVX512VBMI,
+    "avx512vbmi2" => x86::AVX512VBMI2,
+);
+
+#[cfg(target_arch = "aarch64")]
+features!(is_aarch64_feature_detected:
+    "neon" => aarch64::NEON,
+    "aes" => aarch64::AES,
+    "dit" => aarch64::DIT,
+);
+
+#[cfg(target_arch = "wasm32")]
+features!("simd128" => wasm32::SIMD128);
+
+/// No feature: rscodec has no kernel for the other architectures.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "wasm32")))]
+#[inline(always)]
+pub(crate) const fn caps_static() -> Caps {
+    Caps::NONE
+}
+
+/// Whether [`caps`] can hold more than [`caps_static`]: with `std`, on a target with run-time
+/// detection. If not, the choice of each kernel is a constant.
+pub(crate) const DETECTS: bool = cfg!(all(
+    feature = "std",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+));
+
+/// The features of the CPU that runs the process. It includes [`caps_static`]. With `std`, the
+/// first call detects them, and each later call reads the result.
+#[inline]
+pub(crate) fn caps() -> Caps {
+    cfg_select! {
+        all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")) => {
+            use core::sync::atomic::AtomicU16;
+            /// The features with bit 15 set, or zero before the first call. Each call that stores
+            /// it stores the same value.
+            static DETECTED: AtomicU16 = AtomicU16::new(0);
+            const KNOWN: u16 = 1 << 15;
+            let detected = DETECTED.load(Relaxed);
+            if detected != 0 {
+                return Caps(detected & !KNOWN);
             }
-            _ => isa(fastest().unwrap_or(Isa::ALL.len() - 1)),
+            let caps = caps_static().union(runnable(detect()));
+            DETECTED.store(caps.0 | KNOWN, Relaxed);
+            caps
         }
+        _ => caps_static(),
+    }
+}
+
+/// Whether the CPU has each feature of `required`. The compiler folds the check of a feature of
+/// [`caps_static`], with no load.
+#[inline(always)]
+pub(crate) fn has(required: Caps) -> bool {
+    caps_static().has(required) || caps().has(required)
+}
+
+/// The detected features without AVX-512 on an Intel hybrid CPU (Alder Lake to Arrow Lake): the
+/// rule of `rscrypto::platform`. The efficient cores of these CPUs have no AVX-512, so a thread
+/// that moves to one of them during an AVX-512 kernel faults. Thus the rule removes AVX-512 even if
+/// CPUID reports it. It removes no feature of [`caps_static`], so CPUID runs only if the CPU
+/// reports an AVX-512 feature that the build does not turn on.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+fn runnable(detected: Caps) -> Caps {
+    use core::arch::x86_64::__cpuid;
+
+    let avx512 = [
+        x86::AVX512F,
+        x86::AVX512BW,
+        x86::AVX512VL,
+        x86::AVX512VBMI,
+        x86::AVX512VBMI2,
+    ]
+    .into_iter()
+    .fold(Caps::NONE, Caps::union);
+    let removable = detected.0 & avx512.0 & !caps_static().0;
+    if removable == 0 {
+        return detected;
+    }
+    let vendor = __cpuid(0);
+    // "GenuineIntel" in EBX, EDX, and ECX.
+    let intel = [vendor.ebx, vendor.edx, vendor.ecx] == [0x756e_6547, 0x4965_6e69, 0x6c65_746e];
+    let signature = if intel && vendor.eax >= 1 { __cpuid(1).eax } else { 0 };
+    let family = signature >> 8 & 0xf;
+    // The model, with the extended model of family 6 in its high nibble.
+    let model = (signature >> 4 & 0xf) | (signature >> 12 & 0xf0);
+    let hybrid = family == 6
+        && matches!(
+            model,
+            0x97 | 0x9a | 0x9c | 0xaa | 0xac | 0xb7 | 0xba | 0xbd | 0xbf | 0xc5 | 0xc6
+        );
+    if hybrid {
+        Caps(detected.0 & !removable)
+    } else {
+        detected
+    }
+}
+
+/// The detected features. Only x86 has a rule that removes a detected feature.
+#[cfg(all(feature = "std", target_arch = "aarch64"))]
+#[inline(always)]
+const fn runnable(detected: Caps) -> Caps {
+    detected
+}
+
+/// The timing class of a kernel, and of a function of a codec (selected on 2026-11-18,
+/// [CODEC Base-N]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Timing {
+    /// For public data, for example a digest or a signature. A function of the class runs the
+    /// fastest kernel of the CPU. A kernel of the class can use an instruction whose time can
+    /// depend on its operands, for example a byte permute of AVX-512 VBMI, which Intel does not
+    /// list with data operand independent timing (DOIT).
+    Public,
+    /// For secret data, for example a key or a bearer token. A kernel of the class uses only the
+    /// instructions that Intel lists with DOIT and Arm lists with data independent timing (DIT). A
+    /// function of the class runs only these kernels, with `PSTATE.DIT` set on aarch64.
+    Secret,
+}
+
+impl Timing {
+    /// Whether a function of this class can run a kernel of class `kernel`.
+    #[inline(always)]
+    pub(crate) const fn runs(self, kernel: Self) -> bool {
+        matches!((self, kernel), (Self::Public, _) | (Self::Secret, Self::Secret))
+    }
+}
+
+/// The kernel that a codec chose for one timing class, kept for the process: one more than the
+/// index of the kernel in the table of the codec, or zero before the first call.
+#[derive(Debug)]
+pub(crate) struct Kept(AtomicU8);
+
+impl Kept {
+    pub(crate) const fn new() -> Self {
+        Self(AtomicU8::new(0))
     }
 
-    /// The backend of `isa`, or `None` if this CPU does not run `isa`.
+    /// The index that the first call chose with `choose`. Each racing first call chooses and
+    /// stores the same index.
     #[inline]
-    #[must_use]
-    pub fn new(isa: Isa) -> Option<Self> {
-        isa.is_available().then_some(Self(isa))
+    pub(crate) fn index(&self, choose: impl FnOnce() -> usize) -> usize {
+        if let Some(index) = usize::from(self.0.load(Relaxed)).checked_sub(1) {
+            return index;
+        }
+        let index = choose();
+        // A table has fewer than 255 kernels, so the index fits.
+        if let Ok(kept) = u8::try_from(index + 1) {
+            self.0.store(kept, Relaxed);
+        }
+        index
     }
-
-    /// The instruction set of the backend.
-    #[inline]
-    #[must_use]
-    pub const fn isa(self) -> Isa {
-        self.0
-    }
 }
-
-/// Whether this CPU has each of the x86 features.
-#[cfg(target_arch = "x86_64")]
-macro_rules! x86 {
-    ($($feature:tt),+) => {
-        $(has!(is_x86_feature_detected, $feature))&&+
-    };
-}
-#[cfg(target_arch = "x86_64")]
-use x86;
-
-/// Whether this CPU has each of the aarch64 features.
-#[cfg(target_arch = "aarch64")]
-macro_rules! aarch64 {
-    ($($feature:tt),+) => {
-        $(has!(is_aarch64_feature_detected, $feature))&&+
-    };
-}
-#[cfg(target_arch = "aarch64")]
-use aarch64;
-
-/// Whether this CPU has `feature`: from `std::arch` with `std`, and from `-C target-feature`
-/// without it.
-#[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
-macro_rules! has {
-    ($detect:ident, $feature:tt) => {
-        std::arch::$detect!($feature)
-    };
-}
-#[cfg(all(not(feature = "std"), any(target_arch = "x86_64", target_arch = "aarch64")))]
-macro_rules! has {
-    ($detect:ident, $feature:tt) => {
-        cfg!(target_feature = $feature)
-    };
-}
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-use has;
 
 /// Runs `call` with data independent timing (DIT) on, if the CPU has it ([CODEC Base-N]). Arm
-/// guarantees the timing of its DIT instructions only while `PSTATE.DIT` is 1.
+/// guarantees the timing of its DIT instructions only while `PSTATE.DIT` is 1. Only the secret
+/// functions of the codecs run in it.
 #[cfg(target_arch = "aarch64")]
 #[inline]
-pub(crate) fn constant_time<T>(call: impl FnOnce() -> T) -> T {
-    if aarch64!("dit") { dit::run(call) } else { call() }
+pub(crate) fn data_independent_timing<T>(call: impl FnOnce() -> T) -> T {
+    if has(aarch64::DIT) { dit::run(call) } else { call() }
 }
 
 /// Runs `call`. Only Arm has a timing mode that a program can turn on.
 #[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
-pub(crate) fn constant_time<T>(call: impl FnOnce() -> T) -> T {
+pub(crate) fn data_independent_timing<T>(call: impl FnOnce() -> T) -> T {
     call()
 }
 

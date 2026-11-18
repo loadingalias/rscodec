@@ -1,12 +1,15 @@
 //! The parts that the SIMD kernels of each codec share: the loop over the blocks, and the loads
 //! and stores, which are the only unsafe operations of the kernels.
 
+use crate::ct::Class;
+
 /// Runs `block` over `input` and `output`. Each block reads `IN` bytes of input and uses the first
 /// `step`. It writes `OUT` bytes of output, and the first `out_len(step)` of them are the result.
 ///
 /// The last blocks run on arrays on the stack: the input after its end is `fill`, and only the
 /// result goes to `output`. Thus no SIMD load or store passes the end of a slice, and no scalar
-/// code decodes a tail. `output` has the length `out_len` of all of `input`.
+/// code decodes a tail. `output` has the length `out_len` of all of `input`. In the secret
+/// `class`, each array is zero before the function returns.
 ///
 /// The arrays take and give their bytes in 16-byte pieces, each with one or two loads or stores of
 /// a fixed size. Thus the compiler keeps an array of 16 bytes in registers: a copy of a variable
@@ -15,6 +18,7 @@
 /// 16-byte vectors.
 #[inline(always)]
 pub(crate) fn blocks<const IN: usize, const OUT: usize>(
+    class: impl Class,
     input: &[u8],
     output: &mut [u8],
     step: usize,
@@ -37,8 +41,10 @@ pub(crate) fn blocks<const IN: usize, const OUT: usize>(
             .chunks_mut(16)
             .zip(dst.as_chunks::<16>().0)
         {
-            write16(chunk, u128::from_le_bytes(*piece));
+            write16(class, chunk, u128::from_le_bytes(*piece));
         }
+        class.clear(&mut src);
+        class.clear(&mut dst);
         read += len;
         written += len_out;
     }
@@ -97,10 +103,10 @@ fn read16(src: &[u8], fill: u8) -> u128 {
 /// Writes the low `dst.len()` bytes, at most 16, of `value` into `dst`, with two overlapping stores
 /// of 8, 4, or 1 bytes.
 #[inline(always)]
-fn write16(dst: &mut [u8], value: u128) {
+fn write16(class: impl Class, dst: &mut [u8], value: u128) {
     let len = dst.len();
     assert!(len <= 16);
-    let bytes = value.to_le_bytes();
+    let mut bytes = value.to_le_bytes();
     match len {
         8.. => {
             dst[..8].copy_from_slice(&bytes[..8]);
@@ -117,6 +123,7 @@ fn write16(dst: &mut [u8], value: u128) {
         }
         0 => {}
     }
+    class.clear(&mut bytes);
 }
 
 /// The loads and stores of x86_64. Each takes an array and an offset in it, and a constant

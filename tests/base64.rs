@@ -1,13 +1,11 @@
 //! The contracts of `rscodec::base64`: the RFC 4648 vectors, the strict profiles, the error and
-//! its offset, and the same result on each backend.
+//! its offset, the same result on each backend and in each timing class, and the wipe and the DIT
+//! state of the secret class.
 
 mod common;
 
-use common::{Rng, backends};
-use rscodec::{
-    Isa,
-    base64::{Error, ErrorKind, Profile},
-};
+use common::Rng;
+use rscodec::base64::{Backend, Error, ErrorKind, Kernel, Profile};
 
 const PROFILES: [Profile; 2] = [Profile::Url, Profile::Standard];
 
@@ -28,19 +26,57 @@ fn oracle(profile: Profile, bytes: &[u8]) -> Vec<u8> {
     .into_bytes()
 }
 
-fn encode(profile: Profile, backend: rscodec::Backend, bytes: &[u8]) -> Vec<u8> {
+/// A call of the codec: on a backend, or a function of a timing class, with no backend argument.
+#[derive(Clone, Copy, Debug)]
+enum Call {
+    With(Backend),
+    Public,
+    Secret,
+}
+
+/// Each backend that this CPU runs, then the functions of each timing class.
+fn calls() -> Vec<Call> {
+    let backends = Kernel::ALL.iter().filter_map(|&kernel| Backend::new(kernel));
+    backends.map(Call::With).chain([Call::Public, Call::Secret]).collect()
+}
+
+/// The portable backend, the reference of each other call.
+fn portable() -> Call {
+    Call::With(Backend::new(Kernel::Portable).unwrap())
+}
+
+/// Encodes `bytes` into `out` with `call`, and gives the length of the text.
+fn encode_into(profile: Profile, call: Call, bytes: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    match call {
+        Call::With(backend) => profile.encode_with(backend, bytes, out),
+        Call::Public => profile.encode(bytes, out),
+        Call::Secret => profile.encode_secret(bytes, out),
+    }
+    .map(|text| text.len())
+}
+
+/// Decodes `text` into `out` with `call`, and gives the length of the bytes.
+fn decode_into(profile: Profile, call: Call, text: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    match call {
+        Call::With(backend) => profile.decode_with(backend, text, out),
+        Call::Public => profile.decode(text, out),
+        Call::Secret => profile.decode_secret(text, out),
+    }
+    .map(|bytes| bytes.len())
+}
+
+fn encode(profile: Profile, call: Call, bytes: &[u8]) -> Vec<u8> {
     let mut out = vec![0; profile.encoded_len(bytes.len()).unwrap()];
-    let len = profile.encode_with(backend, bytes, &mut out).unwrap().len();
-    assert_eq!(len, out.len());
+    assert_eq!(encode_into(profile, call, bytes, &mut out), Ok(out.len()));
     out
 }
 
-fn decode(profile: Profile, backend: rscodec::Backend, text: &[u8]) -> Result<Vec<u8>, Error> {
+fn decode(profile: Profile, call: Call, text: &[u8]) -> Result<Vec<u8>, Error> {
     // Room for more than the result, so that a decoder that writes past it fails the comparison.
     let mut out = vec![0x5a; text.len()];
-    let bytes = profile.decode_with(backend, text, &mut out)?.to_vec();
-    assert_eq!(Ok(bytes.len()), profile.decoded_len(text));
-    Ok(bytes)
+    let len = decode_into(profile, call, text, &mut out)?;
+    assert_eq!(Ok(len), profile.decoded_len(text));
+    Ok(out[..len].to_vec())
 }
 
 /// The error that a strict decoder gives for `text`, from the rules of the profile: the length,
@@ -80,24 +116,20 @@ fn rfc_4648_vectors() {
         ("fooba", "Zm9vYmE="),
         ("foobar", "Zm9vYmFy"),
     ];
-    for backend in backends() {
+    for call in calls() {
         for (bytes, text) in vectors {
             assert_eq!(
-                encode(Profile::Standard, backend, bytes.as_bytes()),
+                encode(Profile::Standard, call, bytes.as_bytes()),
                 text.as_bytes(),
-                "{backend:?}"
+                "{call:?}"
             );
             assert_eq!(
-                decode(Profile::Standard, backend, text.as_bytes()).unwrap(),
+                decode(Profile::Standard, call, text.as_bytes()).unwrap(),
                 bytes.as_bytes()
             );
             let url = text.trim_end_matches('=');
-            assert_eq!(
-                encode(Profile::Url, backend, bytes.as_bytes()),
-                url.as_bytes(),
-                "{backend:?}"
-            );
-            assert_eq!(decode(Profile::Url, backend, url.as_bytes()).unwrap(), bytes.as_bytes());
+            assert_eq!(encode(Profile::Url, call, bytes.as_bytes()), url.as_bytes(), "{call:?}");
+            assert_eq!(decode(Profile::Url, call, url.as_bytes()).unwrap(), bytes.as_bytes());
         }
     }
 }
@@ -108,7 +140,7 @@ fn rfc_4648_vectors() {
 /// if not.
 #[test]
 fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
-    let backends = backends();
+    let calls = calls();
     for profile in PROFILES {
         // Each input of 3 bytes in one text: the 3 bytes of each value are one quantum of 4
         // characters, which an encoder or a decoder maps on its own.
@@ -117,9 +149,9 @@ fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
             .collect();
         // data-encoding takes at most `usize::MAX / 512` bytes in one call: 8 MiB on wasm32.
         let text: Vec<u8> = all.chunks(3 << 20).flat_map(|chunk| oracle(profile, chunk)).collect();
-        for &backend in &backends {
-            assert_eq!(encode(profile, backend, &all), text, "{profile:?} {backend:?}");
-            assert_eq!(decode(profile, backend, &text).unwrap(), all, "{profile:?} {backend:?}");
+        for &call in &calls {
+            assert_eq!(encode(profile, call, &all), text, "{profile:?} {call:?}");
+            assert_eq!(decode(profile, call, &text).unwrap(), all, "{profile:?} {call:?}");
         }
         let mut rng = Rng::new(0x0053_686f_7274);
         for len in 0..=3 {
@@ -130,9 +162,9 @@ fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
                     bytes[2] = rng.byte();
                 }
                 let text = oracle(profile, &bytes);
-                for &backend in &backends {
-                    assert_eq!(encode(profile, backend, &bytes), text);
-                    assert_eq!(decode(profile, backend, &text).unwrap(), bytes);
+                for &call in &calls {
+                    assert_eq!(encode(profile, call, &bytes), text);
+                    assert_eq!(decode(profile, call, &text).unwrap(), bytes);
                 }
                 // The changes of each text of one byte, and of a sample of the longer texts.
                 if len > 1 && value % 257 != 0 {
@@ -151,10 +183,10 @@ fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
                 }
                 for changed in texts {
                     let expected = expected_error(profile, &changed);
-                    for &backend in &backends {
-                        let decoded = decode(profile, backend, &changed);
+                    for &call in &calls {
+                        let decoded = decode(profile, call, &changed);
                         match expected {
-                            Some(error) => assert_eq!(decoded, Err(error), "{profile:?} {backend:?} {changed:?}"),
+                            Some(error) => assert_eq!(decoded, Err(error), "{profile:?} {call:?} {changed:?}"),
                             None => assert_eq!(oracle(profile, &decoded.unwrap()), changed),
                         }
                     }
@@ -164,12 +196,13 @@ fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
     }
 }
 
-/// Each backend gives the result and the error of the portable backend: on random inputs of each
-/// length to 64 bytes, on each byte at each place of their texts, and on random inputs to 1 MiB.
+/// Each backend and each timing class gives the result and the error of the portable backend: on
+/// random inputs of each length to 64 bytes, on each byte at each place of their texts, and on
+/// random inputs to 1 MiB.
 #[test]
 fn each_backend_equals_the_portable_backend() {
-    let portable = rscodec::Backend::new(Isa::Portable).unwrap();
-    let backends = backends();
+    let portable = portable();
+    let calls = calls();
     let mut rng = Rng::new(0x6261_7365_3634);
     for profile in PROFILES {
         for len in (0..=64).chain([1000, 4096, 65_535, 65_536, 1 << 20]) {
@@ -189,13 +222,13 @@ fn each_backend_equals_the_portable_backend() {
                     break;
                 }
             }
-            for &backend in &backends {
-                assert_eq!(encode(profile, backend, &bytes), text, "{profile:?} {backend:?} {len}");
+            for &call in &calls {
+                assert_eq!(encode(profile, call, &bytes), text, "{profile:?} {call:?} {len}");
                 for changed in &texts {
                     assert_eq!(
-                        decode(profile, backend, changed),
+                        decode(profile, call, changed),
                         decode(profile, portable, changed),
-                        "{profile:?} {backend:?} {len}"
+                        "{profile:?} {call:?} {len}"
                     );
                 }
             }
@@ -207,28 +240,131 @@ fn each_backend_equals_the_portable_backend() {
 /// first.
 #[test]
 fn a_short_output_refuses_with_the_length() {
-    for backend in backends() {
+    let error = |kind, offset| Err(Error { kind, offset });
+    for call in calls() {
         let mut out = [0; 3];
-        let error = |kind, offset| Err(Error { kind, offset });
         assert_eq!(
-            Profile::Url.encode_with(backend, &[1; 3], &mut out),
+            encode_into(Profile::Url, call, &[1; 3], &mut out),
             error(ErrorKind::Output, 4)
         );
         assert_eq!(
-            Profile::Standard.encode_with(backend, &[1; 1], &mut out),
+            encode_into(Profile::Standard, call, &[1; 1], &mut out),
             error(ErrorKind::Output, 4)
         );
         assert_eq!(
-            Profile::Url.decode_with(backend, b"AAAAAA", &mut out),
+            decode_into(Profile::Url, call, b"AAAAAA", &mut out),
             error(ErrorKind::Output, 4)
         );
         assert_eq!(
-            Profile::Url.decode_with(backend, b"AAAAA", &mut out),
+            decode_into(Profile::Url, call, b"AAAAA", &mut out),
             error(ErrorKind::Length, 5)
         );
         assert_eq!(
-            Profile::Standard.decode_with(backend, b"AAAAAA", &mut out),
+            decode_into(Profile::Standard, call, b"AAAAAA", &mut out),
             error(ErrorKind::Length, 6)
         );
     }
+}
+
+/// After `decode_secret` refuses a text for a symbol or for its trailing bits, each byte of the
+/// result, which it wrote, is zero, and it wrote no other byte. A refusal for the length or the
+/// output writes no byte.
+#[test]
+fn decode_secret_wipes_its_output_after_a_refusal() {
+    const UNWRITTEN: u8 = 0x5a;
+    let mut rng = Rng::new(0x0000_7769_7065);
+    for profile in PROFILES {
+        let value = |byte| alphabet(profile).iter().position(|&c| c == byte).unwrap();
+        // The lengths of each tail and of whole blocks of each kernel.
+        for len in 1..=200 {
+            let bytes = rng.bytes(len);
+            let text = oracle(profile, &bytes);
+            let last = text.iter().rposition(|&c| c != b'=').unwrap();
+            let symbol = |at: usize, byte: u8| {
+                let mut changed = text.clone();
+                changed[at] = byte;
+                changed
+            };
+            // `*` is in neither alphabet.
+            let mut refusals = vec![
+                (symbol(0, b'*'), ErrorKind::Symbol, 0),
+                (symbol(last, b'*'), ErrorKind::Symbol, last),
+            ];
+            // The last character holds bits after the last byte unless the bytes fill 3n bytes.
+            // Bit 0 is one of them.
+            if len % 3 != 0 {
+                let odd = alphabet(profile)[value(text[last]) | 1];
+                refusals.push((symbol(last, odd), ErrorKind::TrailingBits, last));
+            }
+            for (changed, kind, offset) in refusals {
+                let mut out = vec![UNWRITTEN; len + 4];
+                assert_eq!(
+                    profile.decode_secret(&changed, &mut out),
+                    Err(Error { kind, offset }),
+                    "{profile:?} {len}"
+                );
+                assert!(out[..len].iter().all(|&byte| byte == 0), "{profile:?} {len} {kind:?}");
+                assert!(out[len..].iter().all(|&byte| byte == UNWRITTEN), "{profile:?} {len}");
+            }
+        }
+        let mut out = [UNWRITTEN; 8];
+        let length = match profile {
+            Profile::Url => b"AAAAA".as_slice(),
+            Profile::Standard => b"AAAAAA",
+        };
+        assert_eq!(
+            profile.decode_secret(length, &mut out),
+            Err(Error {
+                kind: ErrorKind::Length,
+                offset: length.len()
+            })
+        );
+        assert_eq!(
+            profile.decode_secret(b"AAAA*AAAAAAA", &mut out),
+            Err(Error {
+                kind: ErrorKind::Output,
+                offset: 9
+            })
+        );
+        assert_eq!(out, [UNWRITTEN; 8]);
+    }
+}
+
+/// On aarch64 with DIT, `PSTATE.DIT` after each secret call equals its value before the call, set
+/// or clear, after a result and after a refusal.
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn each_secret_call_leaves_pstate_dit_as_it_was() {
+    use common::dit;
+    // A CPU without DIT has no state to keep.
+    let Some(before) = dit::get() else { return };
+    for held in [false, true] {
+        dit::set(held);
+        for profile in PROFILES {
+            let kept = || assert_eq!(dit::get(), Some(held), "{profile:?}");
+            let error = |kind, offset| Err(Error { kind, offset });
+            let mut out = [0; 64];
+            assert_eq!(
+                profile.encode_secret(&[0xa5; 48], &mut out).map(|text| text.len()),
+                Ok(64)
+            );
+            kept();
+            assert_eq!(
+                profile.encode_secret(&[0xa5; 48], &mut out[..3]).map(|text| text.len()),
+                error(ErrorKind::Output, 64)
+            );
+            kept();
+            assert_eq!(
+                profile.decode_secret(&[b'Q'; 64], &mut out).map(|bytes| bytes.len()),
+                Ok(48)
+            );
+            kept();
+            assert_eq!(
+                profile.decode_secret(&[b'*'; 64], &mut out).map(|bytes| bytes.len()),
+                error(ErrorKind::Symbol, 0)
+            );
+            kept();
+        }
+    }
+    dit::set(before);
 }

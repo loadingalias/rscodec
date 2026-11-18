@@ -6,9 +6,12 @@
 use core::arch::wasm32::*;
 
 use super::{Profile, Tables, bytes_len, symbols_len};
-use crate::simd::{
-    blocks,
-    wasm32::{load16, store16},
+use crate::{
+    ct::Class,
+    simd::{
+        blocks,
+        wasm32::{load16, store16},
+    },
 };
 
 /// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.
@@ -17,10 +20,10 @@ const ENCODE_ORDER: [u8; 16] = [1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 1
 /// The three bytes of each 32-bit lane after the decoder packs it, first byte first.
 const DECODE_ORDER: [u8; 16] = [2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, 0xff, 0xff, 0xff, 0xff];
 
-pub(super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
     let shift = load16::<0, _>(&Tables::of(profile).nibbles.shift);
     let order = load16::<0, _>(&ENCODE_ORDER);
-    blocks::<16, 16>(bytes, out, 12, 0, symbols_len, |src, dst| {
+    blocks::<16, 16>(class, bytes, out, 12, 0, symbols_len, |src, dst| {
         let input = i8x16_swizzle(load16::<0, _>(src), order);
         // In each 32-bit lane, the low 16 bits hold the first and the second sextet at bits 10
         // and 4, and the high 16 bits hold the third and the fourth at bits 6 and 0.
@@ -36,7 +39,7 @@ pub(super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
     });
 }
 
-pub(super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
     let tables = &Tables::of(profile).nibbles;
     let (lo_classes, hi_classes) = (load16::<0, _>(&tables.lo), load16::<0, _>(&tables.hi));
     let roll = load16::<0, _>(&tables.roll);
@@ -44,7 +47,7 @@ pub(super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
     let special_index = u8x16_splat(tables.special_index);
     let order = load16::<0, _>(&DECODE_ORDER);
     let mut invalid = u8x16_splat(0);
-    blocks::<16, 16>(text, out, 16, b'A', bytes_len, |src, dst| {
+    blocks::<16, 16>(class, text, out, 16, b'A', bytes_len, |src, dst| {
         let src = load16::<0, _>(src);
         let hi = u8x16_shr(src, 4);
         let lo = v128_and(src, u8x16_splat(0x0f));

@@ -4,9 +4,14 @@
 //! Each row writes into a buffer that the row owns. Before timing, each encode must give the text
 //! of data-encoding, and each decode must give the original bytes.
 //!
-//! rscodec has the row `rscodec`, its functions with no backend argument, and one row for each
-//! backend that the host runs, for example `rscodec-avx2`. On aarch64, `rscodec-neon-dit-held`
-//! gives the cost of `PSTATE.DIT` (see `backend_rows`).
+//! The rows of rscodec:
+//!
+//! - `rscodec`: the public functions.
+//! - `rscodec-secret`: the secret functions.
+//! - One row for each kernel that the host runs, for example `rscodec-avx2`.
+//!
+//! The secret functions run the kernel of one of the kernel rows. Thus the two rows give the cost
+//! of the secret class, for example the cost of `PSTATE.DIT` on aarch64.
 
 mod common;
 
@@ -14,7 +19,7 @@ use base64::Engine as _;
 use base64ct::Encoding as _;
 use common::Group;
 use criterion::{Criterion, Throughput};
-use rscodec::{Backend, Isa, base64::Profile, hex};
+use rscodec::{base64::Profile, hex};
 
 /// The raw sizes in bytes.
 const SIZES: [usize; 6] = [16, 32, 64, 256, 4096, 65536];
@@ -129,61 +134,9 @@ fn report_place(codec: &str, case: &Case, input: &[u8], output: &[u8]) {
     );
 }
 
-/// A function that runs the registration of a row, which also runs the row.
-type Scope = fn(&mut dyn FnMut());
-
-/// The rows of rscodec for each backend that the host runs, for example `rscodec-avx2`, each with
-/// the scope that runs it. `same_kernel` names the backends that run the kernel of another
-/// backend, which have no row.
-///
-/// On aarch64 with DIT, the row `rscodec-neon-dit-held` runs the Neon backend while the benchmark
-/// holds `PSTATE.DIT` set. The codec then only reads DIT, so this row against `rscodec-neon` gives
-/// the cost of the two writes of DIT in each call.
-fn backend_rows(same_kernel: &[Isa]) -> Vec<(String, Backend, Scope)> {
-    let plain: Scope = |register| register();
-    #[cfg_attr(not(target_arch = "aarch64"), expect(unused_mut, reason = "only aarch64 adds a row"))]
-    let mut rows: Vec<_> = Isa::ALL
-        .iter()
-        .filter(|isa| !same_kernel.contains(isa))
-        .filter_map(|&isa| Backend::new(isa))
-        .map(|backend| (format!("rscodec-{:?}", backend.isa()).to_lowercase(), backend, plain))
-        .collect();
-    #[cfg(target_arch = "aarch64")]
-    if let Some(neon) = Backend::new(Isa::Neon)
-        && std::arch::is_aarch64_feature_detected!("dit")
-    {
-        rows.push(("rscodec-neon-dit-held".to_owned(), neon, dit::held));
-    }
-    rows
-}
-
-/// `PSTATE.DIT`, which has no intrinsic. The system register `S3_3_C4_C2_5` is DIT, and bit 24 is
-/// its value.
-#[cfg(target_arch = "aarch64")]
-#[expect(
-    unsafe_code,
-    reason = "the asm reads and writes only PSTATE.DIT, which changes no value, on a CPU that has DIT"
-)]
-mod dit {
-    /// Runs `register` with `PSTATE.DIT` set, then restores its earlier value.
-    pub(crate) fn held(register: &mut dyn FnMut()) {
-        let earlier: u64;
-        // SAFETY: `backend_rows` checked that the CPU has DIT, so the instructions are defined.
-        unsafe {
-            core::arch::asm!(
-                "mrs {earlier}, S3_3_C4_C2_5",
-                "msr S3_3_C4_C2_5, {on}",
-                earlier = out(reg) earlier,
-                on = in(reg) 1_u64 << 24,
-                options(nostack, preserves_flags),
-            );
-        }
-        register();
-        // SAFETY: as above.
-        unsafe {
-            core::arch::asm!("msr S3_3_C4_C2_5, {earlier}", earlier = in(reg) earlier, options(nostack, preserves_flags))
-        };
-    }
+/// The name of the row of `kernel`, for example `rscodec-avx2`.
+fn kernel_row(kernel: impl core::fmt::Debug) -> String {
+    format!("rscodec-{kernel:?}").to_lowercase()
 }
 
 /// The engines of `base64`: `GeneralPurpose`, the row `base64-engine-gp`, and `Simd`, the row
@@ -209,12 +162,15 @@ fn base64_encode(criterion: &mut Criterion) {
         encode_row(g, case, "rscodec", |raw, out| {
             profile.encode(raw, out).expect("room").len()
         });
-        for (row, backend, scope) in backend_rows(&[]) {
-            scope(&mut || {
-                encode_row(g, case, &row, |raw, out| {
+        encode_row(g, case, "rscodec-secret", |raw, out| {
+            profile.encode_secret(raw, out).expect("room").len()
+        });
+        for &kernel in rscodec::base64::Kernel::ALL {
+            if let Some(backend) = rscodec::base64::Backend::new(kernel) {
+                encode_row(g, case, &kernel_row(kernel), |raw, out| {
                     profile.encode_with(backend, raw, out).expect("room").len()
                 });
-            });
+            }
         }
         let turbo = if case.url {
             base64_turbo::URL_SAFE_NO_PAD
@@ -296,12 +252,15 @@ fn base64_decode(criterion: &mut Criterion) {
         decode_row(g, case, "rscodec", room, |text, out| {
             profile.decode(text, out).ok().map(|bytes| bytes.len())
         });
-        for (row, backend, scope) in backend_rows(&[]) {
-            scope(&mut || {
-                decode_row(g, case, &row, room, |text, out| {
+        decode_row(g, case, "rscodec-secret", room, |text, out| {
+            profile.decode_secret(text, out).ok().map(|bytes| bytes.len())
+        });
+        for &kernel in rscodec::base64::Kernel::ALL {
+            if let Some(backend) = rscodec::base64::Backend::new(kernel) {
+                decode_row(g, case, &kernel_row(kernel), room, |text, out| {
                     profile.decode_with(backend, text, out).ok().map(|bytes| bytes.len())
                 });
-            });
+            }
         }
         let turbo = if case.url {
             base64_turbo::URL_SAFE_NO_PAD
@@ -376,12 +335,6 @@ fn base64_decode(criterion: &mut Criterion) {
     }
 }
 
-/// The hex kernels of AVX-512 VBMI are those of AVX-512BW.
-#[cfg(target_arch = "x86_64")]
-const HEX_SAME_KERNEL: &[Isa] = &[Isa::Avx512Vbmi];
-#[cfg(not(target_arch = "x86_64"))]
-const HEX_SAME_KERNEL: &[Isa] = &[];
-
 fn hex_encode(criterion: &mut Criterion) {
     let mut group = Group::new(criterion, "hex-encode");
     for case in &hex_cases() {
@@ -390,12 +343,15 @@ fn hex_encode(criterion: &mut Criterion) {
         encode_row(g, case, "rscodec", |raw, out| {
             hex::encode(raw, out).expect("room").len()
         });
-        for (row, backend, scope) in backend_rows(HEX_SAME_KERNEL) {
-            scope(&mut || {
-                encode_row(g, case, &row, |raw, out| {
+        encode_row(g, case, "rscodec-secret", |raw, out| {
+            hex::encode_secret(raw, out).expect("room").len()
+        });
+        for &kernel in hex::Kernel::ALL {
+            if let Some(backend) = hex::Backend::new(kernel) {
+                encode_row(g, case, &kernel_row(kernel), |raw, out| {
                     hex::encode_with(backend, raw, out).expect("room").len()
                 });
-            });
+            }
         }
         encode_row(g, case, "const-hex", |raw, out| {
             const_hex::encode_to_slice(raw, out).expect("room");
@@ -419,12 +375,15 @@ fn hex_decode(criterion: &mut Criterion) {
         decode_row(g, case, "rscodec", room, |text, out| {
             hex::decode(text, out).ok().map(|bytes| bytes.len())
         });
-        for (row, backend, scope) in backend_rows(HEX_SAME_KERNEL) {
-            scope(&mut || {
-                decode_row(g, case, &row, room, |text, out| {
+        decode_row(g, case, "rscodec-secret", room, |text, out| {
+            hex::decode_secret(text, out).ok().map(|bytes| bytes.len())
+        });
+        for &kernel in hex::Kernel::ALL {
+            if let Some(backend) = hex::Backend::new(kernel) {
+                decode_row(g, case, &kernel_row(kernel), room, |text, out| {
                     hex::decode_with(backend, text, out).ok().map(|bytes| bytes.len())
                 });
-            });
+            }
         }
         decode_row(g, case, "const-hex", room, |text, out| {
             const_hex::decode_to_slice(text, out).ok().map(|()| out.len())

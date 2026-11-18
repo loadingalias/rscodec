@@ -8,8 +8,10 @@
 //! The `std` feature is on by default. Without it, the crate needs only `core`.
 //!
 //! Each codec writes into a slice that the caller lends, and it allocates no memory. Each codec has
-//! a portable backend and SIMD backends. Each backend gives the same result and the same error for
-//! each input. [`Backend::detect`] selects the fastest backend that the CPU runs.
+//! a portable kernel and SIMD kernels, and each kernel gives the same result and the same error for
+//! each input. A codec that can carry a secret has two timing classes: functions for public data,
+//! which run the fastest kernel of the CPU, and functions for secret data, which run only the
+//! kernels whose instructions have data independent timing.
 
 #![no_std]
 
@@ -34,6 +36,3 @@ mod simd;
 pub mod base64;
 #[cfg(feature = "hex")]
 pub mod hex;
-
-#[cfg(any(feature = "base64", feature = "hex"))]
-pub use cpu::{Backend, Isa};

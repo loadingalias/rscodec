@@ -5,18 +5,29 @@
 //! only the characters of its alphabet, no whitespace, the padding of the profile, and zero bits
 //! after the last byte. The encoder writes that text.
 //!
-//! The source of each backend has no branch and no table load that depends on the bytes or the
-//! characters, so that a secret, for example a key, can go through the codec. The time is to
-//! depend only on the lengths, and for an error, on its offset. A check of the compiled code and a
-//! timing test of this rule are not complete yet. An [`Error`] holds no byte of the input.
+//! The functions have two timing classes:
+//!
+//! - [`Profile::encode`] and [`Profile::decode`] are for public data, for example a digest or a
+//!   signature. They run the fastest kernel of the CPU.
+//! - [`Profile::encode_secret`] and [`Profile::decode_secret`] are for secret data, for example a
+//!   key or a bearer token. They run only the kernels whose instructions have data independent
+//!   timing (see [`Kernel`]). On aarch64, they set `PSTATE.DIT` for the call. After a refusal,
+//!   `decode_secret` writes zero to each byte of the output that it wrote.
+//!
+//! The source of each kernel has no branch and no table load that depends on the bytes or the
+//! characters. The time is to depend only on the lengths, and for an error, on its offset. A check
+//! of the compiled code and a timing test of this rule are not complete yet. An [`Error`] holds no
+//! byte of the input.
 //!
 //! ```
 //! use rscodec::base64::Profile;
 //!
-//! let mut bytes = [0; 3];
-//! assert_eq!(Profile::Url.decode(b"-_-_", &mut bytes)?, [0xfb, 0xff, 0xbf]);
+//! // A signature is public.
 //! let mut text = [0; 4];
-//! assert_eq!(Profile::Url.encode(&bytes, &mut text)?, b"-_-_");
+//! assert_eq!(Profile::Url.encode(&[0xfb, 0xff, 0xbf], &mut text)?, b"-_-_");
+//! // A key is secret.
+//! let mut key = [0; 3];
+//! assert_eq!(Profile::Url.decode_secret(b"-_-_", &mut key)?, [0xfb, 0xff, 0xbf]);
 //! # Ok::<(), rscodec::base64::Error>(())
 //! ```
 //!
@@ -25,7 +36,10 @@
 
 use core::fmt;
 
-use crate::{Backend, cpu, ct};
+use crate::{
+    cpu::{self, Caps, Kept, Timing, caps_static},
+    ct::{self, Class, Public, Secret},
+};
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -121,17 +135,35 @@ impl Profile {
         }
     }
 
-    /// Encodes `bytes` into the start of `out`, and gives the text, which is ASCII.
+    /// Encodes `bytes` into the start of `out`, and gives the text, which is ASCII. It runs the
+    /// fastest kernel of the CPU, for public bytes. Encode a secret with
+    /// [`Profile::encode_secret`].
     ///
     /// # Errors
     ///
     /// Returns [`ErrorKind::Output`] if `out` is shorter than [`Profile::encoded_len`].
     #[inline]
     pub fn encode<'o>(self, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        self.encode_with(Backend::detect(), bytes, out)
+        self.encode_with(Backend(Kernel::chosen(Timing::Public)), bytes, out)
     }
 
-    /// [`Profile::encode`] on `backend`.
+    /// [`Profile::encode`] for secret bytes, for example a key. It runs only the kernels whose
+    /// instructions have data independent timing. On aarch64, it sets `PSTATE.DIT` for the call.
+    ///
+    /// # Errors
+    ///
+    /// As [`Profile::encode`].
+    #[inline]
+    pub fn encode_secret<'o>(self, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
+        let backend = Backend(Kernel::chosen(Timing::Secret));
+        cpu::data_independent_timing(|| {
+            self.encode_by(bytes, out, |bytes, text| {
+                kernel::encode(Secret, backend, self, bytes, text)
+            })
+        })
+    }
+
+    /// [`Profile::encode`] on the kernel of `backend`.
     ///
     /// # Errors
     ///
@@ -139,7 +171,7 @@ impl Profile {
     #[inline]
     pub fn encode_with<'o>(self, backend: Backend, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
         self.encode_by(bytes, out, |bytes, text| {
-            cpu::constant_time(|| kernel::encode(backend, self, bytes, text));
+            kernel::encode(Public, backend, self, bytes, text)
         })
     }
 
@@ -170,7 +202,9 @@ impl Profile {
         Ok(out)
     }
 
-    /// Decodes the canonical text `text` into the start of `out`, and gives the bytes.
+    /// Decodes the canonical text `text` into the start of `out`, and gives the bytes. It runs the
+    /// fastest kernel of the CPU, for public text. Decode a secret with
+    /// [`Profile::decode_secret`].
     ///
     /// The bytes of `out` after the result, and all of `out` after an error, are unspecified.
     ///
@@ -205,28 +239,51 @@ impl Profile {
     /// ```
     #[inline]
     pub fn decode<'o>(self, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        self.decode_with(Backend::detect(), text, out)
+        self.decode_with(Backend(Kernel::chosen(Timing::Public)), text, out)
     }
 
-    /// [`Profile::decode`] on `backend`.
+    /// [`Profile::decode`] for secret text, for example a bearer token. It runs only the kernels
+    /// whose instructions have data independent timing. On aarch64, it sets `PSTATE.DIT` for the
+    /// call.
+    ///
+    /// After a refusal for a symbol or for the trailing bits, each byte that it wrote to `out` is
+    /// zero: the first [`Profile::decoded_len`] bytes. After a refusal for the length or the
+    /// output, it wrote no byte.
+    ///
+    /// # Errors
+    ///
+    /// As [`Profile::decode`].
+    #[inline]
+    pub fn decode_secret<'o>(self, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
+        let backend = Backend(Kernel::chosen(Timing::Secret));
+        cpu::data_independent_timing(|| {
+            self.decode_by(text, out, Secret, |symbols, out| {
+                kernel::decode(Secret, backend, self, symbols, out)
+            })
+        })
+    }
+
+    /// [`Profile::decode`] on the kernel of `backend`.
     ///
     /// # Errors
     ///
     /// As [`Profile::decode`].
     #[inline]
     pub fn decode_with<'o>(self, backend: Backend, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        self.decode_by(text, out, |symbols, out| {
-            cpu::constant_time(|| kernel::decode(backend, self, symbols, out))
+        self.decode_by(text, out, Public, |symbols, out| {
+            kernel::decode(Public, backend, self, symbols, out)
         })
     }
 
     /// Decodes `text` with `kernel`, which decodes the characters before the padding and gives
-    /// whether each is in the alphabet.
+    /// whether each is in the alphabet. In the secret class, a refusal of the characters writes
+    /// zero to the output first.
     #[inline(always)]
     fn decode_by<'o>(
         self,
         text: &[u8],
         out: &'o mut [u8],
+        class: impl Class,
         kernel: impl FnOnce(&[u8], &mut [u8]) -> bool,
     ) -> Result<&'o mut [u8], Error> {
         let symbols = self.symbols(text)?;
@@ -246,6 +303,7 @@ impl Profile {
         let last = symbols.last().map_or(0, |&byte| portable::sextet(self, byte));
         // One branch for the whole text.
         if !(valid & (last & trailing_bits == 0)) {
+            class.wipe(out);
             return Err(self.refusal(symbols));
         }
         Ok(out)
@@ -297,12 +355,156 @@ const fn bytes_len(len: usize) -> usize {
     len / 4 * 3 + (len % 4).saturating_sub(1)
 }
 
-/// The calls of the kernel of each backend.
+/// A kernel of the codec: its code for one instruction set. The variants depend on the target
+/// architecture.
+///
+/// Each kernel has a timing class. Each kernel but `Kernel::Avx512Vbmi` of x86_64 uses only the
+/// instructions that Intel lists with data operand independent timing (DOIT) and Arm lists with
+/// data independent timing (DIT), so [`Profile::encode_secret`] and [`Profile::decode_secret`]
+/// can run it. WebAssembly has no timing list, so its kernels keep only the rule of the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kernel {
+    /// Scalar arithmetic with no table. It runs on each CPU.
+    Portable,
+    /// SSSE3, with 16-byte vectors.
+    #[cfg(target_arch = "x86_64")]
+    Ssse3,
+    /// AVX2, with 32-byte vectors.
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    /// AVX-512F and AVX-512BW, with 64-byte vectors. The secret functions run it where the CPU has
+    /// AVX-512BW.
+    #[cfg(target_arch = "x86_64")]
+    Avx512Bw,
+    /// AVX-512BW and AVX-512 VBMI, with byte permutes that the DOIT list of Intel does not hold.
+    /// Only the public functions run it.
+    #[cfg(target_arch = "x86_64")]
+    Avx512Vbmi,
+    /// Neon (Advanced SIMD), with 16-byte vectors.
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+    /// WebAssembly SIMD, with 16-byte vectors. It exists only with `-C target-feature=+simd128`,
+    /// because WebAssembly has no run-time detection.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    Simd128,
+}
+
+impl Kernel {
+    /// Each kernel of the target architecture, the fastest first.
+    pub const ALL: &[Self] = &[
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512Vbmi,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx512Bw,
+        #[cfg(target_arch = "x86_64")]
+        Self::Avx2,
+        #[cfg(target_arch = "x86_64")]
+        Self::Ssse3,
+        #[cfg(target_arch = "aarch64")]
+        Self::Neon,
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        Self::Simd128,
+        Self::Portable,
+    ];
+
+    /// The CPU features that the kernel needs, and its timing class.
+    const fn needs(self) -> (Caps, Timing) {
+        #[cfg(target_arch = "x86_64")]
+        use crate::cpu::x86::{AVX2, AVX512BW, AVX512F, AVX512VBMI, SSSE3};
+        match self {
+            Self::Portable => (Caps::NONE, Timing::Secret),
+            #[cfg(target_arch = "x86_64")]
+            Self::Ssse3 => (SSSE3, Timing::Secret),
+            // The AVX2 kernels give the rest of each input to the SSSE3 kernels.
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx2 => (AVX2.union(SSSE3), Timing::Secret),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512Bw => (AVX512F.union(AVX512BW), Timing::Secret),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512Vbmi => (AVX512F.union(AVX512BW).union(AVX512VBMI), Timing::Public),
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => (cpu::aarch64::NEON, Timing::Secret),
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            Self::Simd128 => (cpu::wasm32::SIMD128, Timing::Secret),
+        }
+    }
+
+    /// The index in [`Kernel::ALL`] of the fastest kernel of `class` that a CPU with `caps` runs.
+    /// The last kernel, the portable kernel, runs on each CPU and in each class.
+    const fn fastest(caps: Caps, class: Timing) -> usize {
+        let mut index = 0;
+        while index + 1 < Self::ALL.len() {
+            let (features, timing) = Self::ALL[index].needs();
+            if caps.has(features) && class.runs(timing) {
+                break;
+            }
+            index += 1;
+        }
+        index
+    }
+
+    /// The index of the kernel of `class` that the build fixes: if the build has no run-time
+    /// detection, or if `caps_static()` holds the features of the fastest kernel of the class.
+    const fn fixed(class: Timing) -> Option<usize> {
+        let index = Self::fastest(caps_static(), class);
+        if !cpu::DETECTS || index == Self::fastest(Caps::ALL, class) {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    /// The kernel of the functions of `class` with no backend argument. If the build does not fix
+    /// it, the first call chooses it, and each later call reads the choice.
+    #[inline(always)]
+    fn chosen(class: Timing) -> Self {
+        const PUBLIC: Option<usize> = Kernel::fixed(Timing::Public);
+        const SECRET: Option<usize> = Kernel::fixed(Timing::Secret);
+        static KEPT: [Kept; 2] = [Kept::new(), Kept::new()];
+        let (fixed, kept) = match class {
+            Timing::Public => (PUBLIC, &KEPT[0]),
+            Timing::Secret => (SECRET, &KEPT[1]),
+        };
+        let index = fixed.unwrap_or_else(|| kept.index(|| Self::fastest(cpu::caps(), class)));
+        Self::ALL.get(index).copied().unwrap_or(Self::Portable)
+    }
+}
+
+/// A kernel that this CPU runs. [`Profile::encode_with`] and [`Profile::decode_with`] run it, for
+/// example to compare the kernels.
+///
+/// Only [`Backend::new`] makes a `Backend`, and it checks the CPU first. Thus a `Backend` exists
+/// only for a kernel whose features the CPU has, and no safe call can run a kernel that the CPU
+/// does not support.
+///
+/// ```
+/// use rscodec::base64::{Backend, Kernel, Profile};
+///
+/// // Each CPU runs the portable kernel. `Backend::new` gives `None` for a kernel whose features
+/// // the CPU does not have.
+/// let portable = Backend::new(Kernel::Portable).expect("each CPU runs the portable kernel");
+/// let mut text = [0; 4];
+/// assert_eq!(Profile::Url.encode_with(portable, b"\xfb\xff\xbf", &mut text)?, b"-_-_");
+/// # Ok::<(), rscodec::base64::Error>(())
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Backend(Kernel);
+
+impl Backend {
+    /// The backend of `kernel`, or `None` if this CPU does not have the features of `kernel`.
+    #[inline]
+    #[must_use]
+    pub fn new(kernel: Kernel) -> Option<Self> {
+        cpu::has(kernel.needs().0).then_some(Self(kernel))
+    }
+}
+
+/// The calls of each kernel.
 #[cfg_attr(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     expect(
         unsafe_code,
-        reason = "a `Backend` holds only an instruction set that the CPU has, so its target-feature kernels can run"
+        reason = "a `Backend` holds only a kernel whose features the CPU has, so its target-feature functions can run"
     )
 )]
 mod kernel {
@@ -312,57 +514,57 @@ mod kernel {
     use super::wasm32;
     #[cfg(target_arch = "x86_64")]
     use super::x86;
-    use super::{Profile, portable};
-    use crate::{Backend, Isa};
+    use super::{Backend, Kernel, Profile, portable};
+    use crate::ct::Class;
 
     /// Encodes `bytes` into the characters `out`, with no padding.
     #[inline]
-    pub(super) fn encode(backend: Backend, profile: Profile, bytes: &[u8], out: &mut [u8]) {
-        match backend.isa() {
-            Isa::Portable => portable::encode(profile, bytes, out),
+    pub(super) fn encode(class: impl Class, backend: Backend, profile: Profile, bytes: &[u8], out: &mut [u8]) {
+        match backend.0 {
+            Kernel::Portable => portable::encode(class, profile, bytes, out),
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Ssse3 => unsafe { x86::ssse3::encode(profile, bytes, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Ssse3 => unsafe { x86::ssse3::encode(class, profile, bytes, out) },
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Avx2 => unsafe { x86::avx2::encode(profile, bytes, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx2 => unsafe { x86::avx2::encode(class, profile, bytes, out) },
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Avx512Bw => unsafe { x86::avx512bw::encode(profile, bytes, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Bw => unsafe { x86::avx512bw::encode(profile, bytes, out) },
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Avx512Vbmi => unsafe { x86::avx512vbmi::encode(profile, bytes, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Vbmi => unsafe { x86::avx512vbmi::encode(profile, bytes, out) },
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Neon => unsafe { aarch64::encode(profile, bytes, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Neon => unsafe { aarch64::encode(class, profile, bytes, out) },
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            Isa::Simd128 => wasm32::encode(profile, bytes, out),
+            Kernel::Simd128 => wasm32::encode(class, profile, bytes, out),
         }
     }
 
     /// Decodes the characters `text`, with no padding, into `out`, and gives whether each is in the
     /// alphabet.
     #[inline]
-    pub(super) fn decode(backend: Backend, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
-        match backend.isa() {
-            Isa::Portable => portable::decode(profile, text, out),
+    pub(super) fn decode(class: impl Class, backend: Backend, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+        match backend.0 {
+            Kernel::Portable => portable::decode(class, profile, text, out),
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Ssse3 => unsafe { x86::ssse3::decode(profile, text, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Ssse3 => unsafe { x86::ssse3::decode(class, profile, text, out) },
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Avx2 => unsafe { x86::avx2::decode(profile, text, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx2 => unsafe { x86::avx2::decode(class, profile, text, out) },
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Avx512Bw => unsafe { x86::avx512bw::decode(profile, text, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Bw => unsafe { x86::avx512bw::decode(profile, text, out) },
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Avx512Vbmi => unsafe { x86::avx512vbmi::decode(profile, text, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Vbmi => unsafe { x86::avx512vbmi::decode(profile, text, out) },
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: a `Backend` of this instruction set exists only on a CPU that has it.
-            Isa::Neon => unsafe { aarch64::decode(profile, text, out) },
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Neon => unsafe { aarch64::decode(class, profile, text, out) },
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            Isa::Simd128 => wasm32::decode(profile, text, out),
+            Kernel::Simd128 => wasm32::decode(class, profile, text, out),
         }
     }
 }
@@ -512,6 +714,7 @@ impl Tables {
 #[cfg(kani)]
 mod proofs {
     use super::{Profile, portable};
+    use crate::ct::{Class, Public, Secret};
 
     /// The largest input of the proofs: two blocks of three bytes.
     const BYTES_MAX: usize = 6;
@@ -520,8 +723,8 @@ mod proofs {
         if kani::any() { Profile::Url } else { Profile::Standard }
     }
 
-    fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) -> usize {
-        let kernel = |bytes: &[u8], text: &mut [u8]| portable::encode(profile, bytes, text);
+    fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) -> usize {
+        let kernel = |bytes: &[u8], text: &mut [u8]| portable::encode(class, profile, bytes, text);
         match profile.encode_by(bytes, out, kernel) {
             Ok(text) => text.len(),
             Err(_) => panic!("the output has room for the text"),
@@ -536,15 +739,15 @@ mod proofs {
         let input: [u8; BYTES_MAX] = kani::any();
         let len = kani::any_where(|&len: &usize| len <= BYTES_MAX);
         let mut text = [0; 8];
-        let text_len = encode(profile, &input[..len], &mut text);
+        let text_len = encode(Public, profile, &input[..len], &mut text);
         let mut bytes = [0; BYTES_MAX];
-        let kernel = |text: &[u8], out: &mut [u8]| portable::decode(profile, text, out);
-        let decoded = profile.decode_by(&text[..text_len], &mut bytes, kernel);
+        let kernel = |text: &[u8], out: &mut [u8]| portable::decode(Public, profile, text, out);
+        let decoded = profile.decode_by(&text[..text_len], &mut bytes, Public, kernel);
         assert!(decoded.is_ok_and(|decoded| *decoded == input[..len]));
     }
 
     /// Each text of up to 8 bytes that decodes is the text of its bytes, so no other text of those
-    /// bytes decodes.
+    /// bytes decodes. The proof runs the secret class, so it also covers its stores of zero.
     #[kani::proof]
     #[kani::unwind(9)]
     fn each_text_that_decodes_is_canonical() {
@@ -552,11 +755,50 @@ mod proofs {
         let input: [u8; 8] = kani::any();
         let len = kani::any_where(|&len: &usize| len <= 8);
         let mut bytes = [0; BYTES_MAX];
-        let kernel = |text: &[u8], out: &mut [u8]| portable::decode(profile, text, out);
-        if let Ok(decoded) = profile.decode_by(&input[..len], &mut bytes, kernel) {
+        let kernel = |text: &[u8], out: &mut [u8]| portable::decode(Secret, profile, text, out);
+        if let Ok(decoded) = profile.decode_by(&input[..len], &mut bytes, Secret, kernel) {
             let mut text = [0; 8];
-            let text_len = encode(profile, decoded, &mut text);
+            let text_len = encode(Secret, profile, decoded, &mut text);
             assert!(text[..text_len] == input[..len]);
         }
+    }
+}
+
+/// The kernel table of x86_64.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::Kernel;
+    use crate::cpu::{
+        Caps, Timing,
+        x86::{AVX2, AVX512BW, AVX512F, AVX512VBMI, AVX512VBMI2, AVX512VL, BMI1, BMI2, PCLMULQDQ, SSSE3},
+    };
+
+    /// The kernel of each timing class on a CPU with `features`.
+    fn chosen(features: &[Caps]) -> [Kernel; 2] {
+        let caps = features.iter().copied().fold(Caps::NONE, Caps::union);
+        [Timing::Public, Timing::Secret].map(|class| Kernel::ALL[Kernel::fastest(caps, class)])
+    }
+
+    /// On the CPU of the C001 x86 host, a Xeon 6975P-C, the public class runs VBMI and the secret
+    /// class runs AVX-512BW, because the VBMI permutes are not on the DOIT list of Intel. Without
+    /// VBMI, both classes run AVX-512BW ([CODEC Base-N]).
+    #[test]
+    fn the_public_class_runs_vbmi_and_the_secret_class_runs_avx512bw() {
+        let c001 = [
+            SSSE3,
+            AVX2,
+            BMI1,
+            BMI2,
+            PCLMULQDQ,
+            AVX512F,
+            AVX512BW,
+            AVX512VL,
+            AVX512VBMI,
+            AVX512VBMI2,
+        ];
+        assert_eq!(chosen(&c001), [Kernel::Avx512Vbmi, Kernel::Avx512Bw]);
+        assert_eq!(chosen(&c001[..8]), [Kernel::Avx512Bw, Kernel::Avx512Bw]);
+        assert_eq!(chosen(&c001[..5]), [Kernel::Avx2, Kernel::Avx2]);
+        assert_eq!(chosen(&[]), [Kernel::Portable, Kernel::Portable]);
     }
 }

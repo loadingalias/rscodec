@@ -12,9 +12,12 @@
 use core::arch::aarch64::*;
 
 use super::{Profile, Tables, bytes_len, symbols_len};
-use crate::simd::{
-    aarch64::{load_quads, load_triples, load16, store_quads, store_triples, store16, table64},
-    blocks,
+use crate::{
+    ct::Class,
+    simd::{
+        aarch64::{load_quads, load_triples, load16, store_quads, store_triples, store16, table64},
+        blocks,
+    },
 };
 
 /// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.
@@ -51,13 +54,13 @@ fn sextets(lookups: &Lookups, chars: uint8x16_t) -> uint8x16_t {
 }
 
 #[target_feature(enable = "neon")]
-pub(super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
     let alphabet = table64::<0, _>(&Tables::of(profile).alphabet);
     let whole = bytes.len() / 48 * 48;
     let (bytes, rest) = bytes.split_at(whole);
     let (out, out_rest) = out.split_at_mut(whole / 3 * 4);
     let sextet = vdupq_n_u8(63);
-    blocks::<48, 64>(bytes, out, 48, 0, symbols_len, |src, dst| {
+    blocks::<48, 64>(class, bytes, out, 48, 0, symbols_len, |src, dst| {
         let uint8x16x3_t(a, b, c) = load_triples(src);
         let first = vshrq_n_u8::<2>(a);
         let second = vandq_u8(vsriq_n_u8::<4>(vshlq_n_u8::<4>(a), b), sextet);
@@ -76,7 +79,7 @@ pub(super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
     let lanes = |mask: u32| vreinterpretq_u16_u32(vdupq_n_u32(mask));
     let (first, second) = (lanes(0x0000_fc00), lanes(0x0000_03f0));
     let (third, fourth) = (lanes(0x0fc0_0000), lanes(0x003f_0000));
-    blocks::<16, 16>(rest, out_rest, 12, 0, symbols_len, |src, dst| {
+    blocks::<16, 16>(class, rest, out_rest, 12, 0, symbols_len, |src, dst| {
         let input = vreinterpretq_u16_u8(vqtbl1q_u8(load16::<0, _>(src), order));
         let sextets = vorrq_u16(
             vorrq_u16(
@@ -93,14 +96,14 @@ pub(super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
 }
 
 #[target_feature(enable = "neon")]
-pub(super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
     let lookups = lookups(Tables::of(profile));
     let whole = text.len() / 64 * 64;
     let (text, rest) = text.split_at(whole);
     let (out, out_rest) = out.split_at_mut(whole / 4 * 3);
     // The OR of the sextets: bit 7 is set if a byte is outside the alphabet.
     let mut invalid = vdupq_n_u8(0);
-    blocks::<64, 48>(text, out, 64, b'A', bytes_len, |src, dst| {
+    blocks::<64, 48>(class, text, out, 64, b'A', bytes_len, |src, dst| {
         let uint8x16x4_t(a, b, c, d) = load_quads(src);
         let (a, b, c, d) = (
             sextets(&lookups, a),
@@ -115,7 +118,7 @@ pub(super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         store_triples(dst, uint8x16x3_t(first, second, third));
     });
     let order = load16::<0, _>(&DECODE_ORDER);
-    blocks::<16, 16>(rest, out_rest, 16, b'A', bytes_len, |src, dst| {
+    blocks::<16, 16>(class, rest, out_rest, 16, b'A', bytes_len, |src, dst| {
         let values = sextets(&lookups, load16::<0, _>(src));
         invalid = vorrq_u8(invalid, values);
         // Each 16-bit lane: `a << 6 | b`. Each 32-bit lane: the 24 bits of the four sextets.
