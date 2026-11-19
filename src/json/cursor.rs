@@ -22,8 +22,8 @@ pub(super) struct InvalidUtf8 {
 /// outside a string can come before its error, because its block can end before the check finds the
 /// error. No JSON value starts with such a byte.
 ///
-/// Each method inlines, so that the cursor of the entry of a kernel stays in registers. A cursor in
-/// memory hides the function of its kernel from the compiler.
+/// Each method inlines, so that the cursor stays in registers in the function of the reader. A
+/// cursor in memory hides the function of its kernel from the compiler.
 #[derive(Debug)]
 pub(super) struct Cursor<'a> {
     input: &'a [u8],
@@ -54,23 +54,45 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// The offset of the next token, or `None` at the end of the input.
+    /// The input.
+    #[inline(always)]
+    pub(super) const fn input(&self) -> &'a [u8] {
+        self.input
+    }
+
+    /// The offset of the next token, which the cursor keeps, or `None` at the end of the input.
     ///
     /// # Errors
     ///
     /// The first byte that is not UTF-8, after each token before it. Each later call gives the same
     /// error.
     #[inline(always)]
-    pub(super) fn next(&mut self) -> Result<Option<usize>, InvalidUtf8> {
+    pub(super) fn peek(&mut self) -> Result<Option<usize>, InvalidUtf8> {
         while self.tokens == 0 {
             if !self.advance()? {
                 return Ok(None);
             }
         }
-        let bit = self.tokens.trailing_zeros();
-        self.tokens &= self.tokens - 1;
-        // `start` is a multiple of 64, so `|` adds `bit` with no carry.
-        Ok(Some(self.start | bit as usize))
+        // `start` is a multiple of 64, so `|` adds the bit with no carry.
+        Ok(Some(self.start | self.tokens.trailing_zeros() as usize))
+    }
+
+    /// Drops the token that [`Cursor::peek`] gave.
+    #[inline(always)]
+    pub(super) const fn take(&mut self) {
+        self.tokens &= self.tokens.wrapping_sub(1);
+    }
+
+    /// The offset of the next token, which the cursor drops, or `None` at the end of the input.
+    ///
+    /// # Errors
+    ///
+    /// As [`Cursor::peek`].
+    #[inline(always)]
+    pub(super) fn next(&mut self) -> Result<Option<usize>, InvalidUtf8> {
+        let at = self.peek()?;
+        self.take();
+        Ok(at)
     }
 
     /// Classifies the next block, or gives `false` at the end of the input.

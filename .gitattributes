@@ -2,3 +2,5 @@
 * text=auto eol=lf
 # Benchmark inputs keep their exact bytes, CRLF line breaks too.
 /benches/data/json/** -text
+# The conformance data keeps the exact bytes of its upstream.
+/tests/data/** -text

@@ -1,20 +1,33 @@
-//! JSON: read each document into the tree of each crate, write that tree back as compact text, and
-//! print f64 values as text.
+//! JSON: read each document into the tree of each crate, decode the documents of profile A into
+//! one struct for each class, write each tree back as compact text, and print f64 values as text.
 //!
-//! A cell is one class of documents, and one call reads, or writes, each document of the class.
-//! serde_json reads each document into the reference tree once. Before timing, each read must give
-//! that tree, and serde_json must read the text of each write back into it. Each printed f64 must
-//! parse back to its bits.
+//! A cell is one class of documents, and one call reads, decodes, or writes each document of the
+//! class. serde_json reads each document into the reference tree once. Before timing, each read
+//! must give that tree, each decode must give the struct of serde_json, and serde_json must read the
+//! text of each write back into the tree. Each printed f64 must parse back to its bits.
+//!
+//! rscodec has no tree: its read row walks each token, and it decodes each string with an escape
+//! into a buffer of the row. Its check builds the serde_json tree from the tokens.
+//!
+//! Each document is a copy at a 64-byte boundary, and each row of a cell reads the same copies, so
+//! the rows differ only in their code (the same-run rule). simd-json reads in place, so its rows
+//! copy each document into one buffer of the row, also at a 64-byte boundary.
 
+#[path = "common/aligned.rs"]
+mod aligned;
 mod common;
+mod typed;
 
 use core::{fmt::Write as _, hint::black_box};
 use std::{fs, path::Path, sync::OnceLock};
 
+use aligned::Aligned;
 use common::Group;
 use criterion::{Criterion, Throughput};
+use rscodec::json::{self, Limits, Profile, Slot, Token};
 use serde_json::Value;
 use simd_json::prelude::Writable as _;
+use typed::Typed;
 
 /// The classes of documents: a name, and a file or a directory in `benches/data`. Each line of a
 /// `.jsonl` file is one document. benches/data/README.md fetches the files in `fetched`.
@@ -30,6 +43,19 @@ const CLASSES: [(&str, &str); 10] = [
     ("citm_catalog", "fetched/citm_catalog.json"),
     ("canada", "fetched/canada.json"),
 ];
+
+/// The limits of the read rows of rscodec, which no document of the classes reaches.
+const LIMITS: Limits = Limits {
+    input_bytes_max: 1 << 24,
+    depth_max: 64,
+    string_bytes_max: 1 << 20,
+    members_max: 1 << 16,
+    elements_max: 1 << 20,
+    number_digits_max: 64,
+};
+
+/// The slots of the scratch of rscodec, which each document of the classes fits.
+const SLOTS: usize = 1 << 12;
 
 /// The number of random f64 values that the printers write.
 const RANDOM_F64_COUNT: usize = 10_000;
@@ -68,13 +94,17 @@ fn load(name: &'static str, path: &str) -> Class {
         vec![path]
     };
     files.sort();
-    let mut docs = Vec::new();
+    let mut docs: Vec<&'static [u8]> = Vec::new();
+    // Each document lives until the process ends, at a 64-byte boundary.
+    let mut keep = |doc: &[u8]| docs.push(&**Box::leak(Box::new(Aligned::new(doc))));
     for file in files {
-        let text: &'static [u8] = fs::read(&file).expect("a document file is readable").leak();
+        let text = fs::read(&file).expect("a document file is readable");
         if file.extension().is_some_and(|extension| extension == "jsonl") {
-            docs.extend(text.split(|&byte| byte == b'\n').filter(|line| !line.is_empty()));
+            text.split(|&byte| byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .for_each(&mut keep);
         } else {
-            docs.push(text);
+            keep(&text);
         }
     }
     assert!(!docs.is_empty(), "class {name} has no document");
@@ -89,6 +119,12 @@ fn load(name: &'static str, path: &str) -> Class {
         trees,
         bytes,
     }
+}
+
+/// The buffer at a 64-byte boundary into which simd-json copies each document of `class`, which it
+/// reads in place.
+fn copy_buffer(class: &Class) -> Aligned {
+    Aligned::new(&vec![0; class.docs.iter().map(|doc| doc.len()).max().unwrap_or(0)])
 }
 
 /// A row that reads each document of `class` with `read`, which returns whether the read succeeded.
@@ -152,15 +188,15 @@ fn read(criterion: &mut Criterion) {
             g,
             class,
             "simd-json",
-            (Vec::new(), simd_json::Buffers::default()),
+            (copy_buffer(class), simd_json::Buffers::default()),
             |(copy, buffers), doc| {
-                copy.clear();
-                copy.extend_from_slice(doc);
+                let copy = &mut copy[..doc.len()];
+                copy.copy_from_slice(doc);
                 black_box(simd_json::to_borrowed_value_with_buffers(copy, buffers)).is_ok()
             },
             |(copy, buffers), doc| {
-                copy.clear();
-                copy.extend_from_slice(doc);
+                let copy = &mut copy[..doc.len()];
+                copy.copy_from_slice(doc);
                 serde_json::to_value(simd_json::to_borrowed_value_with_buffers(copy, buffers).expect("valid"))
                     .expect("a tree")
             },
@@ -181,6 +217,210 @@ fn read(criterion: &mut Criterion) {
             |(), doc| black_box(flexon::parse::<_, flexon::Value<'_>>(doc)).is_ok(),
             |(), doc| serde_json::to_value(flexon::parse::<_, flexon::Value<'_>>(doc).expect("valid")).expect("a tree"),
         );
+        read_row(
+            g,
+            class,
+            "rscodec",
+            (vec![Slot::EMPTY; SLOTS], vec![0; LIMITS.string_bytes_max as usize]),
+            |(scratch, buf), doc| {
+                json::read(
+                    doc,
+                    &LIMITS,
+                    Profile::Rfc8259,
+                    scratch,
+                    #[inline(always)]
+                    |reader| walk(reader, buf),
+                )
+                .is_ok()
+            },
+            |(scratch, buf), doc| rscodec_tree(doc, scratch, buf),
+        );
+    }
+}
+
+/// Reads each token of the document, and decodes each string with an escape into `buf`.
+#[inline(always)]
+fn walk(reader: &mut json::Reader<'_, '_>, buf: &mut [u8]) -> Result<(), json::Error> {
+    while let Some(token) = reader.token()? {
+        match token {
+            Token::Key(text) | Token::Str(text) => {
+                black_box(text.decode(buf)?);
+            }
+            token => {
+                black_box(token);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The serde_json tree of the tokens of rscodec. A number is the serde_json value of its text.
+fn rscodec_tree(doc: &[u8], scratch: &mut [Slot], buf: &mut [u8]) -> Value {
+    json::read(doc, &LIMITS, Profile::Rfc8259, scratch, |reader| {
+        let mut open: Vec<(Value, Option<String>)> = Vec::new();
+        let mut key = None;
+        loop {
+            let value = match reader.token()?.expect("a document has a value") {
+                Token::ObjectStart => {
+                    open.push((Value::Object(serde_json::Map::new()), key.take()));
+                    continue;
+                }
+                Token::ArrayStart => {
+                    open.push((Value::Array(Vec::new()), key.take()));
+                    continue;
+                }
+                Token::Key(text) => {
+                    key = Some(text.decode(buf)?.to_owned());
+                    continue;
+                }
+                Token::ObjectEnd | Token::ArrayEnd => {
+                    let (value, name) = open.pop().expect("each end has its start");
+                    key = name;
+                    value
+                }
+                Token::Str(text) => Value::String(text.decode(buf)?.to_owned()),
+                Token::Number(number) => serde_json::from_str(number.as_str()).expect("a number of JSON"),
+                Token::Bool(value) => Value::Bool(value),
+                Token::Null => Value::Null,
+            };
+            match open.last_mut() {
+                Some((Value::Object(members), _)) => {
+                    members.insert(key.take().expect("each member has a key"), value);
+                }
+                Some((Value::Array(elements), _)) => elements.push(value),
+                _ => return Ok(value),
+            }
+        }
+    })
+    .expect("rscodec reads each document")
+}
+
+/// The rows of the typed decode of `class` into the struct of `C`. Each row must give the struct of
+/// serde_json for each document.
+fn typed_rows<C: Typed>(group: &mut Group<'_>, class: &'static Class) {
+    let check = |codec: &str, decode: &mut dyn FnMut(&'static [u8]) -> bool| {
+        let read_count = class.docs.iter().filter(|doc| decode(doc)).count();
+        assert_eq!(
+            read_count,
+            class.docs.len(),
+            "{codec} decodes each document of {}",
+            class.name
+        );
+    };
+    // Each struct can borrow its document, so the check compares the text of `Debug`, which is the
+    // same for a borrowed and an owned string.
+    let reference = |doc: &'static [u8]| {
+        let decoded = serde_json::from_slice::<C::Of<'static>>(doc).expect("serde_json decodes each document");
+        Some(format!("{decoded:?}"))
+    };
+    let text = |decoded: Option<C::Of<'_>>| decoded.map(|decoded| format!("{decoded:?}"));
+    group.row(
+        "serde_json",
+        class.name,
+        (),
+        |()| {
+            class
+                .docs
+                .iter()
+                .filter(|doc| black_box(serde_json::from_slice::<C::Of<'_>>(doc)).is_ok())
+                .count()
+        },
+        |count, ()| assert_eq!(count, class.docs.len()),
+    );
+    group.row(
+        "sonic-rs",
+        class.name,
+        (),
+        |()| {
+            class
+                .docs
+                .iter()
+                .filter(|doc| black_box(sonic_rs::from_slice::<C::Of<'_>>(doc)).is_ok())
+                .count()
+        },
+        |_, ()| {
+            check("sonic-rs", &mut |doc| {
+                text(sonic_rs::from_slice::<C::Of<'_>>(doc).ok()) == reference(doc)
+            })
+        },
+    );
+    // simd-json reads in place, so each decode first copies the document into a buffer of the row.
+    group.row(
+        "simd-json",
+        class.name,
+        copy_buffer(class),
+        |copy| {
+            class
+                .docs
+                .iter()
+                .filter(|doc| {
+                    let copy = &mut copy[..doc.len()];
+                    copy.copy_from_slice(doc);
+                    black_box(simd_json::serde::from_slice::<C::Of<'_>>(copy)).is_ok()
+                })
+                .count()
+        },
+        |_, copy| {
+            check("simd-json", &mut |doc| {
+                let copy = &mut copy[..doc.len()];
+                copy.copy_from_slice(doc);
+                text(simd_json::serde::from_slice::<C::Of<'_>>(copy).ok()) == reference(doc)
+            });
+        },
+    );
+    group.row(
+        "flexon",
+        class.name,
+        (),
+        |()| {
+            class
+                .docs
+                .iter()
+                .filter(|doc| black_box(flexon::from_slice::<C::Of<'_>>(doc)).is_ok())
+                .count()
+        },
+        |_, ()| {
+            check("flexon", &mut |doc| {
+                text(flexon::from_slice::<C::Of<'_>>(doc).ok()) == reference(doc)
+            })
+        },
+    );
+    group.row(
+        "rscodec",
+        class.name,
+        vec![Slot::EMPTY; 64],
+        |scratch| {
+            class
+                .docs
+                .iter()
+                .filter(|doc| black_box(C::rscodec(doc, scratch)).is_ok())
+                .count()
+        },
+        |_, scratch| {
+            check("rscodec", &mut |doc| {
+                text(C::rscodec(doc, scratch).ok()) == reference(doc)
+            })
+        },
+    );
+}
+
+fn typed(criterion: &mut Criterion) {
+    let mut group = Group::new(criterion, "json-typed");
+    type Rows = fn(&mut Group<'_>, &'static Class);
+    let rows: [(&str, Rows); 5] = [
+        ("a1-client-data", typed_rows::<typed::A1>),
+        ("a2-jose-header", typed_rows::<typed::A2>),
+        ("a3-claims", typed_rows::<typed::A3>),
+        ("a4-oidc-discovery", typed_rows::<typed::A4>),
+        ("a5-jwks", typed_rows::<typed::A5>),
+    ];
+    for (name, rows) in rows {
+        let class = classes()
+            .iter()
+            .find(|class| class.name == name)
+            .expect("each class of profile A");
+        group.throughput(Throughput::Bytes(class.bytes.try_into().expect("a length fits u64")));
+        rows(&mut group, class);
     }
 }
 
@@ -365,5 +605,5 @@ fn print_f64(criterion: &mut Criterion) {
 }
 
 fn main() {
-    common::run(&[read, write, print_f64]);
+    common::run(&[read, typed, write, print_f64]);
 }

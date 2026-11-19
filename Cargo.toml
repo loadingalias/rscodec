@@ -20,7 +20,7 @@ std = []
 base64 = []
 # Lowercase hex (RFC 4648 section 8).
 hex = []
-# JSON (RFC 8259). In development: the kernels and the block cursor of the reader.
+# JSON (RFC 8259): the pull reader, its two profiles, and the strict walk for typed decoders.
 json = []
 
 [lints]
@@ -50,6 +50,9 @@ flexon = { version = "=0.4.9", features = ["nightly"] }
 # The `num-bigint` default feature only widens integers past i64.
 jiter = { version = "=0.19.0", default-features = false }
 ryu = "=1.0.23"
+# `derive` gives the structs of the typed-decode rows, which each competitor reads with
+# `from_slice`. The library and its tests do not use serde.
+serde = { version = "=1.0.229", features = ["derive"] }
 # Without `float_roundtrip`, serde_json reads 11,975 of the 111,080 floats of canada.json 1 ULP
 # away from the correctly rounded value. The bar takes only correct output.
 serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }

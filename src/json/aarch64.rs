@@ -37,7 +37,7 @@ macro_rules! kernel {
             };
 
             /// The kernel.
-            #[inline]
+            #[inline(always)]
             #[target_feature(enable = $features)]
             pub(in super::super) fn block(bytes: &[u8], before: u32, carry: Carry) -> Block {
                 simd::scan(classify(bytes, before), carry, $prefix_xor)

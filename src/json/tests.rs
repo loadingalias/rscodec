@@ -13,10 +13,14 @@ use super::{
 };
 
 /// Each kernel that this CPU runs, the fastest first. The last is the reference.
-fn kernels() -> Vec<Backend> {
-    let kernels: Vec<_> = Kernel::ALL.iter().filter_map(|&kernel| Backend::new(kernel)).collect();
+pub(super) fn kernels() -> Vec<Backend> {
+    let kernels: Vec<_> = Kernel::ALL
+        .iter()
+        .filter(|kernel| crate::cpu::caps().has(kernel.needs()))
+        .map(|&kernel| Backend(kernel))
+        .collect();
     assert_eq!(kernels.first(), Some(&Backend::chosen()));
-    assert_eq!(kernels.last(), Backend::new(Kernel::Swar).as_ref());
+    assert_eq!(kernels.last(), Some(&Backend(Kernel::Swar)));
     kernels
 }
 

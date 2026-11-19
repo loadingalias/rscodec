@@ -251,6 +251,7 @@ pub(crate) fn close_implications(caps: Caps) -> Caps {
 
 /// Whether the CPU has each feature of `required`. The compiler folds the check of a feature of
 /// [`caps_static`], with no load.
+#[cfg(any(feature = "base64", feature = "hex"))]
 #[inline(always)]
 pub(crate) fn has(required: Caps) -> bool {
     caps_static().has(required) || caps().has(required)

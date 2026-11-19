@@ -14,7 +14,7 @@ use super::{
 };
 
 /// The AVX2 kernel.
-#[inline]
+#[inline(always)]
 #[target_feature(enable = "avx2,bmi1,bmi2,pclmulqdq")]
 pub(super) fn avx2(bytes: &[u8], before: u32, carry: Carry) -> Block {
     let halves = match bytes.first_chunk() {
@@ -52,7 +52,7 @@ pub(super) fn avx2(bytes: &[u8], before: u32, carry: Carry) -> Block {
 }
 
 /// The AVX-512 kernel.
-#[inline]
+#[inline(always)]
 #[target_feature(enable = "avx512bw,avx512vl,avx512vbmi2,pclmulqdq,bmi1,bmi2")]
 pub(super) fn avx512(bytes: &[u8], before: u32, carry: Carry) -> Block {
     let input = load::masked(bytes);

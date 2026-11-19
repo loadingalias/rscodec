@@ -866,6 +866,7 @@ dependencies = [
  "rscodec",
  "rscrypto",
  "ryu",
+ "serde",
  "serde_json",
  "simd-json",
  "simdutf",

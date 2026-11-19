@@ -4,6 +4,7 @@
 //!
 //! - `base64`: [`base64`], base64 with padding and base64url without padding.
 //! - `hex`: [`hex`], lowercase hex.
+//! - `json`: [`json`], a JSON reader.
 //!
 //! The `std` feature is on by default. Without it, the crate needs only `core`.
 //!
@@ -37,4 +38,4 @@ pub mod base64;
 #[cfg(feature = "hex")]
 pub mod hex;
 #[cfg(feature = "json")]
-mod json;
+pub mod json;

@@ -1,24 +1,83 @@
-//! JSON ([RFC 8259]). This module is in development. It holds the kernels and the block cursor of
-//! the reader, which a later task builds on them.
+//! JSON ([RFC 8259]): a pull reader with two profiles, limits, and a strict walk for typed
+//! decoders.
+//!
+//! [`read`] reads one document from a slice in memory. It gives a [`Reader`] to its closure, and
+//! the closure reads the document with it:
+//!
+//! - [`Reader::token`] gives each [`Token`] in order. Each string and number borrows the input.
+//! - [`Reader::value`] gives the next [`Value`], to read once with a type. [`Value::members`] and
+//!   [`Value::elements`] walk a container in a loop, and they skip what the loop does not read.
+//!
+//! The reader checks each rule of its [`Profile`] and each of its [`Limits`] on each byte, also on
+//! each byte that it skips. [`read`] reads to the end of the document after the closure returns,
+//! so a document is valid exactly when `read` gives `Ok`. Each refusal is an [`Error`] with its
+//! cause and its offset, and the errors come in the order of their offsets.
+//!
+//! The reader allocates no memory. The caller lends a scratch of [`Slot`]s, which holds each open
+//! container and the keys of each open object for the duplicate check. A string with escapes
+//! decodes into a buffer that the caller lends ([`Str::decode`]). No code recurses, so a deep
+//! document does not grow the stack.
+//!
+//! ```
+//! use rscodec::json::{self, ErrorKind, Limits, Profile, Slot};
+//!
+//! const LIMITS: Limits = Limits {
+//!     input_bytes_max: 8192,
+//!     depth_max: 8,
+//!     string_bytes_max: 4096,
+//!     members_max: 32,
+//!     elements_max: 32,
+//!     number_digits_max: 32,
+//! };
+//!
+//! // A JOSE header. The walk compares each key after unescape, so `\u0061lg` is `alg`.
+//! let header = br#"{"\u0061lg":"ES256","kid":"key-1","x-unknown":[1,2]}"#;
+//! let mut scratch = [Slot::EMPTY; 8];
+//! let (alg, kid) = json::read(header, &LIMITS, Profile::IJson, &mut scratch, #[inline(always)] |reader| {
+//!     let (mut alg, mut kid) = (None, None);
+//!     let mut members = reader.value().members()?;
+//!     while let Some((key, value)) = members.next()? {
+//!         if key == "alg" {
+//!             alg = Some(value.str()?);
+//!         } else if key == "kid" {
+//!             kid = Some(value.str()?);
+//!         }
+//!     }
+//!     Ok((alg, kid))
+//! })?;
+//! // Each `Str` borrows the header. `==` compares after unescape, and `decode` copies only a
+//! // string with escapes.
+//! assert!(alg.is_some_and(|alg| alg == "ES256"));
+//! let mut buf = [0; 64];
+//! if let Some(kid) = kid {
+//!     assert_eq!(kid.decode(&mut buf)?, "key-1");
+//! }
+//!
+//! // Each profile refuses a duplicate key, also after unescape.
+//! let twice = br#"{"alg":"none","\u0061lg":"ES256"}"#;
+//! let error = json::read(twice, &LIMITS, Profile::IJson, &mut scratch, |_| Ok(())).unwrap_err();
+//! assert_eq!((error.kind, error.offset), (ErrorKind::Duplicate, 14));
+//! # Ok::<(), json::Error>(())
+//! ```
 //!
 //! [RFC 8259]: https://www.rfc-editor.org/rfc/rfc8259
-
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the reader of task C203 is the first consumer of the cursor")
-)]
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod block;
 mod cursor;
+mod error;
+mod number;
 mod portable;
+mod reader;
+mod scratch;
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "aarch64",
     all(target_arch = "wasm32", target_feature = "simd128")
 ))]
 mod simd;
+mod string;
 #[cfg(test)]
 mod tests;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -26,8 +85,103 @@ mod wasm32;
 #[cfg(target_arch = "x86_64")]
 mod x86;
 
+pub use error::{Error, ErrorKind, Limit};
+pub use number::Number;
+pub use reader::{Elements, Kind, Members, Reader, Token, Value};
+pub use scratch::Slot;
+pub use string::Str;
+
 use crate::cpu::{self, Caps, Kept, caps_static};
 use block::{Block, Carry};
+
+/// The rules that a document must meet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Profile {
+    /// [RFC 8259], and no duplicate key in an object. A lone surrogate escape is an error, because
+    /// a Rust `str` cannot hold it.
+    ///
+    /// [RFC 8259]: https://www.rfc-editor.org/rfc/rfc8259
+    Rfc8259,
+    /// [`Profile::Rfc8259`] and I-JSON ([RFC 7493]): no noncharacter, and only numbers that
+    /// binary64 holds. The reader refuses a number whose magnitude rounds to infinity, a nonzero
+    /// number that rounds to zero, a number of more than 17 significant digits, and an integer
+    /// outside ±(2^53 − 1). An integer has no fraction and no exponent.
+    ///
+    /// [RFC 7493]: https://www.rfc-editor.org/rfc/rfc7493
+    IJson,
+}
+
+/// The limits of one document. Each limit refuses the first item past it with
+/// [`ErrorKind::Limit`] and its offset. No limit truncates or saturates.
+///
+/// No default exists, because a limit that fits a header of 150 bytes refuses a file of 2 MB, and a
+/// limit that fits the file lets a hostile header use memory and time. State each limit for the
+/// documents that you read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Limits {
+    /// The bytes of the input.
+    pub input_bytes_max: u32,
+    /// The containers that one value can be in. A document of one scalar has depth 0, and `[]`
+    /// has depth 1.
+    pub depth_max: u16,
+    /// The bytes of one string or key between its quotes, as written: an escape counts with each
+    /// of its bytes. The decoded string is not longer.
+    pub string_bytes_max: u32,
+    /// The members of one object.
+    pub members_max: u32,
+    /// The elements of one array.
+    pub elements_max: u32,
+    /// The digits of one number: of its integer, its fraction, and its exponent.
+    pub number_digits_max: u16,
+}
+
+/// Reads the document `input` with `decode`, which reads its values with the [`Reader`]. Then it
+/// reads the rest of the document, with each check. Thus it gives the result of `decode` only for
+/// a valid document.
+///
+/// It selects the kernel of the CPU once, and it calls `decode` at one place. Mark `decode`
+/// `#[inline(always)]`: the compiler does not inline a large closure without it, and the reader
+/// keeps its state in registers only when `decode` inlines. A kernel that the build fixes, from
+/// `-C target-feature` or without `std`, inlines into the reader. A kernel that the CPU selects at
+/// run time runs as one call for each block of 64 bytes.
+///
+/// # Errors
+///
+/// The first error of `decode`, or the first refusal of the input. [`ErrorKind::Limit`] with
+/// [`Limit::InputBytes`] at offset `limits.input_bytes_max` if the input is longer.
+#[inline]
+pub fn read<'a, T>(
+    input: &'a [u8],
+    limits: &Limits,
+    profile: Profile,
+    scratch: &mut [Slot],
+    decode: impl FnOnce(&mut Reader<'a, '_>) -> Result<T, Error>,
+) -> Result<T, Error> {
+    read_with(Backend::chosen(), input, limits, profile, scratch, decode)
+}
+
+/// [`read`] on the kernel of `backend`.
+///
+/// It calls `decode` at one place. A call in each arm of a `match` on the kernel would give
+/// `decode` one caller for each kernel, and the compiler would not inline it into any of them.
+#[inline(always)]
+fn read_with<'a, T>(
+    backend: Backend,
+    input: &'a [u8],
+    limits: &Limits,
+    profile: Profile,
+    scratch: &mut [Slot],
+    decode: impl FnOnce(&mut Reader<'a, '_>) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let input_bytes_max = limits.input_bytes_max as usize;
+    if input.len() > input_bytes_max {
+        return Err(Error::new(ErrorKind::Limit(Limit::InputBytes), input_bytes_max));
+    }
+    let mut reader = Reader::new(input, backend, *limits, profile, scratch);
+    let value = decode(&mut reader)?;
+    reader.finish()?;
+    Ok(value)
+}
 
 /// A kernel of the reader: its code that classifies one block, for one instruction set. The
 /// variants depend on the target architecture.
@@ -123,10 +277,9 @@ impl Kernel {
 
     /// The function of the kernel.
     ///
-    /// The cursor takes the function, not the kernel. In the `#[target_feature]` entry of a kernel,
-    /// the compiler then makes each call of the function a direct call, and the kernel inlines into
-    /// the entry. A `match` on the kernel in the cursor would call each kernel from each entry, and
-    /// no kernel would inline.
+    /// The cursor takes the function, not the kernel. When the build fixes the kernel, the function
+    /// is a constant, each call of it is a direct call, and the kernel inlines into the reader. When
+    /// the CPU selects the kernel, the reader calls the function once for each block.
     #[inline(always)]
     fn function(self) -> Classify {
         match self {
@@ -147,19 +300,12 @@ impl Kernel {
 
 /// A kernel that this CPU runs.
 ///
-/// Only [`Backend::new`] and [`Backend::chosen`] make a `Backend`, and each checks the CPU first.
-/// Thus a `Backend` exists only for a kernel whose features the CPU has, and a cursor runs only
-/// such a kernel.
+/// Only [`Backend::chosen`] makes a `Backend`, and it checks the CPU first. Thus a `Backend` exists
+/// only for a kernel whose features the CPU has, and a cursor runs only such a kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Backend(Kernel);
 
 impl Backend {
-    /// The backend of `kernel`, or `None` if this CPU does not have the features of `kernel`.
-    #[inline]
-    fn new(kernel: Kernel) -> Option<Self> {
-        cpu::has(kernel.needs()).then_some(Self(kernel))
-    }
-
     /// The backend of the fastest kernel of this CPU. If the build does not fix it, the first call
     /// chooses it, and each later call reads the choice.
     #[inline(always)]

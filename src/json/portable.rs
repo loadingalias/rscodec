@@ -11,7 +11,7 @@ const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
 
 /// The block of the first 64 bytes of `bytes`, with spaces after them when `bytes` has fewer, after
 /// the 4 bytes `before` in little-endian order and after `carry`.
-#[inline]
+#[inline(always)]
 pub(super) fn block(bytes: &[u8], before: u32, mut carry: Carry) -> Block {
     let words = bytes.first_chunk::<64>().map_or_else(
         || block::tail(bytes),
