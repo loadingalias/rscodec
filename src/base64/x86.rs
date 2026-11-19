@@ -194,6 +194,8 @@ pub(super) mod avx512bw {
         _mm512_broadcast_i32x4(load16::<0, _>(table))
     }
 
+    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
         let shift = each_lane(&Tables::of(profile).nibbles.shift);
@@ -222,6 +224,8 @@ pub(super) mod avx512bw {
         });
     }
 
+    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let tables = &Tables::of(profile).nibbles;
@@ -260,6 +264,8 @@ pub(super) mod avx512vbmi {
 
     use super::{PAIRS, Profile, Tables, WORDS, decode_64, encode_64, load64};
 
+    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
         let alphabet = load64::<0, _>(&Tables::of(profile).alphabet);
@@ -290,6 +296,8 @@ pub(super) mod avx512vbmi {
         });
     }
 
+    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let [low, high] = &Tables::of(profile).sextets;
@@ -329,43 +337,57 @@ pub(super) mod avx512vbmi {
 }
 
 /// Encodes in blocks of 48 bytes with `block`, which gives the 64 characters of the first 48
-/// bytes of a vector. A block loads 64 bytes while the input has them, and a masked load reads the
-/// last blocks.
+/// bytes of a vector. A masked load of 48 lanes, with a constant mask, reads each block, so the
+/// loop has no branch on the place of a block. Each step of the loop runs two blocks.
 #[inline]
 #[target_feature(enable = "avx512bw")]
 fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
-    let (chunks, rest) = bytes.as_chunks::<48>();
+    let zero = _mm512_setzero_si512();
+    let (pairs, rest) = bytes.as_chunks::<96>();
+    let (texts, out) = out.split_at_mut(pairs.len() * 128);
+    for (pair, text) in pairs.iter().zip(texts.as_chunks_mut::<128>().0) {
+        for (chunk, text) in pair.as_chunks::<48>().0.iter().zip(text.as_chunks_mut::<64>().0) {
+            store64::<0, _>(text, block(load_masked(chunk, zero)));
+        }
+    }
+    let (chunks, rest) = rest.as_chunks::<48>();
     let (texts, tail) = out.split_at_mut(chunks.len() * 64);
-    for (index, (chunk, text)) in chunks.iter().zip(texts.as_chunks_mut::<64>().0).enumerate() {
-        let src = match bytes.get(index * 48..).and_then(<[u8]>::first_chunk::<64>) {
-            Some(whole) => load64::<0, _>(whole),
-            None => load_masked(chunk, _mm512_setzero_si512()),
-        };
-        store64::<0, _>(text, block(src));
+    for (chunk, text) in chunks.iter().zip(texts.as_chunks_mut::<64>().0) {
+        store64::<0, _>(text, block(load_masked(chunk, zero)));
     }
     if !rest.is_empty() {
-        store_masked(tail, block(load_masked(rest, _mm512_setzero_si512())));
+        store_masked(tail, block(load_masked(rest, zero)));
     }
 }
 
 /// Decodes in blocks of 64 characters with `block`, which gives the 48 bytes of a vector of
-/// characters. A block stores 64 bytes while the output has room, and the next block writes over
-/// the 16 bytes after its result. A masked store writes the last blocks.
+/// characters. Each step of the loop runs four blocks, and three full stores write their 192 bytes:
+/// two-source permutes of 64-bit words join the blocks. A masked store of 48 lanes, with a constant
+/// mask, writes each of the last blocks, so the loops have no branch on the place of a block.
 #[inline]
 #[target_feature(enable = "avx512bw")]
 fn decode_64(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
-    let (chunks, rest) = text.as_chunks::<64>();
-    for (index, chunk) in chunks.iter().enumerate() {
-        let bytes = block(load64::<0, _>(chunk));
-        let at = index * 48;
-        match out.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<64>) {
-            Some(whole) => store64::<0, _>(whole, bytes),
-            None => store_masked(&mut out[at..at + 48], bytes),
-        }
+    // The six words of each block in turn: words 0 to 7 of the first source, then 8 to 15 of the
+    // second.
+    let first = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 8, 9);
+    let second = _mm512_setr_epi64(2, 3, 4, 5, 8, 9, 10, 11);
+    let third = _mm512_setr_epi64(4, 5, 8, 9, 10, 11, 12, 13);
+    let (quads, rest) = text.as_chunks::<256>();
+    let (outs, out) = out.split_at_mut(quads.len() * 192);
+    for (quad, bytes) in quads.iter().zip(outs.as_chunks_mut::<192>().0) {
+        let (a, b) = (block(load64::<0, _>(quad)), block(load64::<64, _>(quad)));
+        let (c, d) = (block(load64::<128, _>(quad)), block(load64::<192, _>(quad)));
+        store64::<0, _>(bytes, _mm512_permutex2var_epi64(a, first, b));
+        store64::<64, _>(bytes, _mm512_permutex2var_epi64(b, second, c));
+        store64::<128, _>(bytes, _mm512_permutex2var_epi64(c, third, d));
+    }
+    let (chunks, rest) = rest.as_chunks::<64>();
+    let (outs, tail) = out.split_at_mut(chunks.len() * 48);
+    for (chunk, bytes) in chunks.iter().zip(outs.as_chunks_mut::<48>().0) {
+        store_masked(bytes, block(load64::<0, _>(chunk)));
     }
     if !rest.is_empty() {
         // 'A', which is zero, in place of the characters after the end.
-        let tail = &mut out[chunks.len() * 48..];
         store_masked(tail, block(load_masked(rest, _mm512_set1_epi8(b'A'.cast_signed()))));
     }
 }

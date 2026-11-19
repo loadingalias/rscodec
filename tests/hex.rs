@@ -125,27 +125,27 @@ fn short_inputs_round_trip_and_each_other_byte_refuses() {
 }
 
 /// Each backend and each timing class gives the result and the error of the portable backend: on
-/// random inputs of each length to 64 bytes, on each byte at each place of their texts, and on
-/// random inputs to 1 MiB.
+/// random inputs of each length to 96 bytes, past the short path of 64 bytes, on each byte at each
+/// place of their texts, and on random inputs to 1 MiB.
 #[test]
 fn each_backend_equals_the_portable_backend() {
     let portable = Call::With(Backend::new(Kernel::Portable).unwrap());
     let calls = calls();
     let mut rng = Rng::new(0x0068_6578);
-    for len in (0..=64).chain([1000, 4096, 65_535, 65_536, 1 << 20]) {
+    for len in (0..=96).chain([1000, 4096, 65_535, 65_536, 1 << 20]) {
         let bytes = rng.bytes(len);
         let text = encode(portable, &bytes);
         let mut texts = vec![text.clone(), [&text[..], b"0"].concat()];
         for place in 0..text.len() {
             // Each byte value at a seventh of the places of each length, so that over the lengths
             // each place meets each byte. A random byte at the other places.
-            let small = len <= 64 && place % 7 == len % 7;
+            let small = len <= 96 && place % 7 == len % 7;
             for byte in if small { 0..=255 } else { 0..=0 } {
                 let mut changed = text.clone();
                 changed[place] = if small { byte } else { rng.byte() };
                 texts.push(changed);
             }
-            if len > 64 && texts.len() > 16 {
+            if len > 96 && texts.len() > 16 {
                 break;
             }
         }

@@ -3,6 +3,15 @@
 
 use crate::ct::Class;
 
+/// The largest input of the short path of a codec, in bytes: it runs inline in the caller, with no
+/// choice of kernel and no call. On x86_64 the short path is SSE2, and at 64 bytes the AVX-512BW
+/// kernel with its call is two times faster (C105 run 1).
+#[cfg(any(all(feature = "hex", target_arch = "x86_64"), target_arch = "aarch64"))]
+pub(crate) const SHORT_MAX: usize = cfg_select! {
+    target_arch = "x86_64" => 32,
+    _ => 64,
+};
+
 /// Runs `block` over `input` and `output`. Each block reads `IN` bytes of input and uses the first
 /// `step`. It writes `OUT` bytes of output, and the first `out_len(step)` of them are the result.
 ///
@@ -36,12 +45,18 @@ pub(crate) fn blocks<const IN: usize, const OUT: usize>(
         }
         let mut dst = [0; OUT];
         block(&src, &mut dst);
-        let len_out = out_len(len);
+        // A whole step gives a constant, and the last block gives the rest of `output`. Thus no
+        // division of the length waits before the stores.
+        let len_out = if len == step {
+            out_len(step)
+        } else {
+            output.len() - written
+        };
         for (chunk, piece) in output[written..written + len_out]
             .chunks_mut(16)
             .zip(dst.as_chunks::<16>().0)
         {
-            write16(class, chunk, u128::from_le_bytes(*piece));
+            write16(chunk, u128::from_le_bytes(*piece));
         }
         class.clear(&mut src);
         class.clear(&mut dst);
@@ -61,6 +76,14 @@ pub(crate) fn whole_blocks<const IN: usize, const OUT: usize>(
     mut block: impl FnMut(&[u8; IN], &mut [u8; OUT]),
 ) -> (usize, usize) {
     let step_out = out_len(step);
+    // Blocks that use all of their load and their store do not overlap, so one count bounds the
+    // loop. The arguments are constants, so the compiler keeps only one of the two loops.
+    if step == IN && step_out == OUT {
+        let blocks = input.as_chunks::<IN>().0.iter().zip(output.as_chunks_mut::<OUT>().0);
+        let count = blocks.len();
+        blocks.for_each(|(src, dst)| block(src, dst));
+        return (count * IN, count * OUT);
+    }
     let (mut read, mut written) = (0, 0);
     while let (Some(src), Some(dst)) = (
         input.get(read..).and_then(<[u8]>::first_chunk),
@@ -101,29 +124,33 @@ fn read16(src: &[u8], fill: u8) -> u128 {
 }
 
 /// Writes the low `dst.len()` bytes, at most 16, of `value` into `dst`, with two overlapping stores
-/// of 8, 4, or 1 bytes.
+/// of 8, 4, or 1 bytes. Shifts of `value` give the bytes of each store, so the value stays in
+/// registers: a load at a variable offset in a copy of it on the stack waits for the copy.
 #[inline(always)]
-fn write16(class: impl Class, dst: &mut [u8], value: u128) {
+fn write16(dst: &mut [u8], value: u128) {
     let len = dst.len();
     assert!(len <= 16);
-    let mut bytes = value.to_le_bytes();
+    // The bytes from `at`, which is less than 16, in the low bits.
+    let from = |at: usize| value >> (8 * at);
+    let word = |value: u128| u64::try_from(value & u128::from(u64::MAX)).unwrap_or_default();
+    let half = |value: u128| u32::try_from(value & u128::from(u32::MAX)).unwrap_or_default();
+    let byte = |value: u128| value.to_le_bytes()[0];
     match len {
         8.. => {
-            dst[..8].copy_from_slice(&bytes[..8]);
-            dst[len - 8..].copy_from_slice(&bytes[len - 8..len]);
+            dst[..8].copy_from_slice(&word(value).to_le_bytes());
+            dst[len - 8..].copy_from_slice(&word(from(len - 8)).to_le_bytes());
         }
         4.. => {
-            dst[..4].copy_from_slice(&bytes[..4]);
-            dst[len - 4..].copy_from_slice(&bytes[len - 4..len]);
+            dst[..4].copy_from_slice(&half(value).to_le_bytes());
+            dst[len - 4..].copy_from_slice(&half(from(len - 4)).to_le_bytes());
         }
         1.. => {
-            dst[0] = bytes[0];
-            dst[len / 2] = bytes[len / 2];
-            dst[len - 1] = bytes[len - 1];
+            dst[0] = byte(value);
+            dst[len / 2] = byte(from(len / 2));
+            dst[len - 1] = byte(from(len - 1));
         }
         0 => {}
     }
-    class.clear(&mut bytes);
 }
 
 /// The loads and stores of x86_64. Each takes an array and an offset in it, and a constant

@@ -1,20 +1,26 @@
 //! base-N encode and valid decode: base64url without padding up to 4 KiB, padded standard base64
 //! at 64 KiB, and lowercase hex.
 //!
-//! Each row writes into a buffer that the row owns. Before timing, each encode must give the text
-//! of data-encoding, and each decode must give the original bytes.
+//! Each row of a case reads the same input and writes into the same output, both from a 64-byte
+//! boundary. Before timing, each encode must give the text of data-encoding, and each decode must
+//! give the original bytes.
 //!
 //! The rows of rscodec:
 //!
 //! - `rscodec`: the public functions.
 //! - `rscodec-secret`: the secret functions.
+//! - `rscodec-secret-held`, on aarch64: the secret functions in a loop that holds `PSTATE.DIT`, with
+//!   the scope that the usage page names.
 //! - One row for each kernel that the host runs, for example `rscodec-avx2`.
 //!
 //! The secret functions run the kernel of one of the kernel rows. Thus the two rows give the cost
 //! of the secret class, for example the cost of `PSTATE.DIT` on aarch64.
 
+#[path = "common/aligned.rs"]
+mod aligned;
 mod common;
 
+use aligned::Aligned;
 use base64::Engine as _;
 use base64ct::Encoding as _;
 use common::Group;
@@ -28,12 +34,27 @@ const SIZES: [usize; 6] = [16, 32, 64, 256, 4096, 65536];
 /// base64, the form of bulk data.
 const URL_SIZE_MAX: usize = 4096;
 
-/// One raw input and its text in one alphabet.
+/// One raw input, its text in one alphabet, and the output of each row.
 struct Case {
     label: String,
     url: bool,
-    raw: Vec<u8>,
-    text: Vec<u8>,
+    raw: Aligned,
+    text: Aligned,
+    output: Aligned,
+}
+
+impl Case {
+    fn new(label: String, url: bool, raw: &[u8], text: &[u8]) -> Self {
+        // Each decoder may need room for the bytes of a full last quantum.
+        let output = Aligned::new(&vec![0; text.len().max(raw.len() + 3)]);
+        Self {
+            label,
+            url,
+            raw: Aligned::new(raw),
+            text: Aligned::new(text),
+            output,
+        }
+    }
 }
 
 /// Deterministic pseudo-random bytes (xorshift64*), so that each run reads the same inputs.
@@ -60,8 +81,7 @@ fn base64_cases() -> Vec<Case> {
             } else {
                 (format!("std-{size}"), &data_encoding::BASE64)
             };
-            let text = oracle.encode(&raw).into_bytes();
-            Case { label, url, raw, text }
+            Case::new(label, url, &raw, oracle.encode(&raw).as_bytes())
         })
         .collect()
 }
@@ -71,27 +91,34 @@ fn hex_cases() -> Vec<Case> {
         .iter()
         .map(|&size| {
             let raw = random_bytes(size);
-            let text = data_encoding::HEXLOWER.encode(&raw).into_bytes();
-            Case {
-                label: size.to_string(),
-                url: false,
-                raw,
-                text,
-            }
+            Case::new(
+                size.to_string(),
+                false,
+                &raw,
+                data_encoding::HEXLOWER.encode(&raw).as_bytes(),
+            )
         })
         .collect()
 }
 
 /// A row that encodes `case.raw` with `encode`, which returns the length of the text.
-fn encode_row(group: &mut Group<'_>, case: &Case, codec: &str, mut encode: impl FnMut(&[u8], &mut [u8]) -> usize) {
+fn encode_row(group: &mut Group<'_>, case: &mut Case, codec: &str, mut encode: impl FnMut(&[u8], &mut [u8]) -> usize) {
+    let Case {
+        label,
+        raw,
+        text,
+        output,
+        ..
+    } = case;
+    let (raw, text) = (&**raw, &**text);
     group.row(
         codec,
-        &case.label,
-        vec![0; case.text.len()],
-        |output| encode(&case.raw, output),
+        label,
+        &mut output[..text.len()],
+        |output| encode(raw, output),
         |written, output| {
-            assert_eq!(&output[..written], case.text, "{codec} encodes {}", case.label);
-            report_place(codec, case, &case.raw, output);
+            assert_eq!(&output[..written], text, "{codec} encodes {label}");
+            report_place(codec, label, raw, output);
         },
     );
 }
@@ -100,22 +127,37 @@ fn encode_row(group: &mut Group<'_>, case: &Case, codec: &str, mut encode: impl 
 /// for an error.
 fn decode_row(
     group: &mut Group<'_>,
-    case: &Case,
+    case: &mut Case,
     codec: &str,
     output_len: usize,
     mut decode: impl FnMut(&[u8], &mut [u8]) -> Option<usize>,
 ) {
+    let Case {
+        label,
+        raw,
+        text,
+        output,
+        ..
+    } = case;
+    let (raw, text) = (&**raw, &**text);
     group.row(
         codec,
-        &case.label,
-        vec![0; output_len],
-        |output| decode(&case.text, output),
+        label,
+        &mut output[..output_len],
+        |output| decode(text, output),
         |written, output| {
             let written = written.expect("valid text decodes");
-            assert_eq!(&output[..written], case.raw, "{codec} decodes {}", case.label);
-            report_place(codec, case, &case.text, output);
+            assert_eq!(&output[..written], raw, "{codec} decodes {label}");
+            report_place(codec, label, text, output);
         },
     );
+}
+
+/// Runs `rows` with `PSTATE.DIT` set, with the scope that the usage page names. Criterion runs
+/// each row in the call that registers it, so the scope holds for each timed loop of the rows.
+#[cfg(target_arch = "aarch64")]
+fn held(rows: impl FnOnce()) {
+    rscrypto::traits::ct::with_data_independent_timing(rows);
 }
 
 /// Prints the offsets of the input and the output of a row in their 4 KiB pages. A load or a store
@@ -124,14 +166,9 @@ fn decode_row(
     clippy::print_stdout,
     reason = "a benchmark binary reports the place of the buffers of each row on standard output, beside Criterion"
 )]
-fn report_place(codec: &str, case: &Case, input: &[u8], output: &[u8]) {
+fn report_place(codec: &str, label: &str, input: &[u8], output: &[u8]) {
     let page = |bytes: &[u8]| bytes.as_ptr().addr() % 4096;
-    println!(
-        "place {codec}/{} input={} output={}",
-        case.label,
-        page(input),
-        page(output)
-    );
+    println!("place {codec}/{label} input={} output={}", page(input), page(output));
 }
 
 /// The name of the row of `kernel`, for example `rscodec-avx2`.
@@ -155,7 +192,7 @@ fn base64_engines(url: bool) -> (base64::engine::GeneralPurpose, base64::engine:
 
 fn base64_encode(criterion: &mut Criterion) {
     let mut group = Group::new(criterion, "base64-encode");
-    for case in &base64_cases() {
+    for case in &mut base64_cases() {
         group.throughput(Throughput::Bytes(case.raw.len().try_into().expect("a length fits u64")));
         let g = &mut group;
         let profile = if case.url { Profile::Url } else { Profile::Standard };
@@ -164,6 +201,12 @@ fn base64_encode(criterion: &mut Criterion) {
         });
         encode_row(g, case, "rscodec-secret", |raw, out| {
             profile.encode_secret(raw, out).expect("room").len()
+        });
+        #[cfg(target_arch = "aarch64")]
+        held(|| {
+            encode_row(g, case, "rscodec-secret-held", |raw, out| {
+                profile.encode_secret(raw, out).expect("room").len()
+            });
         });
         for &kernel in rscodec::base64::Kernel::ALL {
             if let Some(backend) = rscodec::base64::Backend::new(kernel) {
@@ -243,10 +286,9 @@ fn base64_encode(criterion: &mut Criterion) {
 
 fn base64_decode(criterion: &mut Criterion) {
     let mut group = Group::new(criterion, "base64-decode");
-    for case in &base64_cases() {
+    for case in &mut base64_cases() {
         group.throughput(Throughput::Bytes(case.raw.len().try_into().expect("a length fits u64")));
         let g = &mut group;
-        // Each decoder may need room for the bytes of a full last quantum.
         let room = case.raw.len() + 3;
         let profile = if case.url { Profile::Url } else { Profile::Standard };
         decode_row(g, case, "rscodec", room, |text, out| {
@@ -254,6 +296,12 @@ fn base64_decode(criterion: &mut Criterion) {
         });
         decode_row(g, case, "rscodec-secret", room, |text, out| {
             profile.decode_secret(text, out).ok().map(|bytes| bytes.len())
+        });
+        #[cfg(target_arch = "aarch64")]
+        held(|| {
+            decode_row(g, case, "rscodec-secret-held", room, |text, out| {
+                profile.decode_secret(text, out).ok().map(|bytes| bytes.len())
+            });
         });
         for &kernel in rscodec::base64::Kernel::ALL {
             if let Some(backend) = rscodec::base64::Backend::new(kernel) {
@@ -337,7 +385,7 @@ fn base64_decode(criterion: &mut Criterion) {
 
 fn hex_encode(criterion: &mut Criterion) {
     let mut group = Group::new(criterion, "hex-encode");
-    for case in &hex_cases() {
+    for case in &mut hex_cases() {
         group.throughput(Throughput::Bytes(case.raw.len().try_into().expect("a length fits u64")));
         let g = &mut group;
         encode_row(g, case, "rscodec", |raw, out| {
@@ -345,6 +393,12 @@ fn hex_encode(criterion: &mut Criterion) {
         });
         encode_row(g, case, "rscodec-secret", |raw, out| {
             hex::encode_secret(raw, out).expect("room").len()
+        });
+        #[cfg(target_arch = "aarch64")]
+        held(|| {
+            encode_row(g, case, "rscodec-secret-held", |raw, out| {
+                hex::encode_secret(raw, out).expect("room").len()
+            });
         });
         for &kernel in hex::Kernel::ALL {
             if let Some(backend) = hex::Backend::new(kernel) {
@@ -368,7 +422,7 @@ fn hex_encode(criterion: &mut Criterion) {
 
 fn hex_decode(criterion: &mut Criterion) {
     let mut group = Group::new(criterion, "hex-decode");
-    for case in &hex_cases() {
+    for case in &mut hex_cases() {
         group.throughput(Throughput::Bytes(case.raw.len().try_into().expect("a length fits u64")));
         let g = &mut group;
         let room = case.raw.len();
@@ -377,6 +431,12 @@ fn hex_decode(criterion: &mut Criterion) {
         });
         decode_row(g, case, "rscodec-secret", room, |text, out| {
             hex::decode_secret(text, out).ok().map(|bytes| bytes.len())
+        });
+        #[cfg(target_arch = "aarch64")]
+        held(|| {
+            decode_row(g, case, "rscodec-secret-held", room, |text, out| {
+                hex::decode_secret(text, out).ok().map(|bytes| bytes.len())
+            });
         });
         for &kernel in hex::Kernel::ALL {
             if let Some(backend) = hex::Backend::new(kernel) {

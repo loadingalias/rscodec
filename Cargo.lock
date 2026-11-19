@@ -864,6 +864,7 @@ dependencies = [
  "flexon",
  "jiter",
  "rscodec",
+ "rscrypto",
  "ryu",
  "serde_json",
  "simd-json",
@@ -871,6 +872,12 @@ dependencies = [
  "sonic-rs",
  "zmij",
 ]
+
+[[package]]
+name = "rscrypto"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e708a799aaf045099fc91c80bb60a63e8e3da710a6a17953d97afc5ecb192861"
 
 [[package]]
 name = "rustversion"

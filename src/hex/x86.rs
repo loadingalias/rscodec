@@ -1,6 +1,6 @@
-//! The x86_64 kernels: SSSE3, AVX2, and AVX-512BW. `pshufb` maps each nibble to its digit, and
-//! compares classify each character. Each decoder ANDs the valid lanes of each block into one
-//! vector or mask, and tests it once after the last block.
+//! The x86_64 kernels: SSSE3, AVX2, and AVX-512BW, and the short path on SSE2. In the kernels,
+//! `pshufb` maps each nibble to its digit, and compares classify each character. Each decoder ANDs
+//! the valid lanes of each block into one vector or mask, and tests it once after the last block.
 
 #![expect(
     clippy::missing_safety_doc,
@@ -26,13 +26,16 @@ const PAIR: i16 = 0x0110;
 /// The step from `c - '0'` to the nibble of a letter `a`–`f`.
 const LETTER_STEP: i8 = 39;
 
-pub(super) mod ssse3 {
+/// The short path: SSE2, which each x86_64 CPU has, for an input of up to `SHORT_MAX` bytes. It runs
+/// inline in the caller, with no choice of kernel. SSE2 has no `pshufb` and no `pmaddubsw`, so
+/// compares give the digits, and shifts join the nibbles.
+pub(super) mod sse2 {
     use super::*;
 
     /// The nibbles of 16 characters, and the lanes that are digits, which are all ones.
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    fn nibbles(chars: __m128i) -> (__m128i, __m128i) {
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    pub(super) fn nibbles(chars: __m128i) -> (__m128i, __m128i) {
         // `c - '0' - 128` is below -118 only for `0`–`9`, and `c - 'a' - 128` is below -122 only for
         // `a`–`f`. Thus signed compares give the ranges.
         let digit = _mm_cmpgt_epi8(
@@ -49,6 +52,67 @@ pub(super) mod ssse3 {
         );
         (value, _mm_or_si128(digit, letter))
     }
+
+    /// The digit of each nibble of 16.
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    fn digits(nibbles: __m128i) -> __m128i {
+        let letter = _mm_and_si128(_mm_cmpgt_epi8(nibbles, _mm_set1_epi8(9)), _mm_set1_epi8(LETTER_STEP));
+        _mm_add_epi8(_mm_add_epi8(nibbles, _mm_set1_epi8(b'0'.cast_signed())), letter)
+    }
+
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    pub(in super::super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
+        let nibble = _mm_set1_epi8(0x0f);
+        blocks::<16, 32>(
+            class,
+            bytes,
+            out,
+            16,
+            0,
+            |len| len * 2,
+            |src, dst| {
+                let src = load16::<0, _>(src);
+                let hi = digits(_mm_and_si128(_mm_srli_epi16(src, 4), nibble));
+                let lo = digits(_mm_and_si128(src, nibble));
+                store16::<0, _>(dst, _mm_unpacklo_epi8(hi, lo));
+                store16::<16, _>(dst, _mm_unpackhi_epi8(hi, lo));
+            },
+        );
+    }
+
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    pub(in super::super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
+        let mut valid = _mm_set1_epi8(-1);
+        // The byte of each 16-bit lane of two nibbles: the first, the high nibble, is the low byte.
+        let join = |pair: __m128i| {
+            _mm_or_si128(
+                _mm_slli_epi16(_mm_and_si128(pair, _mm_set1_epi16(0x00ff)), 4),
+                _mm_srli_epi16(pair, 8),
+            )
+        };
+        blocks::<32, 16>(
+            class,
+            text,
+            out,
+            32,
+            b'0',
+            |len| len / 2,
+            |src, dst| {
+                let (first, first_valid) = nibbles(load16::<0, _>(src));
+                let (second, second_valid) = nibbles(load16::<16, _>(src));
+                valid = _mm_and_si128(valid, _mm_and_si128(first_valid, second_valid));
+                store16::<0, _>(dst, _mm_packus_epi16(join(first), join(second)));
+            },
+        );
+        _mm_movemask_epi8(valid) == 0xffff
+    }
+}
+
+pub(super) mod ssse3 {
+    use super::{sse2::nibbles, *};
 
     #[target_feature(enable = "ssse3")]
     pub(in super::super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
@@ -190,7 +254,7 @@ pub(super) mod avx512bw {
         let value = _mm512_sub_epi8(chars, _mm512_set1_epi8(b'0'.cast_signed()));
         (
             _mm512_mask_sub_epi8(value, letter, value, _mm512_set1_epi8(LETTER_STEP)),
-            digit | letter,
+            _kor_mask64(digit, letter),
         )
     }
 
@@ -216,9 +280,14 @@ pub(super) mod avx512bw {
         let pair = _mm512_set1_epi16(PAIR);
         let bytes = _mm512_packus_epi16(_mm512_maddubs_epi16(first, pair), _mm512_maddubs_epi16(second, pair));
         let order = _mm512_setr_epi32(0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15);
-        (_mm512_permutexvar_epi32(order, bytes), first_valid & second_valid)
+        (
+            _mm512_permutexvar_epi32(order, bytes),
+            _kand_mask64(first_valid, second_valid),
+        )
     }
 
+    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn encode(bytes: &[u8], out: &mut [u8]) {
         let digits = _mm512_broadcast_i32x4(load16::<0, _>(&DIGITS));
@@ -229,14 +298,20 @@ pub(super) mod avx512bw {
             store64::<0, _>(text, first);
             store64::<64, _>(text, second);
         }
-        if !rest.is_empty() {
-            let (first, second) = encode_block(digits, load_masked(rest, _mm512_setzero_si512()));
-            let (tail_first, tail_second) = tail.split_at_mut(tail.len().min(64));
-            store_masked(tail_first, first);
-            store_masked(tail_second, second);
+        // The rest, 32 bytes for each vector: each byte in a 16-bit lane, its high nibble in the low
+        // byte, so that the digits come in the order of the text.
+        for (chunk, text) in rest.chunks(32).zip(tail.chunks_mut(64)) {
+            let src = _mm512_cvtepu8_epi16(_mm512_castsi512_si256(load_masked(chunk, _mm512_setzero_si512())));
+            let nibbles = _mm512_or_si512(
+                _mm512_srli_epi16(src, 4),
+                _mm512_slli_epi16(_mm512_and_si512(src, _mm512_set1_epi16(0x0f)), 8),
+            );
+            store_masked(text, _mm512_shuffle_epi8(digits, nibbles));
         }
     }
 
+    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
         let mut valid = u64::MAX;
@@ -244,16 +319,18 @@ pub(super) mod avx512bw {
         let (bytes, tail) = out.split_at_mut(chunks.len() * 64);
         for (chunk, bytes) in chunks.iter().zip(bytes.as_chunks_mut::<64>().0) {
             let (block, block_valid) = decode_block(load64::<0, _>(chunk), load64::<64, _>(chunk));
-            valid &= block_valid;
+            valid = _kand_mask64(valid, block_valid);
             store64::<0, _>(bytes, block);
         }
-        if !rest.is_empty() {
-            // '0', which is zero, in place of the characters after the end.
-            let zeros = _mm512_set1_epi8(b'0'.cast_signed());
-            let (first, second) = rest.split_at(rest.len().min(64));
-            let (block, block_valid) = decode_block(load_masked(first, zeros), load_masked(second, zeros));
-            valid &= block_valid;
-            store_masked(tail, block);
+        // The rest, 64 characters for each vector: `pmaddubsw` joins each pair in a 16-bit lane, and
+        // `vpmovwb` narrows the lanes to the bytes. '0', which is zero, is in place of the characters
+        // after the end.
+        let zeros = _mm512_set1_epi8(b'0'.cast_signed());
+        for (chars, bytes) in rest.chunks(64).zip(tail.chunks_mut(32)) {
+            let (nibbles, chars_valid) = nibbles(load_masked(chars, zeros));
+            valid = _kand_mask64(valid, chars_valid);
+            let joined = _mm512_cvtepi16_epi8(_mm512_maddubs_epi16(nibbles, _mm512_set1_epi16(PAIR)));
+            store_masked(bytes, _mm512_castsi256_si512(joined));
         }
         valid == u64::MAX
     }

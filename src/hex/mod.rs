@@ -107,12 +107,18 @@ pub const fn decoded_len(text: &[u8]) -> Result<usize, Error> {
 /// Encodes `bytes` into the start of `out`, and gives the text, which is ASCII. It runs the fastest
 /// kernel of the CPU, for public bytes. Encode a secret with [`encode_secret`].
 ///
+/// On x86_64, an input of up to 32 bytes runs on SSE2, which each x86_64 CPU has, inline and with
+/// no choice of kernel. When `-C target-feature` fixes a SIMD kernel, that kernel runs inline at each
+/// length.
+///
 /// # Errors
 ///
 /// Returns [`ErrorKind::Output`] if `out` is shorter than [`encoded_len`].
 #[inline]
 pub fn encode<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-    encode_with(Backend(Kernel::chosen(Timing::Public)), bytes, out)
+    encode_by(bytes, out, |bytes, out| {
+        kernel::encode_chosen(Public, Timing::Public, bytes, out)
+    })
 }
 
 /// [`encode`] for secret bytes, for example a key. It runs only the kernels whose instructions have
@@ -123,8 +129,11 @@ pub fn encode<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error
 /// As [`encode`].
 #[inline]
 pub fn encode_secret<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-    let backend = Backend(Kernel::chosen(Timing::Secret));
-    cpu::data_independent_timing(|| encode_by(Secret, backend, bytes, out))
+    cpu::data_independent_timing(|| {
+        encode_by(bytes, out, |bytes, out| {
+            kernel::encode_chosen(Secret, Timing::Secret, bytes, out)
+        })
+    })
 }
 
 /// [`encode`] on the kernel of `backend`.
@@ -134,24 +143,31 @@ pub fn encode_secret<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8]
 /// As [`encode`].
 #[inline]
 pub fn encode_with<'o>(backend: Backend, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-    encode_by(Public, backend, bytes, out)
+    encode_by(bytes, out, |bytes, out| kernel::encode(Public, backend, bytes, out))
 }
 
-/// Encodes `bytes` on `backend`, in `class`.
+/// Encodes `bytes` with `kernel`, which writes the text into an output of its length.
 #[inline(always)]
-fn encode_by<'o>(class: impl Class, backend: Backend, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
+fn encode_by<'o>(
+    bytes: &[u8],
+    out: &'o mut [u8],
+    kernel: impl FnOnce(&[u8], &mut [u8]),
+) -> Result<&'o mut [u8], Error> {
     // A slice has at most `isize::MAX` bytes, so the length cannot overflow.
     let len = encoded_len(bytes.len()).unwrap_or(usize::MAX);
     let out = out.get_mut(..len).ok_or(Error {
         kind: ErrorKind::Output,
         offset: len,
     })?;
-    kernel::encode(class, backend, bytes, out);
+    kernel(bytes, out);
     Ok(out)
 }
 
 /// Decodes the lowercase hex `text` into the start of `out`, and gives the bytes. It runs the
 /// fastest kernel of the CPU, for public text. Decode a secret with [`decode_secret`].
+///
+/// On x86_64, a result of up to 32 bytes comes from SSE2, inline and with no choice of kernel. When
+/// `-C target-feature` fixes a SIMD kernel, that kernel runs inline at each length.
 ///
 /// The bytes of `out` after the result, and all of `out` after an error, are unspecified.
 ///
@@ -163,7 +179,9 @@ fn encode_by<'o>(class: impl Class, backend: Backend, bytes: &[u8], out: &'o mut
 ///   reads all of `text` before it refuses it.
 #[inline]
 pub fn decode<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-    decode_with(Backend(Kernel::chosen(Timing::Public)), text, out)
+    decode_by(Public, text, out, |text, out| {
+        kernel::decode_chosen(Public, Timing::Public, text, out)
+    })
 }
 
 /// [`decode`] for secret text, for example a key. It runs only the kernels whose instructions have
@@ -177,8 +195,11 @@ pub fn decode<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error>
 /// As [`decode`].
 #[inline]
 pub fn decode_secret<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-    let backend = Backend(Kernel::chosen(Timing::Secret));
-    cpu::data_independent_timing(|| decode_by(Secret, backend, text, out))
+    cpu::data_independent_timing(|| {
+        decode_by(Secret, text, out, |text, out| {
+            kernel::decode_chosen(Secret, Timing::Secret, text, out)
+        })
+    })
 }
 
 /// [`decode`] on the kernel of `backend`.
@@ -188,20 +209,27 @@ pub fn decode_secret<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8],
 /// As [`decode`].
 #[inline]
 pub fn decode_with<'o>(backend: Backend, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-    decode_by(Public, backend, text, out)
+    decode_by(Public, text, out, |text, out| {
+        kernel::decode(Public, backend, text, out)
+    })
 }
 
-/// Decodes `text` on `backend`, in `class`. In the secret class, a refusal of the characters writes
-/// zero to the output first.
+/// Decodes `text` with `kernel`, which gives whether each character is a digit. In the secret
+/// `class`, a refusal of the characters writes zero to the output first.
 #[inline(always)]
-fn decode_by<'o>(class: impl Class, backend: Backend, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
+fn decode_by<'o>(
+    class: impl Class,
+    text: &[u8],
+    out: &'o mut [u8],
+    kernel: impl FnOnce(&[u8], &mut [u8]) -> bool,
+) -> Result<&'o mut [u8], Error> {
     let len = decoded_len(text)?;
     let out = out.get_mut(..len).ok_or(Error {
         kind: ErrorKind::Output,
         offset: len,
     })?;
     // One branch for the whole text.
-    if !kernel::decode(class, backend, text, out) {
+    if !kernel(text, out) {
         class.wipe(out);
         let offset = ct::first_negative(text.iter().map(|&byte| portable::nibble(byte)));
         return Err(Error {
@@ -363,7 +391,46 @@ mod kernel {
     #[cfg(target_arch = "x86_64")]
     use super::x86;
     use super::{Backend, Kernel, portable};
-    use crate::ct::Class;
+    #[cfg(target_arch = "x86_64")]
+    use crate::simd::SHORT_MAX;
+    use crate::{cpu::Timing, ct::Class};
+
+    /// Whether the short path runs for `timing`: unless the build fixes a SIMD kernel, which then
+    /// runs inline at each length.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn short(timing: Timing) -> bool {
+        const fn fixes_simd(timing: Timing) -> bool {
+            matches!(Kernel::fixed(timing), Some(index) if !matches!(Kernel::ALL[index], Kernel::Portable))
+        }
+        match timing {
+            Timing::Public => const { !fixes_simd(Timing::Public) },
+            Timing::Secret => const { !fixes_simd(Timing::Secret) },
+        }
+    }
+
+    /// Encodes `bytes` into `out` in a function of `timing` with no backend argument: on x86_64, an
+    /// input of up to `SHORT_MAX` bytes on the short path, and otherwise on the chosen kernel.
+    #[inline(always)]
+    pub(super) fn encode_chosen(class: impl Class, timing: Timing, bytes: &[u8], out: &mut [u8]) {
+        #[cfg(target_arch = "x86_64")]
+        if short(timing) && bytes.len() <= SHORT_MAX {
+            // SAFETY: each x86_64 target has SSE2.
+            return unsafe { x86::sse2::encode(class, bytes, out) };
+        }
+        encode(class, Backend(Kernel::chosen(timing)), bytes, out);
+    }
+
+    /// Decodes `text` into `out` as [`encode_chosen`] encodes.
+    #[inline(always)]
+    pub(super) fn decode_chosen(class: impl Class, timing: Timing, text: &[u8], out: &mut [u8]) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if short(timing) && out.len() <= SHORT_MAX {
+            // SAFETY: each x86_64 target has SSE2.
+            return unsafe { x86::sse2::decode(class, text, out) };
+        }
+        decode(class, Backend(Kernel::chosen(timing)), text, out)
+    }
 
     /// Encodes `bytes` into `out`, which has twice the length.
     #[cfg_attr(

@@ -212,6 +212,10 @@ fn main() -> Result<(), rscodec::base64::Error> {
 - With `std`, the crate detects the CPU one time for each process. When `-C target-feature` turns
   on the features of the fastest kernel of a class, the choice is made at compile time.
 - Without `std`, a kernel is available only if `-C target-feature` turns on its features.
+- A short input runs inline in the caller, with no choice of kernel: on aarch64, up to 64 bytes on
+  the Neon kernel, and on x86_64, for hex, up to 32 bytes on SSE2. When `-C target-feature` fixes a
+  SIMD kernel of a class, that kernel runs inline at each length. `encode_with` and `decode_with`
+  always run the kernel of their backend.
 - WebAssembly has no run-time detection, so `Simd128` exists only with `+simd128`.
 - On an Intel hybrid CPU (Alder Lake to Arrow Lake), the AVX-512 kernels do not run, also if CPUID
   reports AVX-512. Its efficient cores do not have AVX-512.
