@@ -183,8 +183,8 @@ pub(super) mod avx512bw {
     use core::arch::x86_64::*;
 
     use super::{
-        DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, LOW_SEXTETS, PAIRS, Profile, Tables, WORDS, decode_64, encode_64,
-        load16,
+        DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, LOW_SEXTETS, PAIRS, Profile, Tables, WORDS, decode_64, decode_rest,
+        encode_64, encode_rest, load16,
     };
 
     /// A table of 16 bytes in each 128-bit lane.
@@ -194,15 +194,15 @@ pub(super) mod avx512bw {
         _mm512_broadcast_i32x4(load16::<0, _>(table))
     }
 
-    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
-    #[cfg_attr(target_feature = "avx512bw", inline)]
+    /// The block of the encoder of `profile`: the 64 characters of the first 48 bytes of a vector.
+    #[inline]
     #[target_feature(enable = "avx512bw")]
-    pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+    fn encoder(profile: Profile) -> impl FnMut(__m512i) -> __m512i {
         let shift = each_lane(&Tables::of(profile).nibbles.shift);
         let order = each_lane(&ENCODE_ORDER);
         // The 12 bytes of each 128-bit lane: the 32-bit words 0 to 2, 3 to 5, 6 to 8, and 9 to 11.
         let spread = _mm512_setr_epi32(0, 1, 2, 2, 3, 4, 5, 5, 6, 7, 8, 8, 9, 10, 11, 11);
-        encode_64(bytes, out, |src| {
+        move |src| {
             let input = _mm512_shuffle_epi8(_mm512_permutexvar_epi32(spread, src), order);
             // The shifts of each 16-bit lane in place of the multiplies of the AVX2 kernel.
             let high = _mm512_srlv_epi16(
@@ -221,13 +221,14 @@ pub(super) mod avx512bw {
                 _mm512_set1_epi8(13),
             );
             _mm512_add_epi8(sextets, _mm512_shuffle_epi8(shift, class))
-        });
+        }
     }
 
-    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
-    #[cfg_attr(target_feature = "avx512bw", inline)]
+    /// The block of the decoder of `profile`: the 48 bytes of a vector of characters. It ORs the
+    /// classes of the characters into `invalid`, which is not zero for a byte outside the alphabet.
+    #[inline]
     #[target_feature(enable = "avx512bw")]
-    pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+    fn decoder(profile: Profile, invalid: &mut __m512i) -> impl FnMut(__m512i) -> __m512i {
         let tables = &Tables::of(profile).nibbles;
         let (lo_classes, hi_classes) = (each_lane(&tables.lo), each_lane(&tables.hi));
         let roll = each_lane(&tables.roll);
@@ -237,12 +238,11 @@ pub(super) mod avx512bw {
         // The 12 bytes of each 128-bit lane, together.
         let pack = _mm512_setr_epi32(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 3, 7, 11, 15);
         let nibble = _mm512_set1_epi8(0x0f);
-        let mut invalid = _mm512_setzero_si512();
-        decode_64(text, out, |src| {
+        move |src| {
             let hi = _mm512_and_si512(_mm512_srli_epi32(src, 4), nibble);
             let lo = _mm512_and_si512(src, nibble);
             let classes = _mm512_and_si512(_mm512_shuffle_epi8(lo_classes, lo), _mm512_shuffle_epi8(hi_classes, hi));
-            invalid = _mm512_or_si512(invalid, classes);
+            *invalid = _mm512_or_si512(*invalid, classes);
             let index = _mm512_add_epi8(
                 hi,
                 _mm512_maskz_mov_epi8(_mm512_cmpeq_epi8_mask(src, special), special_index),
@@ -253,7 +253,38 @@ pub(super) mod avx512bw {
                 _mm512_set1_epi32(WORDS),
             );
             _mm512_permutexvar_epi32(pack, _mm512_shuffle_epi8(words, order))
-        });
+        }
+    }
+
+    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+        encode_64(bytes, out, encoder(profile));
+    }
+
+    /// Encodes at most `ONE_MAX` bytes, with no loop.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn encode_one(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+        encode_rest(bytes, out, encoder(profile));
+    }
+
+    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+        let mut invalid = _mm512_setzero_si512();
+        decode_64(text, out, decoder(profile, &mut invalid));
+        _mm512_test_epi8_mask(invalid, invalid) == 0
+    }
+
+    /// Decodes a text of at most `ONE_MAX` bytes of result, with no loop.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn decode_one(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+        let mut invalid = _mm512_setzero_si512();
+        decode_rest(text, out, decoder(profile, &mut invalid));
         _mm512_test_epi8_mask(invalid, invalid) == 0
     }
 }
@@ -262,12 +293,12 @@ pub(super) mod avx512bw {
 pub(super) mod avx512vbmi {
     use core::arch::x86_64::*;
 
-    use super::{PAIRS, Profile, Tables, WORDS, decode_64, encode_64, load64};
+    use super::{PAIRS, Profile, Tables, WORDS, decode_64, decode_rest, encode_64, encode_rest, load64};
 
-    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
-    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    /// The block of the encoder of `profile`: the 64 characters of the first 48 bytes of a vector.
+    #[inline]
     #[target_feature(enable = "avx512bw,avx512vbmi")]
-    pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+    fn encoder(profile: Profile) -> impl FnMut(__m512i) -> __m512i {
         let alphabet = load64::<0, _>(&Tables::of(profile).alphabet);
         // The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane.
         let order = _mm512_setr_epi32(
@@ -290,16 +321,17 @@ pub(super) mod avx512vbmi {
         );
         // The bit offset of each sextet in each 64-bit lane.
         let shifts = _mm512_set1_epi64(0x3036_242a_1016_040a);
-        encode_64(bytes, out, |src| {
+        move |src| {
             let sextets = _mm512_multishift_epi64_epi8(shifts, _mm512_permutexvar_epi8(order, src));
             _mm512_permutexvar_epi8(sextets, alphabet)
-        });
+        }
     }
 
-    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
-    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    /// The block of the decoder of `profile`: the 48 bytes of a vector of characters. It ORs each
+    /// character and its sextet into `invalid`: bit 7 is set for a byte outside the alphabet.
+    #[inline]
     #[target_feature(enable = "avx512bw,avx512vbmi")]
-    pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+    fn decoder(profile: Profile, invalid: &mut __m512i) -> impl FnMut(__m512i) -> __m512i {
         let [low, high] = &Tables::of(profile).sextets;
         let (low, high) = (load64::<0, _>(low), load64::<0, _>(high));
         // The three bytes of each 32-bit lane, first byte first, together.
@@ -321,17 +353,46 @@ pub(super) mod avx512vbmi {
             0,
             0,
         );
-        let mut invalid = _mm512_setzero_si512();
-        decode_64(text, out, |src| {
-            // A byte outside the alphabet has bit 7 set in the byte or in its sextet.
+        move |src| {
             let sextets = _mm512_permutex2var_epi8(low, src, high);
-            invalid = _mm512_or_si512(invalid, _mm512_or_si512(src, sextets));
+            *invalid = _mm512_or_si512(*invalid, _mm512_or_si512(src, sextets));
             let words = _mm512_madd_epi16(
                 _mm512_maddubs_epi16(sextets, _mm512_set1_epi32(PAIRS)),
                 _mm512_set1_epi32(WORDS),
             );
             _mm512_permutexvar_epi8(pack, words)
-        });
+        }
+    }
+
+    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    #[target_feature(enable = "avx512bw,avx512vbmi")]
+    pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+        encode_64(bytes, out, encoder(profile));
+    }
+
+    /// Encodes at most `ONE_MAX` bytes, with no loop.
+    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    #[target_feature(enable = "avx512bw,avx512vbmi")]
+    pub(in super::super) fn encode_one(profile: Profile, bytes: &[u8], out: &mut [u8]) {
+        encode_rest(bytes, out, encoder(profile));
+    }
+
+    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
+    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    #[target_feature(enable = "avx512bw,avx512vbmi")]
+    pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+        let mut invalid = _mm512_setzero_si512();
+        decode_64(text, out, decoder(profile, &mut invalid));
+        _mm512_movepi8_mask(invalid) == 0
+    }
+
+    /// Decodes a text of at most `ONE_MAX` bytes of result, with no loop.
+    #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    #[target_feature(enable = "avx512bw,avx512vbmi")]
+    pub(in super::super) fn decode_one(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+        let mut invalid = _mm512_setzero_si512();
+        decode_rest(text, out, decoder(profile, &mut invalid));
         _mm512_movepi8_mask(invalid) == 0
     }
 }
@@ -356,8 +417,26 @@ fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m
         store64::<0, _>(text, block(load_masked(chunk, zero)));
     }
     if !rest.is_empty() {
-        store_masked(tail, block(load_masked(rest, zero)));
+        encode_rest(rest, tail, block);
     }
+}
+
+/// The most bytes of one block of 48 bytes: the entries of one block take at most 64 characters.
+pub(super) const ONE_MAX: usize = 48;
+
+/// Encodes at most `ONE_MAX` bytes in one block with `block`, with masked loads and stores.
+#[inline]
+#[target_feature(enable = "avx512bw")]
+fn encode_rest(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
+    store_masked(out, block(load_masked(bytes, _mm512_setzero_si512())));
+}
+
+/// Decodes a text of at most `ONE_MAX` bytes of result in one block with `block`, with masked
+/// loads and stores. 'A', which is zero, is in place of the characters after the end.
+#[inline]
+#[target_feature(enable = "avx512bw")]
+fn decode_rest(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
+    store_masked(out, block(load_masked(text, _mm512_set1_epi8(b'A'.cast_signed()))));
 }
 
 /// Decodes in blocks of 64 characters with `block`, which gives the 48 bytes of a vector of
@@ -387,7 +466,6 @@ fn decode_64(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m5
         store_masked(bytes, block(load64::<0, _>(chunk)));
     }
     if !rest.is_empty() {
-        // 'A', which is zero, in place of the characters after the end.
-        store_masked(tail, block(load_masked(rest, _mm512_set1_epi8(b'A'.cast_signed()))));
+        decode_rest(rest, tail, block);
     }
 }

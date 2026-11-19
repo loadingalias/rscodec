@@ -39,8 +39,9 @@ Both classes give the same result and the same error for each input. They differ
   the kernels whose instructions Intel lists with data operand independent timing (DOIT) and Arm
   lists with data independent timing (DIT). On x86_64 with AVX-512 VBMI, public base64 runs the
   VBMI kernel, and secret base64 runs the AVX-512BW kernel. hex runs the same kernel in each class.
-- **`PSTATE.DIT`.** On aarch64, a secret function sets `PSTATE.DIT` for the call, if the CPU has
-  DIT, and then restores it. A public function does not write it.
+- **`PSTATE.DIT`.** A secret function takes `&Dit`, a proof that only `rscodec::with_dit` gives.
+  On aarch64, `with_dit` sets `PSTATE.DIT` for its scope, if the CPU has DIT, and then restores
+  it. The secret functions and the public functions do not read or write it.
 - **Output after a refusal.** After `decode_secret` refuses a text for a character or for trailing
   bits, each byte that it wrote is zero. After `decode` refuses, the output is unspecified.
 - **Temporary copies.** Before a secret function returns, on a result or a refusal, it writes zero
@@ -51,9 +52,9 @@ The secret functions clear with volatile stores and a compiler fence. The clear 
 input that you own, the result in your output, or the copies in registers and in the stack slots
 where the compiler spills registers.
 
-The secret functions can be slower. On aarch64, the two writes of `PSTATE.DIT` cost most on short
-inputs. On x86_64 with VBMI, the AVX-512BW kernel of base64 is slower than the VBMI kernel. If you
-are not sure that the data is public, use the secret functions.
+The secret functions can be slower. On x86_64 with VBMI, the AVX-512BW kernel of base64 is slower
+than the VBMI kernel. On aarch64, a scope of `with_dit` writes `PSTATE.DIT` two times, which costs
+most for one short input. If you are not sure that the data is public, use the secret functions.
 
 ## Decode a base64url token into a stack buffer
 
@@ -82,45 +83,52 @@ the result.
 
 ## Decode a secret key
 
-A private key is secret, so `decode_secret` reads it:
+A private key is secret, so `decode_secret` reads it in a scope of `with_dit`:
 
 ```rust
-use rscodec::{base64::Profile, hex};
+use rscodec::{base64::Profile, hex, with_dit};
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
     let mut key = [0; 32];
     let text = b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    assert_eq!(hex::decode_secret(text, &mut key)?[31], 0x1f);
+    with_dit(|dit| -> Result<(), Box<dyn core::error::Error>> {
+        assert_eq!(hex::decode_secret(dit, text, &mut key)?[31], 0x1f);
 
-    // A refusal leaves zero in each byte that the decoder wrote.
-    assert!(Profile::Url.decode_secret(b"AAAA*AAA", &mut key).is_err());
+        // A refusal leaves zero in each byte that the decoder wrote.
+        assert!(Profile::Url.decode_secret(dit, b"AAAA*AAA", &mut key).is_err());
+        Ok(())
+    })?;
     assert_eq!(key[..6], [0; 6]);
     Ok(())
 }
 ```
 
+The closure of `with_dit` gets `&Dit`. A `Dit` is neither `Send` nor `Sync`, and the reference is
+valid only in the closure, so a secret function runs only on the thread and in the scope that hold
+`PSTATE.DIT`.
+
 ## Hold DIT for a loop of secrets
 
-A secret function writes `PSTATE.DIT` twice when DIT is clear. If DIT is set already, it writes
-nothing. To decode many secrets, set DIT one time for the loop with
-`rscrypto::traits::ct::with_data_independent_timing`. This needs a dependency on `rscrypto`:
+Hold one scope for the loop. The scope writes `PSTATE.DIT` at most two times, and the secret
+functions in it write nothing:
 
 ```rust
 use rscodec::base64::{Error, Profile};
-use rscrypto::traits::ct::with_data_independent_timing;
+use rscodec::with_dit;
 
 fn decode_keys(tokens: &[&[u8]], keys: &mut [[u8; 32]]) -> Result<(), Error> {
-    with_data_independent_timing(|| {
+    with_dit(|dit| {
         for (token, key) in tokens.iter().zip(keys.iter_mut()) {
-            Profile::Url.decode_secret(token, key)?;
+            Profile::Url.decode_secret(dit, token, key)?;
         }
         Ok(())
     })
 }
 ```
 
-On x86_64 and WebAssembly, and on an aarch64 CPU without DIT, the wrapper and the secret functions
-write no timing mode.
+If `PSTATE.DIT` is set already, for example in an outer scope, `with_dit` writes nothing. On x86_64
+and WebAssembly, and on an aarch64 CPU without DIT, `with_dit` only calls the closure. Code in the
+scope must not clear `PSTATE.DIT`.
 
 ## Encode
 
@@ -138,7 +146,7 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
 ```
 
 The text is ASCII, so `core::str::from_utf8` on it cannot fail. `encode_secret` takes the same
-arguments.
+arguments after the `&Dit` of a scope of `with_dit`.
 
 ## Size the output
 
@@ -216,6 +224,8 @@ fn main() -> Result<(), rscodec::base64::Error> {
   the Neon kernel, and on x86_64, for hex, up to 32 bytes on SSE2. When `-C target-feature` fixes a
   SIMD kernel of a class, that kernel runs inline at each length. `encode_with` and `decode_with`
   always run the kernel of their backend.
+- The AVX-512 kernels have an entry with no loop for an input of one vector of 64 characters: hex
+  up to 32 bytes, and base64 up to 48 bytes.
 - WebAssembly has no run-time detection, so `Simd128` exists only with `+simd128`.
 - On an Intel hybrid CPU (Alder Lake to Arrow Lake), the AVX-512 kernels do not run, also if CPUID
   reports AVX-512. Its efficient cores do not have AVX-512.

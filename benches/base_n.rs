@@ -8,13 +8,14 @@
 //! The rows of rscodec:
 //!
 //! - `rscodec`: the public functions.
-//! - `rscodec-secret`: the secret functions.
-//! - `rscodec-secret-held`, on aarch64: the secret functions in a loop that holds `PSTATE.DIT`, with
-//!   the scope that the usage page names.
+//! - `rscodec-secret`: the secret functions, in one scope of `with_dit` for the timed loop, as a loop
+//!   of secrets holds `PSTATE.DIT`.
+//! - `rscodec-secret-cold`: a scope of `with_dit` for each call of a secret function.
 //! - One row for each kernel that the host runs, for example `rscodec-avx2`.
 //!
-//! The secret functions run the kernel of one of the kernel rows. Thus the two rows give the cost
-//! of the secret class, for example the cost of `PSTATE.DIT` on aarch64.
+//! The secret functions run the kernel of one of the kernel rows. Thus `rscodec-secret` and that row
+//! give the cost of the secret class, and `rscodec-secret-cold` adds the cost of one scope for each
+//! call, for example the writes of `PSTATE.DIT` on aarch64.
 
 #[path = "common/aligned.rs"]
 mod aligned;
@@ -153,13 +154,6 @@ fn decode_row(
     );
 }
 
-/// Runs `rows` with `PSTATE.DIT` set, with the scope that the usage page names. Criterion runs
-/// each row in the call that registers it, so the scope holds for each timed loop of the rows.
-#[cfg(target_arch = "aarch64")]
-fn held(rows: impl FnOnce()) {
-    rscrypto::traits::ct::with_data_independent_timing(rows);
-}
-
 /// Prints the offsets of the input and the output of a row in their 4 KiB pages. A load or a store
 /// across a page or a cache line costs more, so the offsets can explain a slow row.
 #[expect(
@@ -199,14 +193,13 @@ fn base64_encode(criterion: &mut Criterion) {
         encode_row(g, case, "rscodec", |raw, out| {
             profile.encode(raw, out).expect("room").len()
         });
-        encode_row(g, case, "rscodec-secret", |raw, out| {
-            profile.encode_secret(raw, out).expect("room").len()
-        });
-        #[cfg(target_arch = "aarch64")]
-        held(|| {
-            encode_row(g, case, "rscodec-secret-held", |raw, out| {
-                profile.encode_secret(raw, out).expect("room").len()
+        rscodec::with_dit(|dit| {
+            encode_row(g, case, "rscodec-secret", |raw, out| {
+                profile.encode_secret(dit, raw, out).expect("room").len()
             });
+        });
+        encode_row(g, case, "rscodec-secret-cold", |raw, out| {
+            rscodec::with_dit(|dit| profile.encode_secret(dit, raw, out).expect("room").len())
         });
         for &kernel in rscodec::base64::Kernel::ALL {
             if let Some(backend) = rscodec::base64::Backend::new(kernel) {
@@ -294,14 +287,13 @@ fn base64_decode(criterion: &mut Criterion) {
         decode_row(g, case, "rscodec", room, |text, out| {
             profile.decode(text, out).ok().map(|bytes| bytes.len())
         });
-        decode_row(g, case, "rscodec-secret", room, |text, out| {
-            profile.decode_secret(text, out).ok().map(|bytes| bytes.len())
-        });
-        #[cfg(target_arch = "aarch64")]
-        held(|| {
-            decode_row(g, case, "rscodec-secret-held", room, |text, out| {
-                profile.decode_secret(text, out).ok().map(|bytes| bytes.len())
+        rscodec::with_dit(|dit| {
+            decode_row(g, case, "rscodec-secret", room, |text, out| {
+                profile.decode_secret(dit, text, out).ok().map(|bytes| bytes.len())
             });
+        });
+        decode_row(g, case, "rscodec-secret-cold", room, |text, out| {
+            rscodec::with_dit(|dit| profile.decode_secret(dit, text, out).ok().map(|bytes| bytes.len()))
         });
         for &kernel in rscodec::base64::Kernel::ALL {
             if let Some(backend) = rscodec::base64::Backend::new(kernel) {
@@ -391,14 +383,13 @@ fn hex_encode(criterion: &mut Criterion) {
         encode_row(g, case, "rscodec", |raw, out| {
             hex::encode(raw, out).expect("room").len()
         });
-        encode_row(g, case, "rscodec-secret", |raw, out| {
-            hex::encode_secret(raw, out).expect("room").len()
-        });
-        #[cfg(target_arch = "aarch64")]
-        held(|| {
-            encode_row(g, case, "rscodec-secret-held", |raw, out| {
-                hex::encode_secret(raw, out).expect("room").len()
+        rscodec::with_dit(|dit| {
+            encode_row(g, case, "rscodec-secret", |raw, out| {
+                hex::encode_secret(dit, raw, out).expect("room").len()
             });
+        });
+        encode_row(g, case, "rscodec-secret-cold", |raw, out| {
+            rscodec::with_dit(|dit| hex::encode_secret(dit, raw, out).expect("room").len())
         });
         for &kernel in hex::Kernel::ALL {
             if let Some(backend) = hex::Backend::new(kernel) {
@@ -429,14 +420,13 @@ fn hex_decode(criterion: &mut Criterion) {
         decode_row(g, case, "rscodec", room, |text, out| {
             hex::decode(text, out).ok().map(|bytes| bytes.len())
         });
-        decode_row(g, case, "rscodec-secret", room, |text, out| {
-            hex::decode_secret(text, out).ok().map(|bytes| bytes.len())
-        });
-        #[cfg(target_arch = "aarch64")]
-        held(|| {
-            decode_row(g, case, "rscodec-secret-held", room, |text, out| {
-                hex::decode_secret(text, out).ok().map(|bytes| bytes.len())
+        rscodec::with_dit(|dit| {
+            decode_row(g, case, "rscodec-secret", room, |text, out| {
+                hex::decode_secret(dit, text, out).ok().map(|bytes| bytes.len())
             });
+        });
+        decode_row(g, case, "rscodec-secret-cold", room, |text, out| {
+            rscodec::with_dit(|dit| hex::decode_secret(dit, text, out).ok().map(|bytes| bytes.len()))
         });
         for &kernel in hex::Kernel::ALL {
             if let Some(backend) = hex::Backend::new(kernel) {

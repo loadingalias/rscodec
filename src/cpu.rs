@@ -356,20 +356,49 @@ impl Kept {
     }
 }
 
-/// Runs `call` with data independent timing (DIT) on, if the CPU has it ([CODEC Base-N]). Arm
-/// guarantees the timing of its DIT instructions only while `PSTATE.DIT` is 1. Only the secret
-/// functions of the codecs run in it.
-#[cfg(all(target_arch = "aarch64", any(feature = "base64", feature = "hex")))]
-#[inline]
-pub(crate) fn data_independent_timing<T>(call: impl FnOnce() -> T) -> T {
-    if has(aarch64::DIT) { dit::run(call) } else { call() }
-}
+/// The proof that `PSTATE.DIT` (data independent timing) is set on this thread, where the CPU has
+/// DIT. Only [`with_dit`] makes one, and it lends it only for its scope.
+///
+/// Each secret function, for example `hex::encode_secret`, takes a `&Dit`, so it runs only in a
+/// scope that holds DIT, and it reads and writes no DIT itself. Arm guarantees the timing of its
+/// DIT instructions only while `PSTATE.DIT` is 1. On a CPU without DIT, and on each target other
+/// than aarch64, the proof holds nothing.
+///
+/// `PSTATE.DIT` is a state of a thread, so a `Dit` is neither `Send` nor `Sync`, and a reference to
+/// it cannot pass to another thread:
+///
+/// ```compile_fail
+/// rscodec::with_dit(|dit| std::thread::scope(|scope| scope.spawn(|| dit).join().ok()));
+/// ```
+#[cfg(any(feature = "base64", feature = "hex"))]
+#[derive(Debug)]
+pub struct Dit(core::marker::PhantomData<*const ()>);
 
-/// Runs `call`. Only Arm has a timing mode that a program can turn on.
-#[cfg(all(not(target_arch = "aarch64"), any(feature = "base64", feature = "hex")))]
-#[inline(always)]
-pub(crate) fn data_independent_timing<T>(call: impl FnOnce() -> T) -> T {
-    call()
+/// Runs `scope` with `PSTATE.DIT` set on this thread, where the CPU has DIT, and restores the
+/// earlier value of `PSTATE.DIT` after it, also after a panic. `scope` gets the proof [`Dit`].
+///
+/// Hold one scope for a loop of secrets: the scope writes DIT at most twice, and the secret
+/// functions in it write nothing. If DIT is set already, for example in an outer scope, the scope
+/// writes nothing. On a CPU without DIT, and on each target other than aarch64, it only calls
+/// `scope`. Code in the scope must not clear `PSTATE.DIT`.
+///
+/// ```
+/// use rscodec::hex;
+///
+/// let mut key = [0; 2];
+/// rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))?;
+/// assert_eq!(key, [0xc0, 0xde]);
+/// # Ok::<(), hex::Error>(())
+/// ```
+#[cfg(any(feature = "base64", feature = "hex"))]
+#[inline]
+pub fn with_dit<T>(scope: impl FnOnce(&Dit) -> T) -> T {
+    let proof = Dit(core::marker::PhantomData);
+    #[cfg(target_arch = "aarch64")]
+    if has(aarch64::DIT) {
+        return dit::hold(|| scope(&proof));
+    }
+    scope(&proof)
 }
 
 /// `PSTATE.DIT`, which has no intrinsic. The system register `S3_3_C4_C2_5` is DIT, and bit 24 is
@@ -386,13 +415,12 @@ mod dit {
     const ON: u64 = 1 << 24;
 
     /// Runs `call` with `PSTATE.DIT` set, then restores its earlier value. If DIT is set already,
-    /// for example by a caller that sets it for its thread, it writes nothing. The caller checks
-    /// that the CPU has DIT.
+    /// it writes nothing. The caller checks that the CPU has DIT.
     ///
-    /// The asm can read and write memory for the compiler, so no load of the input moves before the
-    /// write of DIT, and no store of the output moves after its restore.
+    /// The asm can read and write memory for the compiler, so no load of an input moves before the
+    /// write of DIT, and no store of an output moves after its restore.
     #[inline]
-    pub(super) fn run<T>(call: impl FnOnce() -> T) -> T {
+    pub(super) fn hold<T>(call: impl FnOnce() -> T) -> T {
         let earlier: u64;
         // SAFETY: the caller checked that the CPU has DIT, so the instruction is defined.
         unsafe { asm!("mrs {earlier}, S3_3_C4_C2_5", earlier = out(reg) earlier, options(nostack, preserves_flags)) };

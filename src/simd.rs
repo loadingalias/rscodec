@@ -20,12 +20,20 @@ pub(crate) const SHORT_MAX: usize = cfg_select! {
 /// code decodes a tail. `output` has the length `out_len` of all of `input`. In the secret
 /// `class`, each array is zero before the function returns.
 ///
-/// The arrays take and give their bytes in 16-byte pieces, each with one or two loads or stores of
-/// a fixed size. Thus the compiler keeps an array of 16 bytes in registers: a copy of a variable
-/// length is a call to `memcpy`, and a vector load of bytes that smaller stores wrote waits for
-/// them. A kernel with wider vectors runs only [`whole_blocks`], and gives the rest to a kernel of
-/// 16-byte vectors.
+/// The arrays take and give their bytes in 16-byte pieces, each with loads or stores of a fixed
+/// size. Thus the compiler keeps an array of 16 bytes in registers: a copy of a variable length is
+/// a call to `memcpy`, and a vector load of bytes that smaller stores wrote waits for them. A
+/// kernel with wider vectors runs only [`whole_blocks`], and gives the rest to a kernel of 16-byte
+/// vectors.
 #[inline(always)]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(
+        clippy::missing_safety_doc,
+        reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+    )
+)]
 pub(crate) fn blocks<const IN: usize, const OUT: usize>(
     class: impl Class,
     input: &[u8],
@@ -41,7 +49,7 @@ pub(crate) fn blocks<const IN: usize, const OUT: usize>(
         let len = rest.len().min(step);
         let mut src = [fill; IN];
         for (piece, chunk) in src.as_chunks_mut::<16>().0.iter_mut().zip(rest[..len].chunks(16)) {
-            *piece = read16(chunk, fill).to_le_bytes();
+            *piece = read16(chunk, fill);
         }
         let mut dst = [0; OUT];
         block(&src, &mut dst);
@@ -56,7 +64,7 @@ pub(crate) fn blocks<const IN: usize, const OUT: usize>(
             .chunks_mut(16)
             .zip(dst.as_chunks::<16>().0)
         {
-            write16(chunk, u128::from_le_bytes(*piece));
+            write16(chunk, piece);
         }
         class.clear(&mut src);
         class.clear(&mut dst);
@@ -96,10 +104,11 @@ pub(crate) fn whole_blocks<const IN: usize, const OUT: usize>(
     (read, written)
 }
 
-/// The bytes of `src`, at most 16, in the low bytes of the result, and `fill` in the other bytes.
+/// The bytes of `src`, at most 16, in the first bytes of the result, and `fill` in the other bytes.
 /// Two overlapping loads of 8, 4, or 1 bytes read each byte, and the OR joins them.
+#[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
-fn read16(src: &[u8], fill: u8) -> u128 {
+fn read16(src: &[u8], fill: u8) -> [u8; 16] {
     let len = src.len();
     assert!(len <= 16);
     let pair = |first: u128, last: u128, last_at: usize| first | last << (8 * last_at);
@@ -120,16 +129,18 @@ fn read16(src: &[u8], fill: u8) -> u128 {
         .ok()
         .and_then(|bits| u128::MAX.checked_shl(bits))
         .unwrap_or(0);
-    bytes | (after & u128::from_le_bytes([fill; 16]))
+    (bytes | (after & u128::from_le_bytes([fill; 16]))).to_le_bytes()
 }
 
-/// Writes the low `dst.len()` bytes, at most 16, of `value` into `dst`, with two overlapping stores
-/// of 8, 4, or 1 bytes. Shifts of `value` give the bytes of each store, so the value stays in
+/// Writes the first `dst.len()` bytes, at most 16, of `value` into `dst`, with two overlapping
+/// stores of 8, 4, or 1 bytes. Shifts of `value` give the bytes of each store, so the value stays in
 /// registers: a load at a variable offset in a copy of it on the stack waits for the copy.
+#[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
-fn write16(dst: &mut [u8], value: u128) {
+fn write16(dst: &mut [u8], value: &[u8; 16]) {
     let len = dst.len();
     assert!(len <= 16);
+    let value = u128::from_le_bytes(*value);
     // The bytes from `at`, which is less than 16, in the low bits.
     let from = |at: usize| value >> (8 * at);
     let word = |value: u128| u64::try_from(value & u128::from(u64::MAX)).unwrap_or_default();
@@ -150,6 +161,84 @@ fn write16(dst: &mut [u8], value: u128) {
             dst[len - 1] = byte(from(len - 1));
         }
         0 => {}
+    }
+}
+
+/// The bytes of `src`, at most 16, in the first bytes of the result, and `fill` in the other bytes.
+/// The bits of the length give pieces of 8, 4, 2, and 1 bytes. From the last piece to the first,
+/// a load fills each lane of a vector with the piece (`ld1r`), and `ext` puts the piece before the
+/// bytes after it. Thus the bytes go from memory to vector registers, with no general register.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+#[target_feature(enable = "neon")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+fn read16(src: &[u8], fill: u8) -> [u8; 16] {
+    use core::arch::aarch64::*;
+    if let Ok(full) = <[u8; 16]>::try_from(src) {
+        return full;
+    }
+    let len = src.len();
+    assert!(len < 16);
+    let piece = |bits: usize| src.get(len & !(2 * bits - 1)..).unwrap_or_default();
+    let mut value = vdupq_n_u8(fill);
+    if let (true, [byte, ..]) = (len & 1 != 0, piece(1)) {
+        value = vextq_u8::<15>(vdupq_n_u8(*byte), value);
+    }
+    if let (true, Some(half)) = (len & 2 != 0, piece(2).first_chunk()) {
+        value = vextq_u8::<14>(vreinterpretq_u8_u16(vdupq_n_u16(u16::from_le_bytes(*half))), value);
+    }
+    if let (true, Some(word)) = (len & 4 != 0, piece(4).first_chunk()) {
+        value = vextq_u8::<12>(vreinterpretq_u8_u32(vdupq_n_u32(u32::from_le_bytes(*word))), value);
+    }
+    if let (true, Some(word)) = (len & 8 != 0, src.first_chunk()) {
+        value = vextq_u8::<8>(vreinterpretq_u8_u64(vdupq_n_u64(u64::from_le_bytes(*word))), value);
+    }
+    let mut bytes = [0; 16];
+    aarch64::store16::<0, _>(&mut bytes, value);
+    bytes
+}
+
+/// Writes the first `dst.len()` bytes, at most 16, of `value` into `dst`. The bits of the length
+/// give stores of 8, 4, 2, and 1 bytes, each from the first lane of a vector register (`str d`,
+/// `str s`, `str h`, `str b`), and `ext` moves the next bytes to the first lane. Thus the bytes go
+/// from vector registers to memory, with no general register.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+#[target_feature(enable = "neon")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+fn write16(dst: &mut [u8], value: &[u8; 16]) {
+    use core::arch::aarch64::*;
+    if let Ok(full) = <&mut [u8; 16]>::try_from(&mut *dst) {
+        *full = *value;
+        return;
+    }
+    let len = dst.len();
+    assert!(len < 16);
+    let mut value = aarch64::load16::<0, _>(value);
+    let mut rest = dst;
+    if let (true, Some((word, after))) = (len & 8 != 0, rest.split_first_chunk_mut::<8>()) {
+        *word = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(value)).to_le_bytes();
+        value = vextq_u8::<8>(value, value);
+        rest = after;
+    }
+    if let (true, Some((word, after))) = (len & 4 != 0, rest.split_first_chunk_mut::<4>()) {
+        *word = vgetq_lane_u32::<0>(vreinterpretq_u32_u8(value)).to_le_bytes();
+        value = vextq_u8::<4>(value, value);
+        rest = after;
+    }
+    if let (true, Some((half, after))) = (len & 2 != 0, rest.split_first_chunk_mut::<2>()) {
+        *half = vgetq_lane_u16::<0>(vreinterpretq_u16_u8(value)).to_le_bytes();
+        value = vextq_u8::<2>(value, value);
+        rest = after;
+    }
+    if let (true, [byte, ..]) = (len & 1 != 0, rest) {
+        *byte = vgetq_lane_u8::<0>(value);
     }
 }
 
@@ -222,16 +311,16 @@ pub(crate) mod x86 {
         unsafe { _mm512_storeu_si512(dst.as_mut_ptr().add(AT).cast(), value) }
     }
 
-    /// The mask of the first `len` lanes of 64.
+    /// The mask of the first `len` lanes of 64, or of all 64 lanes for a longer `len`. Thus a mask
+    /// of a slice holds only lanes of the slice, with no check that can panic.
     #[inline]
     fn lanes(len: usize) -> u64 {
-        assert!(len <= 64);
-        u64::MAX
-            .checked_shr(64_u32.saturating_sub(len.try_into().unwrap_or(64)))
-            .unwrap_or(0)
+        // A shift of 0 to 63 bits, and no lane for an empty slice.
+        let lanes = len.min(64);
+        if lanes == 0 { 0 } else { u64::MAX >> (64 - lanes) }
     }
 
-    /// The bytes of `src`, at most 64, in the first lanes, and `fill` in the other lanes.
+    /// The first bytes of `src`, at most 64, in the first lanes, and `fill` in the other lanes.
     #[inline]
     #[target_feature(enable = "avx512bw")]
     pub(crate) fn load_masked(src: &[u8], fill: __m512i) -> __m512i {
@@ -240,7 +329,7 @@ pub(crate) mod x86 {
         unsafe { _mm512_mask_loadu_epi8(fill, lanes(src.len()), src.as_ptr().cast()) }
     }
 
-    /// Stores the first `dst.len()` lanes, at most 64, of `value` into `dst`.
+    /// Stores the first lanes of `value` into `dst`: `dst.len()` lanes, at most 64.
     #[inline]
     #[target_feature(enable = "avx512bw")]
     pub(crate) fn store_masked(dst: &mut [u8], value: __m512i) {
@@ -251,12 +340,13 @@ pub(crate) mod x86 {
 
     #[cfg(test)]
     mod tests {
-        /// The mask of `len` lanes holds lanes `0..len` and no other lane, so a masked load or
-        /// store of a slice accesses only the bytes of the slice. The test checks each length.
+        /// The mask of `len` lanes holds the lanes `0..len`, at most 64, and no other lane, so a
+        /// masked load or store of a slice accesses only the bytes of the slice. The test checks
+        /// each length to 66, and the largest.
         #[test]
         fn the_mask_holds_only_the_lanes_of_the_slice() {
-            for len in 0..=64 {
-                let lanes = (0..len).fold(0_u64, |mask, lane| mask | (1 << lane));
+            for len in (0..=66).chain([usize::MAX]) {
+                let lanes = (0..len.min(64)).fold(0_u64, |mask, lane| mask | (1 << lane));
                 assert_eq!(super::lanes(len), lanes, "{len} lanes");
             }
         }

@@ -11,8 +11,8 @@
 //!   signature. They run the fastest kernel of the CPU.
 //! - [`Profile::encode_secret`] and [`Profile::decode_secret`] are for secret data, for example a
 //!   key or a bearer token. They run only the kernels whose instructions have data independent
-//!   timing (see [`Kernel`]). On aarch64, they set `PSTATE.DIT` for the call. After a refusal,
-//!   `decode_secret` writes zero to each byte of the output that it wrote.
+//!   timing (see [`Kernel`]). They take the proof [`Dit`] of a scope that holds `PSTATE.DIT`. After a
+//!   refusal, `decode_secret` writes zero to each byte of the output that it wrote.
 //!
 //! The source of each kernel has no branch and no table load that depends on the bytes or the
 //! characters. The time is to depend only on the lengths, and for an error, on its offset. A check
@@ -27,7 +27,8 @@
 //! assert_eq!(Profile::Url.encode(&[0xfb, 0xff, 0xbf], &mut text)?, b"-_-_");
 //! // A key is secret.
 //! let mut key = [0; 3];
-//! assert_eq!(Profile::Url.decode_secret(b"-_-_", &mut key)?, [0xfb, 0xff, 0xbf]);
+//! rscodec::with_dit(|dit| Profile::Url.decode_secret(dit, b"-_-_", &mut key).map(|key| key.len()))?;
+//! assert_eq!(key, [0xfb, 0xff, 0xbf]);
 //! # Ok::<(), rscodec::base64::Error>(())
 //! ```
 //!
@@ -37,6 +38,7 @@
 use core::fmt;
 
 use crate::{
+    Dit,
     cpu::{self, Caps, Kept, Timing, caps_static},
     ct::{self, Class, Public, Secret},
 };
@@ -142,25 +144,23 @@ impl Profile {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Output`] if `out` is shorter than [`Profile::encoded_len`].
-    #[inline]
+    // The short path runs inline in the caller: a call costs more than its work.
+    #[inline(always)]
     pub fn encode<'o>(self, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        self.encode_with(Backend(Kernel::chosen(Timing::Public)), bytes, out)
+        self.encode_by(Public, Backend(Kernel::chosen(Timing::Public)), bytes, out)
     }
 
     /// [`Profile::encode`] for secret bytes, for example a key. It runs only the kernels whose
-    /// instructions have data independent timing. On aarch64, it sets `PSTATE.DIT` for the call.
+    /// instructions have data independent timing. The proof [`Dit`] shows that the scope of
+    /// [`with_dit`](crate::with_dit) holds `PSTATE.DIT`, so the function itself writes no DIT.
     ///
     /// # Errors
     ///
     /// As [`Profile::encode`].
-    #[inline]
-    pub fn encode_secret<'o>(self, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        let backend = Backend(Kernel::chosen(Timing::Secret));
-        cpu::data_independent_timing(|| {
-            self.encode_by(bytes, out, |bytes, text| {
-                kernel::encode(Secret, backend, self, bytes, text)
-            })
-        })
+    // The short path runs inline in the caller: a call costs more than its work.
+    #[inline(always)]
+    pub fn encode_secret<'o>(self, _: &Dit, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
+        self.encode_by(Secret, Backend(Kernel::chosen(Timing::Secret)), bytes, out)
     }
 
     /// [`Profile::encode`] on the kernel of `backend`.
@@ -168,20 +168,21 @@ impl Profile {
     /// # Errors
     ///
     /// As [`Profile::encode`].
-    #[inline]
+    // The short path runs inline in the caller: a call costs more than its work.
+    #[inline(always)]
     pub fn encode_with<'o>(self, backend: Backend, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        self.encode_by(bytes, out, |bytes, text| {
-            kernel::encode(Public, backend, self, bytes, text)
-        })
+        self.encode_by(Public, backend, bytes, out)
     }
 
-    /// Encodes `bytes` with `kernel`, which writes the characters before the padding.
+    /// Encodes `bytes` on the kernel of `backend` in `class`. The kernel writes the characters
+    /// before the padding.
     #[inline(always)]
     fn encode_by<'o>(
         self,
+        class: impl Class,
+        backend: Backend,
         bytes: &[u8],
         out: &'o mut [u8],
-        kernel: impl FnOnce(&[u8], &mut [u8]),
     ) -> Result<&'o mut [u8], Error> {
         // A slice has at most `isize::MAX` bytes, so the length cannot overflow.
         let len = self.encoded_len(bytes.len()).unwrap_or(usize::MAX);
@@ -198,7 +199,7 @@ impl Profile {
                 *first = b'=';
             }
         }
-        kernel(bytes, text);
+        kernel::encode(class, backend, self, bytes, text);
         Ok(out)
     }
 
@@ -237,14 +238,15 @@ impl Profile {
     /// assert_eq!(Profile::Url.decode(standard, &mut buffer), Err(refusal));
     /// # Ok::<(), Error>(())
     /// ```
-    #[inline]
+    // The short path runs inline in the caller: a call costs more than its work.
+    #[inline(always)]
     pub fn decode<'o>(self, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        self.decode_with(Backend(Kernel::chosen(Timing::Public)), text, out)
+        self.decode_by(Public, Backend(Kernel::chosen(Timing::Public)), text, out)
     }
 
     /// [`Profile::decode`] for secret text, for example a bearer token. It runs only the kernels
-    /// whose instructions have data independent timing. On aarch64, it sets `PSTATE.DIT` for the
-    /// call.
+    /// whose instructions have data independent timing, in the scope of the proof [`Dit`], as
+    /// [`Profile::encode_secret`].
     ///
     /// After a refusal for a symbol or for the trailing bits, each byte that it wrote to `out` is
     /// zero: the first [`Profile::decoded_len`] bytes. After a refusal for the length or the
@@ -253,14 +255,10 @@ impl Profile {
     /// # Errors
     ///
     /// As [`Profile::decode`].
-    #[inline]
-    pub fn decode_secret<'o>(self, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        let backend = Backend(Kernel::chosen(Timing::Secret));
-        cpu::data_independent_timing(|| {
-            self.decode_by(text, out, Secret, |symbols, out| {
-                kernel::decode(Secret, backend, self, symbols, out)
-            })
-        })
+    // The short path runs inline in the caller: a call costs more than its work.
+    #[inline(always)]
+    pub fn decode_secret<'o>(self, _: &Dit, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
+        self.decode_by(Secret, Backend(Kernel::chosen(Timing::Secret)), text, out)
     }
 
     /// [`Profile::decode`] on the kernel of `backend`.
@@ -268,23 +266,22 @@ impl Profile {
     /// # Errors
     ///
     /// As [`Profile::decode`].
-    #[inline]
+    // The short path runs inline in the caller: a call costs more than its work.
+    #[inline(always)]
     pub fn decode_with<'o>(self, backend: Backend, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
-        self.decode_by(text, out, Public, |symbols, out| {
-            kernel::decode(Public, backend, self, symbols, out)
-        })
+        self.decode_by(Public, backend, text, out)
     }
 
-    /// Decodes `text` with `kernel`, which decodes the characters before the padding and gives
-    /// whether each is in the alphabet. In the secret class, a refusal of the characters writes
-    /// zero to the output first.
+    /// Decodes `text` on the kernel of `backend` in `class`. The kernel decodes the characters
+    /// before the padding and gives whether each is in the alphabet. In the secret class, a refusal
+    /// of the characters writes zero to the output first.
     #[inline(always)]
     fn decode_by<'o>(
         self,
+        class: impl Class,
+        backend: Backend,
         text: &[u8],
         out: &'o mut [u8],
-        class: impl Class,
-        kernel: impl FnOnce(&[u8], &mut [u8]) -> bool,
     ) -> Result<&'o mut [u8], Error> {
         let symbols = self.symbols(text)?;
         let len = bytes_len(symbols.len());
@@ -292,7 +289,7 @@ impl Profile {
             kind: ErrorKind::Output,
             offset: len,
         })?;
-        let valid = kernel(symbols, out);
+        let valid = kernel::decode(class, backend, self, symbols, out);
         // The bits of the last character after the last byte: 4 bits after 4n + 2 characters, and
         // 2 bits after 4n + 3.
         let trailing_bits = match symbols.len() % 4 {
@@ -518,7 +515,7 @@ mod kernel {
     use crate::ct::Class;
 
     /// Encodes `bytes` into the characters `out`, with no padding.
-    #[inline]
+    #[inline(always)]
     pub(super) fn encode(class: impl Class, backend: Backend, profile: Profile, bytes: &[u8], out: &mut [u8]) {
         match backend.0 {
             Kernel::Portable => portable::encode(class, profile, bytes, out),
@@ -530,7 +527,17 @@ mod kernel {
             Kernel::Avx2 => unsafe { x86::avx2::encode(class, profile, bytes, out) },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Bw if bytes.len() <= x86::ONE_MAX => unsafe {
+                x86::avx512bw::encode_one(profile, bytes, out)
+            },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Avx512Bw => unsafe { x86::avx512bw::encode(profile, bytes, out) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Vbmi if bytes.len() <= x86::ONE_MAX => unsafe {
+                x86::avx512vbmi::encode_one(profile, bytes, out)
+            },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Avx512Vbmi => unsafe { x86::avx512vbmi::encode(profile, bytes, out) },
@@ -544,7 +551,7 @@ mod kernel {
 
     /// Decodes the characters `text`, with no padding, into `out`, and gives whether each is in the
     /// alphabet.
-    #[inline]
+    #[inline(always)]
     pub(super) fn decode(class: impl Class, backend: Backend, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         match backend.0 {
             Kernel::Portable => portable::decode(class, profile, text, out),
@@ -556,7 +563,15 @@ mod kernel {
             Kernel::Avx2 => unsafe { x86::avx2::decode(class, profile, text, out) },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Bw if out.len() <= x86::ONE_MAX => unsafe { x86::avx512bw::decode_one(profile, text, out) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Avx512Bw => unsafe { x86::avx512bw::decode(profile, text, out) },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
+            Kernel::Avx512Vbmi if out.len() <= x86::ONE_MAX => unsafe {
+                x86::avx512vbmi::decode_one(profile, text, out)
+            },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Avx512Vbmi => unsafe { x86::avx512vbmi::decode(profile, text, out) },

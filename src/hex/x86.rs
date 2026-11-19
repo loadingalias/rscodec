@@ -234,10 +234,13 @@ pub(super) mod avx2 {
     }
 }
 
-/// The AVX-512BW kernels run whole blocks of 64 bytes, then one block with masked loads and stores
-/// for the rest.
+/// The AVX-512BW kernels run whole blocks of 64 bytes, then vectors with masked loads and stores
+/// for the rest. An input of at most `ONE_MAX` bytes has an entry of its own, with no loop.
 pub(super) mod avx512bw {
     use super::*;
+
+    /// The most bytes of one masked vector: 32 bytes give its 64 characters.
+    pub(in super::super) const ONE_MAX: usize = 32;
 
     /// The nibbles of 64 characters, and the mask of the lanes that are digits.
     #[inline]
@@ -286,11 +289,58 @@ pub(super) mod avx512bw {
         )
     }
 
+    /// The digit of each nibble, in each 128-bit lane.
+    #[inline]
+    #[target_feature(enable = "avx512bw")]
+    fn digits() -> __m512i {
+        _mm512_broadcast_i32x4(load16::<0, _>(&DIGITS))
+    }
+
+    /// Encodes at most `ONE_MAX` bytes in one vector: each byte in a 16-bit lane, its high nibble in
+    /// the low byte, so that the digits come in the order of the text.
+    #[inline]
+    #[target_feature(enable = "avx512bw")]
+    fn encode_rest(digits: __m512i, bytes: &[u8], text: &mut [u8]) {
+        let src = _mm512_cvtepu8_epi16(_mm512_castsi512_si256(load_masked(bytes, _mm512_setzero_si512())));
+        let nibbles = _mm512_or_si512(
+            _mm512_srli_epi16(src, 4),
+            _mm512_slli_epi16(_mm512_and_si512(src, _mm512_set1_epi16(0x0f)), 8),
+        );
+        store_masked(text, _mm512_shuffle_epi8(digits, nibbles));
+    }
+
+    /// Decodes at most `2 * ONE_MAX` characters in one vector, and gives the mask of the valid
+    /// lanes. `pmaddubsw` joins each pair in a 16-bit lane, and `vpmovwb` narrows the lanes to the
+    /// bytes. '0', which is zero, is in place of the characters after the end.
+    #[inline]
+    #[target_feature(enable = "avx512bw")]
+    fn decode_rest(text: &[u8], bytes: &mut [u8]) -> u64 {
+        let (nibbles, valid) = nibbles(load_masked(text, _mm512_set1_epi8(b'0'.cast_signed())));
+        let joined = _mm512_cvtepi16_epi8(_mm512_maddubs_epi16(nibbles, _mm512_set1_epi16(PAIR)));
+        store_masked(bytes, _mm512_castsi256_si512(joined));
+        valid
+    }
+
+    /// Encodes at most `ONE_MAX` bytes, with no loop. A short input costs no count of blocks and no
+    /// constant of the loop.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn encode_one(bytes: &[u8], out: &mut [u8]) {
+        encode_rest(digits(), bytes, out);
+    }
+
+    /// Decodes a text of at most `ONE_MAX` bytes of result, with no loop, as [`encode_one`] encodes.
+    #[cfg_attr(target_feature = "avx512bw", inline)]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn decode_one(text: &[u8], out: &mut [u8]) -> bool {
+        decode_rest(text, out) == u64::MAX
+    }
+
     // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
     #[cfg_attr(target_feature = "avx512bw", inline)]
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn encode(bytes: &[u8], out: &mut [u8]) {
-        let digits = _mm512_broadcast_i32x4(load16::<0, _>(&DIGITS));
+        let digits = digits();
         let (chunks, rest) = bytes.as_chunks::<64>();
         let (texts, tail) = out.split_at_mut(chunks.len() * 128);
         for (chunk, text) in chunks.iter().zip(texts.as_chunks_mut::<128>().0) {
@@ -298,15 +348,8 @@ pub(super) mod avx512bw {
             store64::<0, _>(text, first);
             store64::<64, _>(text, second);
         }
-        // The rest, 32 bytes for each vector: each byte in a 16-bit lane, its high nibble in the low
-        // byte, so that the digits come in the order of the text.
-        for (chunk, text) in rest.chunks(32).zip(tail.chunks_mut(64)) {
-            let src = _mm512_cvtepu8_epi16(_mm512_castsi512_si256(load_masked(chunk, _mm512_setzero_si512())));
-            let nibbles = _mm512_or_si512(
-                _mm512_srli_epi16(src, 4),
-                _mm512_slli_epi16(_mm512_and_si512(src, _mm512_set1_epi16(0x0f)), 8),
-            );
-            store_masked(text, _mm512_shuffle_epi8(digits, nibbles));
+        for (chunk, text) in rest.chunks(ONE_MAX).zip(tail.chunks_mut(2 * ONE_MAX)) {
+            encode_rest(digits, chunk, text);
         }
     }
 
@@ -322,15 +365,8 @@ pub(super) mod avx512bw {
             valid = _kand_mask64(valid, block_valid);
             store64::<0, _>(bytes, block);
         }
-        // The rest, 64 characters for each vector: `pmaddubsw` joins each pair in a 16-bit lane, and
-        // `vpmovwb` narrows the lanes to the bytes. '0', which is zero, is in place of the characters
-        // after the end.
-        let zeros = _mm512_set1_epi8(b'0'.cast_signed());
-        for (chars, bytes) in rest.chunks(64).zip(tail.chunks_mut(32)) {
-            let (nibbles, chars_valid) = nibbles(load_masked(chars, zeros));
-            valid = _kand_mask64(valid, chars_valid);
-            let joined = _mm512_cvtepi16_epi8(_mm512_maddubs_epi16(nibbles, _mm512_set1_epi16(PAIR)));
-            store_masked(bytes, _mm512_castsi256_si512(joined));
+        for (chars, bytes) in rest.chunks(2 * ONE_MAX).zip(tail.chunks_mut(ONE_MAX)) {
+            valid = _kand_mask64(valid, decode_rest(chars, bytes));
         }
         valid == u64::MAX
     }

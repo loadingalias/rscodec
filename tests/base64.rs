@@ -1,6 +1,6 @@
 //! The contracts of `rscodec::base64`: the RFC 4648 vectors, the strict profiles, the error and
-//! its offset, the same result on each backend and in each timing class, and the wipe and the DIT
-//! state of the secret class.
+//! its offset, the same result on each backend and in each timing class, and the wipe of the
+//! secret class.
 
 mod common;
 
@@ -50,7 +50,7 @@ fn encode_into(profile: Profile, call: Call, bytes: &[u8], out: &mut [u8]) -> Re
     match call {
         Call::With(backend) => profile.encode_with(backend, bytes, out),
         Call::Public => profile.encode(bytes, out),
-        Call::Secret => profile.encode_secret(bytes, out),
+        Call::Secret => rscodec::with_dit(|dit| profile.encode_secret(dit, bytes, out)),
     }
     .map(|text| text.len())
 }
@@ -60,7 +60,7 @@ fn decode_into(profile: Profile, call: Call, text: &[u8], out: &mut [u8]) -> Res
     match call {
         Call::With(backend) => profile.decode_with(backend, text, out),
         Call::Public => profile.decode(text, out),
-        Call::Secret => profile.decode_secret(text, out),
+        Call::Secret => rscodec::with_dit(|dit| profile.decode_secret(dit, text, out)),
     }
     .map(|bytes| bytes.len())
 }
@@ -302,100 +302,63 @@ fn a_short_output_refuses_with_the_length() {
 /// output writes no byte.
 #[test]
 fn decode_secret_wipes_its_output_after_a_refusal() {
-    const UNWRITTEN: u8 = 0x5a;
-    let mut rng = Rng::new(0x0000_7769_7065);
-    for profile in PROFILES {
-        let value = |byte| alphabet(profile).iter().position(|&c| c == byte).unwrap();
-        // The lengths of each tail and of whole blocks of each kernel.
-        for len in 1..=200 {
-            let bytes = rng.bytes(len);
-            let text = oracle(profile, &bytes);
-            let last = text.iter().rposition(|&c| c != b'=').unwrap();
-            let symbol = |at: usize, byte: u8| {
-                let mut changed = text.clone();
-                changed[at] = byte;
-                changed
-            };
-            // `*` is in neither alphabet.
-            let mut refusals = vec![
-                (symbol(0, b'*'), ErrorKind::Symbol, 0),
-                (symbol(last, b'*'), ErrorKind::Symbol, last),
-            ];
-            // The last character holds bits after the last byte unless the bytes fill 3n bytes.
-            // Bit 0 is one of them.
-            if len % 3 != 0 {
-                let odd = alphabet(profile)[value(text[last]) | 1];
-                refusals.push((symbol(last, odd), ErrorKind::TrailingBits, last));
-            }
-            for (changed, kind, offset) in refusals {
-                let mut out = vec![UNWRITTEN; len + 4];
-                assert_eq!(
-                    profile.decode_secret(&changed, &mut out),
-                    Err(Error { kind, offset }),
-                    "{profile:?} {len}"
-                );
-                assert!(out[..len].iter().all(|&byte| byte == 0), "{profile:?} {len} {kind:?}");
-                assert!(out[len..].iter().all(|&byte| byte == UNWRITTEN), "{profile:?} {len}");
-            }
-        }
-        let mut out = [UNWRITTEN; 8];
-        let length = match profile {
-            Profile::Url => b"AAAAA".as_slice(),
-            Profile::Standard => b"AAAAAA",
-        };
-        assert_eq!(
-            profile.decode_secret(length, &mut out),
-            Err(Error {
-                kind: ErrorKind::Length,
-                offset: length.len()
-            })
-        );
-        assert_eq!(
-            profile.decode_secret(b"AAAA*AAAAAAA", &mut out),
-            Err(Error {
-                kind: ErrorKind::Output,
-                offset: 9
-            })
-        );
-        assert_eq!(out, [UNWRITTEN; 8]);
-    }
-}
-
-/// On aarch64 with DIT, `PSTATE.DIT` after each secret call equals its value before the call, set
-/// or clear, after a result and after a refusal.
-#[cfg(target_arch = "aarch64")]
-#[test]
-fn each_secret_call_leaves_pstate_dit_as_it_was() {
-    use common::dit;
-    // A CPU without DIT has no state to keep.
-    let Some(before) = dit::get() else { return };
-    for held in [false, true] {
-        dit::set(held);
+    rscodec::with_dit(|dit| {
+        const UNWRITTEN: u8 = 0x5a;
+        let mut rng = Rng::new(0x0000_7769_7065);
         for profile in PROFILES {
-            let kept = || assert_eq!(dit::get(), Some(held), "{profile:?}");
-            let error = |kind, offset| Err(Error { kind, offset });
-            let mut out = [0; 64];
+            let value = |byte| alphabet(profile).iter().position(|&c| c == byte).unwrap();
+            // The lengths of each tail and of whole blocks of each kernel.
+            for len in 1..=200 {
+                let bytes = rng.bytes(len);
+                let text = oracle(profile, &bytes);
+                let last = text.iter().rposition(|&c| c != b'=').unwrap();
+                let symbol = |at: usize, byte: u8| {
+                    let mut changed = text.clone();
+                    changed[at] = byte;
+                    changed
+                };
+                // `*` is in neither alphabet.
+                let mut refusals = vec![
+                    (symbol(0, b'*'), ErrorKind::Symbol, 0),
+                    (symbol(last, b'*'), ErrorKind::Symbol, last),
+                ];
+                // The last character holds bits after the last byte unless the bytes fill 3n bytes.
+                // Bit 0 is one of them.
+                if len % 3 != 0 {
+                    let odd = alphabet(profile)[value(text[last]) | 1];
+                    refusals.push((symbol(last, odd), ErrorKind::TrailingBits, last));
+                }
+                for (changed, kind, offset) in refusals {
+                    let mut out = vec![UNWRITTEN; len + 4];
+                    assert_eq!(
+                        profile.decode_secret(dit, &changed, &mut out),
+                        Err(Error { kind, offset }),
+                        "{profile:?} {len}"
+                    );
+                    assert!(out[..len].iter().all(|&byte| byte == 0), "{profile:?} {len} {kind:?}");
+                    assert!(out[len..].iter().all(|&byte| byte == UNWRITTEN), "{profile:?} {len}");
+                }
+            }
+            let mut out = [UNWRITTEN; 8];
+            let length = match profile {
+                Profile::Url => b"AAAAA".as_slice(),
+                Profile::Standard => b"AAAAAA",
+            };
             assert_eq!(
-                profile.encode_secret(&[0xa5; 48], &mut out).map(|text| text.len()),
-                Ok(64)
+                profile.decode_secret(dit, length, &mut out),
+                Err(Error {
+                    kind: ErrorKind::Length,
+                    offset: length.len()
+                })
             );
-            kept();
             assert_eq!(
-                profile.encode_secret(&[0xa5; 48], &mut out[..3]).map(|text| text.len()),
-                error(ErrorKind::Output, 64)
+                profile.decode_secret(dit, b"AAAA*AAAAAAA", &mut out),
+                Err(Error {
+                    kind: ErrorKind::Output,
+                    offset: 9
+                })
             );
-            kept();
-            assert_eq!(
-                profile.decode_secret(&[b'Q'; 64], &mut out).map(|bytes| bytes.len()),
-                Ok(48)
-            );
-            kept();
-            assert_eq!(
-                profile.decode_secret(&[b'*'; 64], &mut out).map(|bytes| bytes.len()),
-                error(ErrorKind::Symbol, 0)
-            );
-            kept();
+            assert_eq!(out, [UNWRITTEN; 8]);
         }
-    }
-    dit::set(before);
+    });
 }

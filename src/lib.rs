@@ -12,7 +12,8 @@
 //! a portable kernel and SIMD kernels, and each kernel gives the same result and the same error for
 //! each input. A codec that can carry a secret has two timing classes: functions for public data,
 //! which run the fastest kernel of the CPU, and functions for secret data, which run only the
-//! kernels whose instructions have data independent timing.
+//! kernels whose instructions have data independent timing. A secret function takes the proof
+//! [`Dit`], which only the scope of [`with_dit`] gives: the scope sets `PSTATE.DIT` on aarch64.
 
 #![no_std]
 
@@ -32,6 +33,9 @@ mod ct;
     )
 ))]
 mod simd;
+
+#[cfg(any(feature = "base64", feature = "hex"))]
+pub use cpu::{Dit, with_dit};
 
 #[cfg(feature = "base64")]
 pub mod base64;
