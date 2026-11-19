@@ -40,8 +40,13 @@ Both classes give the same result and the same error for each input. They differ
   lists with data independent timing (DIT). On x86_64 with AVX-512 VBMI, public base64 runs the
   VBMI kernel, and secret base64 runs the AVX-512BW kernel. hex runs the same kernel in each class.
 - **`PSTATE.DIT`.** A secret function takes `&Dit`, a proof that only `rscodec::with_dit` gives.
-  On aarch64, `with_dit` sets `PSTATE.DIT` for its scope, if the CPU has DIT, and then restores
-  it. The secret functions and the public functions do not read or write it.
+  On aarch64, `with_dit` sets `PSTATE.DIT` for its scope, if the CPU has DIT, then runs a
+  speculation barrier (`sb`, or `dsb nsh` and `isb` on a CPU without SB), and at the end restores
+  `PSTATE.DIT`. The secret functions and the public functions do not read or write it.
+- **No proof without DIT.** On aarch64, a build that cannot tell whether the CPU has DIT gets
+  `DitUnknown` from `with_dit`, and the scope does not run. `std` reports DIT on Linux, Android,
+  and the Apple systems. Elsewhere, for example on Windows or without `std`, build with
+  `-C target-feature=+dit` for CPUs that have DIT.
 - **Output after a refusal.** After `decode_secret` refuses a text for a character or for trailing
   bits, each byte that it wrote is zero. After `decode` refuses, the output is unspecified.
 - **Temporary copies.** Before a secret function returns, on a result or a refusal, it writes zero
@@ -53,8 +58,8 @@ input that you own, the result in your output, or the copies in registers and in
 where the compiler spills registers.
 
 The secret functions can be slower. On x86_64 with VBMI, the AVX-512BW kernel of base64 is slower
-than the VBMI kernel. On aarch64, a scope of `with_dit` writes `PSTATE.DIT` two times, which costs
-most for one short input. If you are not sure that the data is public, use the secret functions.
+than the VBMI kernel. On aarch64, a scope of `with_dit` writes `PSTATE.DIT` two times and runs one
+speculation barrier, which costs most for one short input. If you are not sure that the data is public, use the secret functions.
 
 ## Decode a base64url token into a stack buffer
 
@@ -91,13 +96,14 @@ use rscodec::{base64::Profile, hex, with_dit};
 fn main() -> Result<(), Box<dyn core::error::Error>> {
     let mut key = [0; 32];
     let text = b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    // The outer `?` is `DitUnknown`: this build cannot hold `PSTATE.DIT`.
     with_dit(|dit| -> Result<(), Box<dyn core::error::Error>> {
         assert_eq!(hex::decode_secret(dit, text, &mut key)?[31], 0x1f);
 
         // A refusal leaves zero in each byte that the decoder wrote.
         assert!(Profile::Url.decode_secret(dit, b"AAAA*AAA", &mut key).is_err());
         Ok(())
-    })?;
+    })??;
     assert_eq!(key[..6], [0; 6]);
     Ok(())
 }
@@ -116,19 +122,24 @@ functions in it write nothing:
 use rscodec::base64::{Error, Profile};
 use rscodec::with_dit;
 
-fn decode_keys(tokens: &[&[u8]], keys: &mut [[u8; 32]]) -> Result<(), Error> {
+fn decode_keys(tokens: &[&[u8]], keys: &mut [[u8; 32]]) -> Result<(), Box<dyn core::error::Error>> {
     with_dit(|dit| {
         for (token, key) in tokens.iter().zip(keys.iter_mut()) {
             Profile::Url.decode_secret(dit, token, key)?;
         }
-        Ok(())
-    })
+        Ok::<(), Error>(())
+    })??;
+    Ok(())
 }
 ```
 
 If `PSTATE.DIT` is set already, for example in an outer scope, `with_dit` writes nothing. On x86_64
 and WebAssembly, and on an aarch64 CPU without DIT, `with_dit` only calls the closure. Code in the
 scope must not clear `PSTATE.DIT`.
+
+The writes of DIT read and write memory for the compiler, so the loads and stores of each secret
+function stay in the scope. The proof covers the secret functions of rscodec. It does not cover
+other code in the scope that works only on values in registers.
 
 ## Encode
 

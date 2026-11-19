@@ -13,7 +13,8 @@
 //! each input. A codec that can carry a secret has two timing classes: functions for public data,
 //! which run the fastest kernel of the CPU, and functions for secret data, which run only the
 //! kernels whose instructions have data independent timing. A secret function takes the proof
-//! [`Dit`], which only the scope of [`with_dit`] gives: the scope sets `PSTATE.DIT` on aarch64.
+//! [`Dit`], which only the scope of [`with_dit`] gives: the scope sets `PSTATE.DIT` on aarch64. On
+//! aarch64, a build that cannot tell whether the CPU has DIT gets [`DitUnknown`] in place of a scope.
 
 #![no_std]
 
@@ -35,7 +36,7 @@ mod ct;
 mod simd;
 
 #[cfg(any(feature = "base64", feature = "hex"))]
-pub use cpu::{Dit, with_dit};
+pub use cpu::{Dit, DitUnknown, with_dit};
 
 #[cfg(feature = "base64")]
 pub mod base64;

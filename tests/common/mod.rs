@@ -19,3 +19,9 @@ impl Rng {
         (0..len).map(|_| self.byte()).collect()
     }
 }
+
+/// Runs `scope` in a scope of `rscodec::with_dit`. Each host of the tests can tell whether its CPU
+/// has DIT: x86_64, WebAssembly, and aarch64 with `std` on Linux or macOS.
+pub(crate) fn secret<T>(scope: impl FnOnce(&rscodec::Dit) -> T) -> T {
+    rscodec::with_dit(scope).expect("the host of the tests reports DIT")
+}

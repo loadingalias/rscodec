@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::Rng;
+use common::{Rng, secret};
 use rscodec::hex::{self, Backend, Error, ErrorKind, Kernel};
 
 /// A call of the codec: on a backend, or a function of a timing class, with no backend argument.
@@ -26,7 +26,7 @@ fn encode_into(call: Call, bytes: &[u8], out: &mut [u8]) -> Result<usize, Error>
     match call {
         Call::With(backend) => hex::encode_with(backend, bytes, out),
         Call::Public => hex::encode(bytes, out),
-        Call::Secret => rscodec::with_dit(|dit| hex::encode_secret(dit, bytes, out)),
+        Call::Secret => secret(|dit| hex::encode_secret(dit, bytes, out)),
     }
     .map(|text| text.len())
 }
@@ -36,7 +36,7 @@ fn decode_into(call: Call, text: &[u8], out: &mut [u8]) -> Result<usize, Error> 
     match call {
         Call::With(backend) => hex::decode_with(backend, text, out),
         Call::Public => hex::decode(text, out),
-        Call::Secret => rscodec::with_dit(|dit| hex::decode_secret(dit, text, out)),
+        Call::Secret => secret(|dit| hex::decode_secret(dit, text, out)),
     }
     .map(|bytes| bytes.len())
 }
@@ -175,7 +175,7 @@ fn a_short_output_refuses_with_the_length() {
 /// zero, and it wrote no other byte. A refusal for the length or the output writes no byte.
 #[test]
 fn decode_secret_wipes_its_output_after_a_refusal() {
-    rscodec::with_dit(|dit| {
+    secret(|dit| {
         const UNWRITTEN: u8 = 0x5a;
         let mut rng = Rng::new(0x0000_7769_7065);
         // The lengths of each tail and of whole blocks of each kernel.
@@ -218,7 +218,7 @@ fn the_dit_scope_holds_pstate_dit_and_restores_it() {
     let Some(before) = dit::get() else { return };
     for held in [false, true] {
         dit::set(held);
-        rscodec::with_dit(|dit| {
+        secret(|dit| {
             let mut out = [0; 64];
             assert_eq!(dit::get(), Some(true));
             assert_eq!(
@@ -235,7 +235,7 @@ fn the_dit_scope_holds_pstate_dit_and_restores_it() {
             assert_eq!(dit::get(), Some(true));
         });
         assert_eq!(dit::get(), Some(held));
-        assert!(std::panic::catch_unwind(|| rscodec::with_dit(|_| panic!("a panic in the scope"))).is_err());
+        assert!(std::panic::catch_unwind(|| secret(|_| panic!("a panic in the scope"))).is_err());
         assert_eq!(dit::get(), Some(held));
     }
     dit::set(before);

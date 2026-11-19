@@ -101,6 +101,8 @@ pub(crate) mod aarch64 {
     pub(crate) const AES: Caps = Caps::bit(1);
     /// FEAT_DIT: data independent timing, with `PSTATE.DIT`.
     pub(crate) const DIT: Caps = Caps::bit(2);
+    /// FEAT_SB: the speculation barrier `sb`, which follows each write that sets DIT.
+    pub(crate) const SB: Caps = Caps::bit(3);
 }
 
 /// The features of WebAssembly. WebAssembly has no run-time detection, so each feature is a
@@ -162,6 +164,7 @@ features!(is_aarch64_feature_detected:
     "neon" => aarch64::NEON,
     "aes" => aarch64::AES,
     "dit" => aarch64::DIT,
+    "sb" => aarch64::SB,
 );
 
 #[cfg(target_arch = "wasm32")]
@@ -374,6 +377,27 @@ impl Kept {
 #[derive(Debug)]
 pub struct Dit(core::marker::PhantomData<*const ()>);
 
+/// The refusal of [`with_dit`]: this build cannot tell whether the CPU has DIT, so it cannot hold
+/// `PSTATE.DIT`. It occurs only on aarch64. Recovery: build with `-C target-feature=+dit` for CPUs
+/// that have DIT, or with the `std` feature on Linux, Android, or an Apple OS, where `std` reports
+/// DIT.
+#[cfg(any(feature = "base64", feature = "hex"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DitUnknown;
+
+#[cfg(any(feature = "base64", feature = "hex"))]
+impl core::fmt::Display for DitUnknown {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(
+            "this build cannot tell whether the CPU has DIT: build with `-C target-feature=+dit`, or with \
+             the `std` feature on Linux, Android, or an Apple OS",
+        )
+    }
+}
+
+#[cfg(any(feature = "base64", feature = "hex"))]
+impl core::error::Error for DitUnknown {}
+
 /// Runs `scope` with `PSTATE.DIT` set on this thread, where the CPU has DIT, and restores the
 /// earlier value of `PSTATE.DIT` after it, also after a panic. `scope` gets the proof [`Dit`].
 ///
@@ -382,23 +406,42 @@ pub struct Dit(core::marker::PhantomData<*const ()>);
 /// writes nothing. On a CPU without DIT, and on each target other than aarch64, it only calls
 /// `scope`. Code in the scope must not clear `PSTATE.DIT`.
 ///
+/// On aarch64, if the build cannot tell whether the CPU has DIT, `scope` does not run, and the
+/// result is [`DitUnknown`]. Thus a [`Dit`] never exists while DIT is clear on a CPU that has it.
+///
+/// The writes of DIT read and write memory for the compiler, so no load moves before the write
+/// that sets DIT, and no store moves after the write that restores it. The secret functions of
+/// rscodec read their input and write their output in memory, so their work stays in the scope.
+/// The proof gives no such guarantee for code in `scope` that works only on values in registers.
+///
 /// ```
 /// use rscodec::hex;
 ///
 /// let mut key = [0; 2];
-/// rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))?;
+/// rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))??;
 /// assert_eq!(key, [0xc0, 0xde]);
-/// # Ok::<(), hex::Error>(())
+/// # Ok::<(), Box<dyn core::error::Error>>(())
 /// ```
 #[cfg(any(feature = "base64", feature = "hex"))]
 #[inline]
-pub fn with_dit<T>(scope: impl FnOnce(&Dit) -> T) -> T {
+pub fn with_dit<T>(scope: impl FnOnce(&Dit) -> T) -> Result<T, DitUnknown> {
     let proof = Dit(core::marker::PhantomData);
     #[cfg(target_arch = "aarch64")]
-    if has(aarch64::DIT) {
-        return dit::hold(|| scope(&proof));
+    {
+        // `std` of the pinned toolchain reports DIT only on Linux, Android, and the Apple systems.
+        const KNOWN: bool = cfg!(target_feature = "dit")
+            || cfg!(all(
+                feature = "std",
+                any(target_os = "linux", target_os = "android", target_vendor = "apple")
+            ));
+        if !KNOWN {
+            return Err(DitUnknown);
+        }
+        if has(aarch64::DIT) {
+            return Ok(dit::hold(|| scope(&proof)));
+        }
     }
-    scope(&proof)
+    Ok(scope(&proof))
 }
 
 /// `PSTATE.DIT`, which has no intrinsic. The system register `S3_3_C4_C2_5` is DIT, and bit 24 is
@@ -406,10 +449,12 @@ pub fn with_dit<T>(scope: impl FnOnce(&Dit) -> T) -> T {
 #[cfg(all(target_arch = "aarch64", any(feature = "base64", feature = "hex")))]
 #[expect(
     unsafe_code,
-    reason = "the asm reads and writes only PSTATE.DIT, which changes no value, and only on a CPU that has DIT"
+    reason = "the asm reads and writes only PSTATE.DIT and orders speculation, which changes no value, and only on a CPU that has DIT"
 )]
 mod dit {
     use core::{arch::asm, mem::DropGuard};
+
+    use super::{aarch64, has};
 
     /// The bit of DIT in its register.
     const ON: u64 = 1 << 24;
@@ -429,6 +474,16 @@ mod dit {
         }
         // SAFETY: as above.
         unsafe { asm!("msr S3_3_C4_C2_5, {on}", on = in(reg) ON, options(nostack, preserves_flags)) };
+        // A later instruction can run speculatively before the write of DIT takes effect, so a
+        // barrier comes first (Apple: "add a speculation barrier after turning on DIT").
+        if has(aarch64::SB) {
+            // SAFETY: the CPU has FEAT_SB. `.inst 0xd50330ff` encodes `sb`, which the assembler
+            // accepts only with the `sb` target feature.
+            unsafe { asm!(".inst 0xd50330ff", options(nostack, preserves_flags)) };
+        } else {
+            // SAFETY: each Armv8-A CPU has DSB and ISB: the barrier of Apple for a CPU without SB.
+            unsafe { asm!("dsb nsh", "isb", options(nostack, preserves_flags)) };
+        }
         let _restore = DropGuard::new(earlier, |earlier| {
             // SAFETY: as above.
             unsafe { asm!("msr S3_3_C4_C2_5, {earlier}", earlier = in(reg) earlier, options(nostack, preserves_flags)) }

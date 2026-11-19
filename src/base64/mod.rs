@@ -27,9 +27,9 @@
 //! assert_eq!(Profile::Url.encode(&[0xfb, 0xff, 0xbf], &mut text)?, b"-_-_");
 //! // A key is secret.
 //! let mut key = [0; 3];
-//! rscodec::with_dit(|dit| Profile::Url.decode_secret(dit, b"-_-_", &mut key).map(|key| key.len()))?;
+//! rscodec::with_dit(|dit| Profile::Url.decode_secret(dit, b"-_-_", &mut key).map(|key| key.len()))??;
 //! assert_eq!(key, [0xfb, 0xff, 0xbf]);
-//! # Ok::<(), rscodec::base64::Error>(())
+//! # Ok::<(), Box<dyn core::error::Error>>(())
 //! ```
 //!
 //! [RFC 4648, section 4]: https://www.rfc-editor.org/rfc/rfc4648#section-4

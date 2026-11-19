@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::Rng;
+use common::{Rng, secret};
 use rscodec::base64::{Backend, Error, ErrorKind, Kernel, Profile};
 
 const PROFILES: [Profile; 2] = [Profile::Url, Profile::Standard];
@@ -50,7 +50,7 @@ fn encode_into(profile: Profile, call: Call, bytes: &[u8], out: &mut [u8]) -> Re
     match call {
         Call::With(backend) => profile.encode_with(backend, bytes, out),
         Call::Public => profile.encode(bytes, out),
-        Call::Secret => rscodec::with_dit(|dit| profile.encode_secret(dit, bytes, out)),
+        Call::Secret => secret(|dit| profile.encode_secret(dit, bytes, out)),
     }
     .map(|text| text.len())
 }
@@ -60,7 +60,7 @@ fn decode_into(profile: Profile, call: Call, text: &[u8], out: &mut [u8]) -> Res
     match call {
         Call::With(backend) => profile.decode_with(backend, text, out),
         Call::Public => profile.decode(text, out),
-        Call::Secret => rscodec::with_dit(|dit| profile.decode_secret(dit, text, out)),
+        Call::Secret => secret(|dit| profile.decode_secret(dit, text, out)),
     }
     .map(|bytes| bytes.len())
 }
@@ -302,7 +302,7 @@ fn a_short_output_refuses_with_the_length() {
 /// output writes no byte.
 #[test]
 fn decode_secret_wipes_its_output_after_a_refusal() {
-    rscodec::with_dit(|dit| {
+    secret(|dit| {
         const UNWRITTEN: u8 = 0x5a;
         let mut rng = Rng::new(0x0000_7769_7065);
         for profile in PROFILES {

@@ -25,6 +25,12 @@ use aligned::Aligned;
 use base64::Engine as _;
 use base64ct::Encoding as _;
 use common::Group;
+
+/// Runs `scope` in a scope of `rscodec::with_dit`. Each bench host can tell whether its CPU has
+/// DIT.
+fn secret<T>(scope: impl FnOnce(&rscodec::Dit) -> T) -> T {
+    rscodec::with_dit(scope).expect("the bench host reports DIT")
+}
 use criterion::{Criterion, Throughput};
 use rscodec::{base64::Profile, hex};
 
@@ -193,13 +199,13 @@ fn base64_encode(criterion: &mut Criterion) {
         encode_row(g, case, "rscodec", |raw, out| {
             profile.encode(raw, out).expect("room").len()
         });
-        rscodec::with_dit(|dit| {
+        secret(|dit| {
             encode_row(g, case, "rscodec-secret", |raw, out| {
                 profile.encode_secret(dit, raw, out).expect("room").len()
             });
         });
         encode_row(g, case, "rscodec-secret-cold", |raw, out| {
-            rscodec::with_dit(|dit| profile.encode_secret(dit, raw, out).expect("room").len())
+            secret(|dit| profile.encode_secret(dit, raw, out).expect("room").len())
         });
         for &kernel in rscodec::base64::Kernel::ALL {
             if let Some(backend) = rscodec::base64::Backend::new(kernel) {
@@ -287,13 +293,13 @@ fn base64_decode(criterion: &mut Criterion) {
         decode_row(g, case, "rscodec", room, |text, out| {
             profile.decode(text, out).ok().map(|bytes| bytes.len())
         });
-        rscodec::with_dit(|dit| {
+        secret(|dit| {
             decode_row(g, case, "rscodec-secret", room, |text, out| {
                 profile.decode_secret(dit, text, out).ok().map(|bytes| bytes.len())
             });
         });
         decode_row(g, case, "rscodec-secret-cold", room, |text, out| {
-            rscodec::with_dit(|dit| profile.decode_secret(dit, text, out).ok().map(|bytes| bytes.len()))
+            secret(|dit| profile.decode_secret(dit, text, out).ok().map(|bytes| bytes.len()))
         });
         for &kernel in rscodec::base64::Kernel::ALL {
             if let Some(backend) = rscodec::base64::Backend::new(kernel) {
@@ -383,13 +389,13 @@ fn hex_encode(criterion: &mut Criterion) {
         encode_row(g, case, "rscodec", |raw, out| {
             hex::encode(raw, out).expect("room").len()
         });
-        rscodec::with_dit(|dit| {
+        secret(|dit| {
             encode_row(g, case, "rscodec-secret", |raw, out| {
                 hex::encode_secret(dit, raw, out).expect("room").len()
             });
         });
         encode_row(g, case, "rscodec-secret-cold", |raw, out| {
-            rscodec::with_dit(|dit| hex::encode_secret(dit, raw, out).expect("room").len())
+            secret(|dit| hex::encode_secret(dit, raw, out).expect("room").len())
         });
         for &kernel in hex::Kernel::ALL {
             if let Some(backend) = hex::Backend::new(kernel) {
@@ -420,13 +426,13 @@ fn hex_decode(criterion: &mut Criterion) {
         decode_row(g, case, "rscodec", room, |text, out| {
             hex::decode(text, out).ok().map(|bytes| bytes.len())
         });
-        rscodec::with_dit(|dit| {
+        secret(|dit| {
             decode_row(g, case, "rscodec-secret", room, |text, out| {
                 hex::decode_secret(dit, text, out).ok().map(|bytes| bytes.len())
             });
         });
         decode_row(g, case, "rscodec-secret-cold", room, |text, out| {
-            rscodec::with_dit(|dit| hex::decode_secret(dit, text, out).ok().map(|bytes| bytes.len()))
+            secret(|dit| hex::decode_secret(dit, text, out).ok().map(|bytes| bytes.len()))
         });
         for &kernel in hex::Kernel::ALL {
             if let Some(backend) = hex::Backend::new(kernel) {

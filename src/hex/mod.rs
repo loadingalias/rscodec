@@ -24,9 +24,9 @@
 //! assert_eq!(hex::encode(&[0xc0, 0xde], &mut text)?, b"c0de");
 //! // A key is secret.
 //! let mut key = [0; 2];
-//! rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))?;
+//! rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))??;
 //! assert_eq!(key, [0xc0, 0xde]);
-//! # Ok::<(), rscodec::hex::Error>(())
+//! # Ok::<(), Box<dyn core::error::Error>>(())
 //! ```
 //!
 //! [RFC 4648, section 8]: https://www.rfc-editor.org/rfc/rfc4648#section-8
