@@ -112,7 +112,7 @@ fn error(kind: ErrorKind, offset: usize) -> Result<(), Error> {
 }
 
 /// The serde_json tree of the tokens of `input`. A number is the serde_json value of its text.
-fn tree(input: &[u8], profile: Profile) -> Result<serde_json::Value, Error> {
+pub(in crate::json) fn tree(input: &[u8], profile: Profile) -> Result<serde_json::Value, Error> {
     use serde_json::{Map, Value};
     let tokens = tokens(input, &WIDE, profile, 1 << 16)?;
     let mut open: Vec<(Value, Option<String>)> = Vec::new();

@@ -1,4 +1,4 @@
-//! The refusals of the reader.
+//! The refusals of the reader and of the writer.
 
 use core::fmt;
 
@@ -33,8 +33,15 @@ pub enum ErrorKind {
     /// the decoded string, and the recovery is a buffer of that length.
     Output,
     /// The value at the offset is not of the type that the call reads, or no value comes at the
-    /// offset.
+    /// offset. The writer gives it at offset 0 when its closure writes no value.
     Type,
+    /// The writer: the slice ends before the end of the value that the call writes. The offset is
+    /// the written length, which the call did not change. The recovery is a longer slice, or a new
+    /// slice after the caller takes the written bytes.
+    Full,
+    /// The writer: JSON has no number for the NaN or the infinity that the call writes. The offset
+    /// is the written length. The recovery is a finite value, or `null`.
+    NonFinite,
 }
 
 /// The limit of [`Limits`](super::Limits) that the input passes.
@@ -54,12 +61,14 @@ pub enum Limit {
     NumberDigits,
 }
 
-/// A refusal: its cause and the offset of the cause in the input. It holds no byte of the input.
+/// A refusal: its cause and the offset of the cause in the input, or the written length of the
+/// writer. It holds no byte of the input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Error {
     /// The cause.
     pub kind: ErrorKind,
-    /// The offset in the input, or for [`ErrorKind::Output`], the length of the decoded string.
+    /// The offset in the input, or for [`ErrorKind::Output`], the length of the decoded string, or
+    /// for the writer, the written length.
     pub offset: usize,
 }
 
@@ -97,6 +106,10 @@ impl fmt::Display for Error {
                 return write!(f, "the buffer is shorter than the {offset} bytes of the decoded string");
             }
             ErrorKind::Type => "the JSON value does not have the type that the decoder reads",
+            ErrorKind::Full => {
+                return write!(f, "the slice of the JSON writer ends after {offset} written bytes");
+            }
+            ErrorKind::NonFinite => "JSON has no number for NaN or an infinity",
         };
         write!(f, "{cause} at offset {offset}")
     }

@@ -83,6 +83,30 @@ fn check(input: v128, previous: v128, [first_high, first_low, second_high]: [v12
     v128_xor(v128_and(continues, u8x16_splat(0x80)), pair)
 }
 
+/// The bits of a mask for each byte of [`escapes`].
+pub(super) const BITS: u32 = 1;
+
+/// A mask with [`BITS`] bits for each byte of `block` that a JSON string escapes: `"`, `\\`, or a
+/// byte under 0x20, the first byte in the low bits.
+#[inline(always)]
+pub(super) fn escapes(block: &[u8; 16]) -> u64 {
+    scan(load::table(block))
+}
+
+/// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
+#[inline(always)]
+pub(super) fn escapes_of_words(low: u64, high: u64) -> u64 {
+    scan(u64x2(low, high))
+}
+
+#[inline(always)]
+fn scan(bytes: v128) -> u64 {
+    let quote = u8x16_eq(bytes, u8x16_splat(b'"'));
+    let backslash = u8x16_eq(bytes, u8x16_splat(b'\\'));
+    let control = u8x16_lt(bytes, u8x16_splat(0x20));
+    u64::from(u8x16_bitmask(v128_or(v128_or(quote, backslash), control)))
+}
+
 /// The loads of the kernel.
 #[expect(unsafe_code, reason = "each load reads only the bytes of the array that it takes")]
 mod load {

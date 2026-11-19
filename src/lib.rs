@@ -4,7 +4,7 @@
 //!
 //! - `base64`: [`base64`], base64 with padding and base64url without padding.
 //! - `hex`: [`hex`], lowercase hex.
-//! - `json`: [`json`], a JSON reader.
+//! - `json`: [`json`], a JSON reader and writer.
 //!
 //! The `std` feature is on by default. Without it, the crate needs only `core`.
 //!

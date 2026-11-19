@@ -23,3 +23,8 @@ store-success-output = false
 store-failure-output = true
 report-skipped = "none"
 flaky-fail-status = "failure"
+
+# The named float sweep runs only when selected (`--run-ignored only`), and for minutes.
+[[profile.default.overrides]]
+filter = "test(float_sweep)"
+slow-timeout = { period = "60s", terminate-after = 60 }

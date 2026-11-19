@@ -165,6 +165,88 @@ fn utf8_error_avx512(input: __m512i, before: u32) -> bool {
     _mm512_test_epi8_mask(error, error) != 0
 }
 
+/// The scan of the writer for the bytes that a JSON string escapes, with SSE2, which each x86_64
+/// CPU has, so the build fixes the kernel.
+#[expect(unsafe_code, reason = "each x86_64 CPU has SSE2")]
+pub(super) mod escape {
+    use core::arch::x86_64::{
+        __m128i, _mm_cmpeq_epi8, _mm_min_epu8, _mm_movemask_epi8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8,
+    };
+
+    /// The bits of a mask for each byte of [`escapes`].
+    pub(in super::super) const BITS: u32 = 1;
+
+    /// A mask with [`BITS`] bits for each byte of `block` that a JSON string escapes: `"`, `\\`,
+    /// or a byte under 0x20, the first byte in the low bits.
+    #[inline(always)]
+    pub(in super::super) fn escapes(block: &[u8; 16]) -> u64 {
+        // SAFETY: each x86_64 CPU has SSE2, the feature of `scan`.
+        unsafe { scan(super::load::table(block)) }
+    }
+
+    /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
+    #[inline(always)]
+    pub(in super::super) fn escapes_of_words(low: u64, high: u64) -> u64 {
+        // SAFETY: each x86_64 CPU has SSE2, the feature of `_mm_set_epi64x` and `scan`.
+        unsafe { scan(_mm_set_epi64x(high.cast_signed(), low.cast_signed())) }
+    }
+
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    fn scan(bytes: __m128i) -> u64 {
+        let quote = _mm_cmpeq_epi8(bytes, _mm_set1_epi8(b'"'.cast_signed()));
+        let backslash = _mm_cmpeq_epi8(bytes, _mm_set1_epi8(b'\\'.cast_signed()));
+        // A byte is under 0x20 exactly when its unsigned minimum with 0x1f is the byte.
+        let control = _mm_cmpeq_epi8(_mm_min_epu8(bytes, _mm_set1_epi8(0x1f)), bytes);
+        u64::from(_mm_movemask_epi8(_mm_or_si128(_mm_or_si128(quote, backslash), control)).cast_unsigned())
+    }
+}
+
+/// The digits of the printers, with SSE2, which each x86_64 CPU has, so the build fixes the kernel.
+#[expect(unsafe_code, reason = "each x86_64 CPU has SSE2")]
+pub(super) mod digits {
+    use core::arch::x86_64::{
+        _mm_add_epi64, _mm_cvtsi128_si64, _mm_mul_epu32, _mm_mulhi_epu16, _mm_mullo_epi16, _mm_or_si128,
+        _mm_set_epi64x, _mm_set1_epi16, _mm_set1_epi64x, _mm_shuffle_epi32, _mm_slli_epi16, _mm_slli_epi32,
+        _mm_srli_epi16, _mm_srli_epi64, _mm_sub_epi16, _mm_unpackhi_epi64,
+    };
+
+    /// [`super::super::integer::eight_digits`] of the two halves of `value`, under 10^16, high
+    /// first.
+    #[inline(always)]
+    pub(in super::super) fn sixteen(value: u64) -> (u64, u64) {
+        // SAFETY: each x86_64 CPU has SSE2, the feature of `split`.
+        unsafe { split(value) }
+    }
+
+    /// Each step splits each lane into its quotient and its remainder by a power of 10, the
+    /// quotient in the low half of the lane. A multiply that keeps the high bits gives each
+    /// quotient: `x / 10^4` is `(x × 109_951_163) >> 40` for `x < 10^8`, `x / 100` is
+    /// `(x × 5_243) >> 19` for `x < 10^4`, and `x / 10` is `(x × 6_554) >> 16` for `x < 100`.
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    fn split(value: u64) -> (u64, u64) {
+        let (high, low) = (value / 100_000_000, value % 100_000_000);
+        let halves = _mm_set_epi64x(low.cast_signed(), high.cast_signed());
+        let quotients = _mm_srli_epi64::<40>(_mm_mul_epu32(halves, _mm_set1_epi64x(109_951_163)));
+        // `x + q × (2^32 − 10^4)` is the remainder in the low half and the quotient in the high
+        // half, and the shuffle swaps the halves.
+        let fourths = _mm_add_epi64(halves, _mm_mul_epu32(quotients, _mm_set1_epi64x((1 << 32) - 10_000)));
+        let fourths = _mm_shuffle_epi32::<0b10_11_00_01>(fourths);
+        // The high 16 bits of each 32-bit lane are 0, so their products are 0.
+        let hundreds = _mm_srli_epi16::<3>(_mm_mulhi_epu16(fourths, _mm_set1_epi16(5_243)));
+        let remainders = _mm_sub_epi16(fourths, _mm_mullo_epi16(hundreds, _mm_set1_epi16(100)));
+        let pairs = _mm_or_si128(hundreds, _mm_slli_epi32::<16>(remainders));
+        // `t | (x − 10t) << 8` is `(x << 8) − t × (10 × 2^8 − 1)` for the tens `t` of `x`.
+        let tens = _mm_mulhi_epu16(pairs, _mm_set1_epi16(6_554));
+        let digits = _mm_sub_epi16(_mm_slli_epi16::<8>(pairs), _mm_mullo_epi16(tens, _mm_set1_epi16(2_559)));
+        (
+            _mm_cvtsi128_si64(digits).cast_unsigned(),
+            _mm_cvtsi128_si64(_mm_unpackhi_epi64(digits, digits)).cast_unsigned(),
+        )
+    }
+}
+
 /// The loads of the kernels.
 #[expect(unsafe_code, reason = "each load reads only the bytes of the array that it takes")]
 mod load {

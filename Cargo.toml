@@ -20,7 +20,8 @@ std = []
 base64 = []
 # Lowercase hex (RFC 4648 section 8).
 hex = []
-# JSON (RFC 8259): the pull reader, its two profiles, and the strict walk for typed decoders.
+# JSON (RFC 8259): the pull reader, its two profiles, the strict walk for typed decoders, and
+# the writer.
 json = []
 
 [lints]

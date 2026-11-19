@@ -1,11 +1,13 @@
-# Read JSON
+# Read and write JSON
 
 rscodec reads one JSON document from a slice in memory. The reader is a pull reader: your code asks
 for each token or value in order, and the reader checks each byte that it passes. It allocates no
 memory, and no code recurses, so a deep document does not grow the stack.
 
-The `json` feature is in development. The first release with it is not on crates.io yet. This page
-gives the reader. Exact number accessors and the writer come later. Now a number gives its text.
+The writer writes compact JSON into a slice that you lend. It allocates no memory either.
+
+The `json` feature is in development. The first release with it is not on crates.io yet. Exact
+number accessors come later. Now the reader gives the text of a number.
 
 ## Select the feature
 
@@ -207,10 +209,111 @@ A scratch that is too short refuses with `ErrorKind::Scratch` at the container o
 slot. For a document of depth `d` with at most `m` members in each object, `d × (m + 1)` slots are
 enough.
 
+## Write a document
+
+`json::write` takes a slice and a closure, and returns the length of the text. The closure gets a
+`Place`: the place of one value. Each method of `Place` writes one value and takes the place, so
+each place gets at most one value:
+
+- `str`, `i64`, `u64`, `f64`, `bool`, and `null` write a scalar.
+- `base64url` writes bytes as a base64url string with no padding. It needs the `base64` feature
+  too.
+- `object` and `array` take a closure. `Object::member(key)` gives the place of the value of a
+  member, and `Array::item()` gives the place of the next item.
+
+The writer writes each `,`, `:`, quote, and escape. A place that your code drops writes nothing, so
+the text is always valid JSON. This closure writes the options of a WebAuthn registration ceremony:
+
+```rust
+use rscodec::json::{self, ErrorKind};
+
+let (user_id, challenge) = (b"user-4711", [0x9f; 16]);
+let options = |out: &mut [u8]| {
+    json::write(out, |options| {
+        options.object(|options| {
+            options.member("rp").object(|rp| {
+                rp.member("id").str("example.com")?;
+                rp.member("name").str("Example")
+            })?;
+            options.member("user").object(|user| {
+                user.member("id").base64url(user_id)?;
+                user.member("name").str("alice@example.com")?;
+                user.member("displayName").str("Alice \"Al\" Smith")
+            })?;
+            options.member("challenge").base64url(&challenge)?;
+            options.member("pubKeyCredParams").array(|params| {
+                // ES256 and RS256.
+                for alg in [-7, -257] {
+                    params.item().object(|param| {
+                        param.member("type").str("public-key")?;
+                        param.member("alg").i64(alg)
+                    })?;
+                }
+                Ok(())
+            })?;
+            options.member("timeout").u64(60_000)?;
+            options.member("attestation").str("none")
+        })
+    })
+};
+let mut out = [0; 512];
+let len = options(&mut out)?;
+assert_eq!(
+    &out[..len],
+    concat!(
+        r#"{"rp":{"id":"example.com","name":"Example"},"#,
+        r#""user":{"id":"dXNlci00NzEx","name":"alice@example.com","displayName":"Alice \"Al\" Smith"},"#,
+        r#""challenge":"n5-fn5-fn5-fn5-fn5-fnw","#,
+        r#""pubKeyCredParams":[{"type":"public-key","alg":-7},{"type":"public-key","alg":-257}],"#,
+        r#""timeout":60000,"attestation":"none"}"#,
+    )
+    .as_bytes(),
+);
+
+// A slice that is too short refuses, and the text that fits stays valid. Here the object does
+// not fit, so nothing is written.
+let error = options(&mut out[..len - 1]).unwrap_err();
+assert_eq!((error.kind, error.offset), (ErrorKind::Full, 0));
+# Ok::<(), json::Error>(())
+```
+
+The forms of the values:
+
+- A string gets the escapes of RFC 8785, which are also valid RFC 8259: `\"`, `\\`, `\b`, `\f`,
+  `\n`, `\r`, `\t`, and `\u00xx` with lowercase hex digits for each other byte under 0x20. Other
+  characters stay as they are.
+- `f64` writes the shortest digits that read back as the same value, in the layout of `{:?}` of
+  `core::fmt`: `1.0`, `-0.0`, `0.0001`, `1e16`, and `1.5e-7`. JSON has no NaN or infinity, so they
+  refuse with `ErrorKind::NonFinite`. For an `f32`, write `f64::from(value)`.
+- The writer does not check the keys of an object. The reader refuses a duplicate key, so write each
+  key once.
+
+Each call writes all of its bytes or none. After an error, the written length is the length before
+the call, also when an `object` or `array` closure fails. To write JSON Lines, write each record with
+its own `json::write` call, and put a `\n` after it.
+
+## Size the slice
+
+The writer needs no more than the length of the text. Add the parts:
+
+| Part | Bytes |
+| --- | --- |
+| A string or a key | `json::string_len(text)`, quotes and escapes included |
+| A key | 1 more, for the `:` |
+| `base64url(bytes)` | `base64::Profile::Url.encoded_len(bytes.len())` and 2 quotes |
+| `i64`, `u64` | at most `json::I64_BYTES_MAX` or `json::U64_BYTES_MAX` (20) |
+| `f64` | at most `json::F64_BYTES_MAX` (24) |
+| `true`, `false`, `null` | 4, 5, 4 |
+| An object or an array | 2, and 1 for each `,` between its items |
+
+When the slice ends, the call that does not fit refuses with `ErrorKind::Full`. The offset is the
+written length. Lend a longer slice, or take the written bytes and continue in a new slice.
+
 ## Errors
 
-Each refusal is a `json::Error` with a `kind` and an `offset` in the document. The errors come in
-the order of their offsets: `read` gives the error with the lowest offset.
+Each refusal is a `json::Error` with a `kind` and an `offset`. For the reader, the offset is in the
+document, and the errors come in the order of their offsets: `read` gives the error with the lowest
+offset. For the writer, the offset is the written length.
 
 | `ErrorKind` | Cause | Recovery |
 | --- | --- | --- |
@@ -224,7 +327,9 @@ the order of their offsets: `read` gives the error with the lowest offset.
 | `Limit(limit)` | The item at the offset passes the limit `limit` of `Limits`. | Raise the limit, if the document is trusted. |
 | `Scratch` | The scratch has no slot for the container or key at the offset. | Lend a longer scratch. |
 | `Output` | The buffer of `Str::decode` is too short. The offset is the decoded length, which `Str::len` also gives. | Lend a buffer of that length. |
-| `Type` | The value at the offset does not have the type that the call reads. | Read with `Value::kind` first, or refuse the document. |
+| `Type` | The value at the offset does not have the type that the call reads. The writer gives it at offset 0 when its closure writes no value. | Read with `Value::kind` first, or refuse the document. Write a value at the place. |
+| `Full` | The writer: the slice ends before the end of the value that the call writes. | Lend a longer slice, or continue in a new slice. |
+| `NonFinite` | The writer: the call writes NaN or an infinity, which JSON has no number for. | Write a finite value, or `null`. |
 
 ## JSONTestSuite
 

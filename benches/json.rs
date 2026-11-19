@@ -24,7 +24,7 @@ use std::{fs, path::Path, sync::OnceLock};
 use aligned::Aligned;
 use common::Group;
 use criterion::{Criterion, Throughput};
-use rscodec::json::{self, Limits, Profile, Slot, Token};
+use rscodec::json::{self, Limits, Place, Profile, Slot, Token};
 use serde_json::Value;
 use simd_json::prelude::Writable as _;
 use typed::Typed;
@@ -484,6 +484,97 @@ fn write_row<V>(
     );
 }
 
+/// A tree with the members of each object in a `Vec`, as in the tree of sonic-rs, for the writer
+/// rows of rscodec, which has no tree. A number is `u64`, `i64`, or `f64`, as serde_json holds it.
+enum Node {
+    Null,
+    Bool(bool),
+    Unsigned(u64),
+    Signed(i64),
+    Float(f64),
+    Text(String),
+    Array(Vec<Node>),
+    Object(Vec<(String, Node)>),
+}
+
+impl Node {
+    fn of(tree: &Value) -> Self {
+        match tree {
+            Value::Null => Self::Null,
+            Value::Bool(value) => Self::Bool(*value),
+            Value::Number(number) => match (number.as_u64(), number.as_i64()) {
+                (Some(value), _) => Self::Unsigned(value),
+                (None, Some(value)) => Self::Signed(value),
+                (None, None) => Self::Float(number.as_f64().expect("serde_json holds each number")),
+            },
+            Value::String(text) => Self::Text(text.clone()),
+            Value::Array(items) => Self::Array(items.iter().map(Self::of).collect()),
+            Value::Object(members) => Self::Object(
+                members
+                    .iter()
+                    .map(|(key, value)| (key.clone(), Self::of(value)))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn put(&self, place: Place<'_>) -> Result<(), json::Error> {
+        match self {
+            Self::Null => place.null(),
+            Self::Bool(value) => place.bool(*value),
+            Self::Unsigned(value) => place.u64(*value),
+            Self::Signed(value) => place.i64(*value),
+            Self::Float(value) => place.f64(*value),
+            Self::Text(text) => place.str(text),
+            Self::Array(items) => place.array(|array| items.iter().try_for_each(|item| item.put(array.item()))),
+            Self::Object(members) => place.object(|object| {
+                members
+                    .iter()
+                    .try_for_each(|(key, value)| value.put(object.member(key)))
+            }),
+        }
+    }
+}
+
+/// The row of rscodec in `json-write`: each tree of the class into one slice that the row lends,
+/// as each other row writes into one `Vec`.
+fn write_row_rscodec(group: &mut Group<'_>, class: &'static Class) {
+    let trees: Vec<Node> = class.trees.iter().map(Node::of).collect();
+    let out = Aligned::new(&vec![
+        0;
+        2 * class.docs.iter().map(|doc| doc.len()).max().unwrap_or(0)
+            + 1024
+    ]);
+    group.row(
+        "rscodec",
+        class.name,
+        (trees, out),
+        |(trees, out)| {
+            trees
+                .iter()
+                .filter(|tree| json::write(out, |place| tree.put(place)).is_ok())
+                .count()
+        },
+        |written, (trees, out)| {
+            assert_eq!(
+                written,
+                class.docs.len(),
+                "rscodec writes each document of {}",
+                class.name
+            );
+            for (index, (tree, expected)) in trees.iter().zip(&class.trees).enumerate() {
+                let len = json::write(out, |place| tree.put(place)).expect("the slice holds the document");
+                let back: Value = serde_json::from_slice(&out[..len]).expect("the text is JSON");
+                assert!(
+                    back == *expected,
+                    "rscodec writes document {index} of {} as the text of the reference tree",
+                    class.name
+                );
+            }
+        },
+    );
+}
+
 fn write(criterion: &mut Criterion) {
     let mut group = Group::new(criterion, "json-write");
     for class in classes() {
@@ -513,6 +604,7 @@ fn write(criterion: &mut Criterion) {
         write_row(g, class, "flexon", trees.collect(), |tree, text| {
             flexon::to_writer(text, tree).is_ok()
         });
+        write_row_rscodec(g, class);
     }
 }
 
@@ -581,6 +673,34 @@ fn print_f64(criterion: &mut Criterion) {
     for (input, values) in &f64_inputs() {
         group.throughput(Throughput::Elements(values.len().try_into().expect("a count fits u64")));
         let g = &mut group;
+        // The writer writes the values as one array, so its row has `[`, `]`, and no last `,`.
+        let out = Aligned::new(&vec![0; values.len() * json::F64_BYTES_MAX + values.len() + 2]);
+        g.row(
+            "rscodec",
+            input,
+            out,
+            |out| {
+                json::write(out, |place| {
+                    place.array(|array| values.iter().try_for_each(|&value| array.item().f64(value)))
+                })
+            },
+            |len, out| {
+                let len = len.expect("the slice holds the array");
+                let text = core::str::from_utf8(&out[..len]).expect("the writer writes ASCII");
+                let inner = text
+                    .strip_prefix('[')
+                    .and_then(|text| text.strip_suffix(']'))
+                    .expect("an array");
+                let back: Vec<u64> = inner
+                    .split(',')
+                    .map(|value| value.parse::<f64>().map(f64::to_bits).expect("a number"))
+                    .collect();
+                assert!(
+                    back == values.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    "rscodec prints each value of {input} so that it parses back"
+                );
+            },
+        );
         print_row(g, input, values, "zmij", |values, text| {
             let mut buffer = zmij::Buffer::new();
             for &value in values {

@@ -23,6 +23,102 @@ fn pmull_prefix_xor(bits: u64) -> u64 {
     vmull_p64(bits, u64::MAX) as u64
 }
 
+/// The scan of the writer for the bytes that a JSON string escapes. Neon is in the base of each
+/// aarch64 target that has it, so the build fixes the kernel.
+#[cfg(target_feature = "neon")]
+#[expect(
+    unsafe_code,
+    reason = "the build has Neon, and the load reads only the bytes of the array that it takes"
+)]
+pub(super) mod escape {
+    use core::arch::aarch64::{
+        uint8x16_t, vceqq_u8, vcltq_u8, vcombine_u64, vcreate_u64, vdupq_n_u8, vget_lane_u64, vld1q_u8, vorrq_u8,
+        vreinterpret_u64_u8, vreinterpretq_u8_u64, vreinterpretq_u16_u8, vshrn_n_u16,
+    };
+
+    /// The bits of a mask for each byte of [`escapes`].
+    pub(in super::super) const BITS: u32 = 4;
+
+    /// A mask with [`BITS`] bits for each byte of `block` that a JSON string escapes: `"`, `\\`,
+    /// or a byte under 0x20, the first byte in the low bits.
+    #[inline(always)]
+    pub(in super::super) fn escapes(block: &[u8; 16]) -> u64 {
+        // SAFETY: the build has Neon, the feature of `load` and `scan`.
+        unsafe { scan(load(block)) }
+    }
+
+    /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
+    #[inline(always)]
+    pub(in super::super) fn escapes_of_words(low: u64, high: u64) -> u64 {
+        // SAFETY: the build has Neon, the feature of `scan`.
+        unsafe { scan(vreinterpretq_u8_u64(vcombine_u64(vcreate_u64(low), vcreate_u64(high)))) }
+    }
+
+    #[inline(always)]
+    #[target_feature(enable = "neon")]
+    fn load(block: &[u8; 16]) -> uint8x16_t {
+        // SAFETY: the load reads the 16 bytes of `block`, and it needs no alignment.
+        unsafe { vld1q_u8(block.as_ptr()) }
+    }
+
+    #[inline(always)]
+    #[target_feature(enable = "neon")]
+    fn scan(bytes: uint8x16_t) -> u64 {
+        let quote = vceqq_u8(bytes, vdupq_n_u8(b'"'));
+        let backslash = vceqq_u8(bytes, vdupq_n_u8(b'\\'));
+        let control = vcltq_u8(bytes, vdupq_n_u8(0x20));
+        let hit = vorrq_u8(vorrq_u8(quote, backslash), control);
+        // Four bits for each byte: the narrowing shift keeps the middle byte of each 16-bit lane.
+        vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(vreinterpretq_u16_u8(hit))))
+    }
+}
+
+/// The digits of the printers. Neon is in the base of each aarch64 target that has it, so the build
+/// fixes the kernel.
+#[cfg(target_feature = "neon")]
+#[expect(unsafe_code, reason = "the build has Neon")]
+pub(super) mod digits {
+    use core::arch::aarch64::{
+        vcreate_u32, vgetq_lane_u64, vmla_n_u32, vmlaq_n_u16, vmlaq_n_u32, vqdmulh_n_s32, vqdmulhq_n_s16,
+        vqdmulhq_n_s32, vreinterpret_s32_u32, vreinterpret_u16_u32, vreinterpret_u32_s32, vreinterpretq_s16_u16,
+        vreinterpretq_s32_u32, vreinterpretq_u8_u16, vreinterpretq_u16_s16, vreinterpretq_u16_u32,
+        vreinterpretq_u32_s32, vreinterpretq_u64_u8, vrev64q_u8, vshll_n_u16, vshr_n_u32,
+    };
+
+    /// [`super::super::integer::eight_digits`] of the two halves of `value`, under 10^16, high
+    /// first.
+    #[inline(always)]
+    pub(in super::super) fn sixteen(value: u64) -> (u64, u64) {
+        // SAFETY: the build has Neon, the feature of `split`.
+        unsafe { split(value) }
+    }
+
+    /// Each step splits each lane into its quotient and its remainder by a power of 10, the
+    /// remainder in the low half of the lane. A doubling multiply that keeps the high half gives
+    /// each quotient: `x / 10^4` is `(2x × 109_951_163) >> 41` for `x < 10^8`, `x / 100` is
+    /// `(2x × 21_474_837) >> 32` for `x < 10^4`, and `x / 10` is `(2x × 3_277) >> 16` for
+    /// `x < 100`. Thus each half has its digits from the last, and a reverse of each half gives them
+    /// from the first.
+    #[inline(always)]
+    #[target_feature(enable = "neon")]
+    fn split(value: u64) -> (u64, u64) {
+        let (high, low) = (value / 100_000_000, value % 100_000_000);
+        let halves = vcreate_u32(low << 32 | high);
+        let fourths = vshr_n_u32::<9>(vreinterpret_u32_s32(vqdmulh_n_s32(
+            vreinterpret_s32_u32(halves),
+            109_951_163,
+        )));
+        let fourths = vmla_n_u32(halves, fourths, (1 << 16) - 10_000);
+        let fourths = vshll_n_u16::<0>(vreinterpret_u16_u32(fourths));
+        let pairs = vreinterpretq_u32_s32(vqdmulhq_n_s32(vreinterpretq_s32_u32(fourths), 21_474_837));
+        let pairs = vreinterpretq_u16_u32(vmlaq_n_u32(fourths, pairs, (1 << 16) - 100));
+        let tens = vreinterpretq_u16_s16(vqdmulhq_n_s16(vreinterpretq_s16_u16(pairs), 3_277));
+        let digits = vrev64q_u8(vreinterpretq_u8_u16(vmlaq_n_u16(pairs, tens, (1 << 8) - 10)));
+        let words = vreinterpretq_u64_u8(digits);
+        (vgetq_lane_u64::<0>(words), vgetq_lane_u64::<1>(words))
+    }
+}
+
 /// Makes the module `$name` of a kernel with the target features `$features`. `$prefix_xor` gives
 /// the XOR of bits `0..=i` of its argument in each bit `i`.
 macro_rules! kernel {

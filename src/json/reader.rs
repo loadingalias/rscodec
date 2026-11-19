@@ -2,7 +2,7 @@
 //! of the caller holds each open container and the keys of each open object.
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 use super::{
     Backend, Error, ErrorKind, Limit, Limits, Profile,

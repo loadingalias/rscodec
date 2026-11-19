@@ -1,5 +1,5 @@
 //! JSON ([RFC 8259]): a pull reader with two profiles, limits, and a strict walk for typed
-//! decoders.
+//! decoders, and a writer.
 //!
 //! [`read`] reads one document from a slice in memory. It gives a [`Reader`] to its closure, and
 //! the closure reads the document with it:
@@ -60,6 +60,10 @@
 //! # Ok::<(), json::Error>(())
 //! ```
 //!
+//! [`write()`] writes compact JSON into a slice that the caller lends, with no allocation. Its
+//! closure gets a [`Place`] for one value, and the types of [`Place`], [`Object`], and [`Array`]
+//! give each value one place, so the text is always valid JSON.
+//!
 //! [RFC 8259]: https://www.rfc-editor.org/rfc/rfc8259
 
 #[cfg(target_arch = "aarch64")]
@@ -67,6 +71,9 @@ mod aarch64;
 mod block;
 mod cursor;
 mod error;
+mod escape;
+mod float;
+mod integer;
 mod number;
 mod portable;
 mod reader;
@@ -82,14 +89,24 @@ mod string;
 mod tests;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 mod wasm32;
+mod write;
 #[cfg(target_arch = "x86_64")]
 mod x86;
 
 pub use error::{Error, ErrorKind, Limit};
+pub use escape::string_len;
 pub use number::Number;
 pub use reader::{Elements, Kind, Members, Reader, Token, Value};
 pub use scratch::Slot;
 pub use string::Str;
+pub use write::{Array, Object, Place, write};
+
+/// The most bytes that [`Place::f64`] writes: `-2.2250738585072014e-308`.
+pub const F64_BYTES_MAX: usize = float::BYTES_MAX;
+/// The most bytes that [`Place::i64`] writes: `-9223372036854775808`.
+pub const I64_BYTES_MAX: usize = 20;
+/// The most bytes that [`Place::u64`] writes: `18446744073709551615`.
+pub const U64_BYTES_MAX: usize = 20;
 
 use crate::cpu::{self, Caps, Kept, caps_static};
 use block::{Block, Carry};
