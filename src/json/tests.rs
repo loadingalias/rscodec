@@ -160,6 +160,22 @@ fn each_kernel_equals_the_reference_on_the_fetched_corpora() {
     check_files(&files.each_ref().map(Path::new));
 }
 
+/// The word of `N` bytes of `bytes` at `index`, for each index in `0..bytes.len().pow(N)`.
+fn word<const N: usize>(bytes: &[u8], index: usize) -> [u8; N] {
+    let mut rest = index;
+    core::array::from_fn(|_| {
+        let byte = bytes[rest % bytes.len()];
+        rest /= bytes.len();
+        byte
+    })
+}
+
+/// A byte of each UTF-8 class of the check: ASCII, the continuation bytes, and the lead bytes with
+/// each class of low nibble.
+const UTF8_BYTES: [u8; 18] = [
+    b'a', 0x80, 0x90, 0xa0, 0xbf, 0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xe1, 0xed, 0xee, 0xf0, 0xf1, 0xf4, 0xf5, 0xff,
+];
+
 /// Each string of 6 bytes of quotes, `\`, a scalar byte, whitespace, a structural byte, and a byte
 /// under 0x20, across the end of a block at each place. Thus each run of `\` before a quote, also an
 /// escaped `\`, and each carry.
@@ -172,12 +188,7 @@ fn escapes_quotes_and_scalars_across_blocks_give_the_tokens_of_the_scan() {
     let kernels = kernels();
     let mut input = Vec::new();
     for index in 0..BYTES.len().pow(6) {
-        let mut rest = index;
-        let word: [u8; 6] = core::array::from_fn(|_| {
-            let byte = BYTES[rest % BYTES.len()];
-            rest /= BYTES.len();
-            byte
-        });
+        let word: [u8; 6] = word(&BYTES, index);
         for offset in 58..=64 {
             input.clear();
             input.resize(offset, b' ');
@@ -196,19 +207,10 @@ fn escapes_quotes_and_scalars_across_blocks_give_the_tokens_of_the_scan() {
 /// block at each place, at the end of the input and before more bytes.
 #[test]
 fn each_utf8_sequence_across_blocks_gives_the_error_of_std() {
-    // ASCII, the continuation bytes, and the lead bytes with each class of low nibble.
-    const BYTES: [u8; 18] = [
-        b'a', 0x80, 0x90, 0xa0, 0xbf, 0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xe1, 0xed, 0xee, 0xf0, 0xf1, 0xf4, 0xf5, 0xff,
-    ];
     let kernels = kernels();
     let mut input = Vec::new();
-    for index in 0..BYTES.len().pow(4) {
-        let mut rest = index;
-        let word: [u8; 4] = core::array::from_fn(|_| {
-            let byte = BYTES[rest % BYTES.len()];
-            rest /= BYTES.len();
-            byte
-        });
+    for index in 0..UTF8_BYTES.len().pow(4) {
+        let word: [u8; 4] = word(&UTF8_BYTES, index);
         for offset in 60..=64 {
             for after in [0, 3] {
                 input.clear();
@@ -221,6 +223,33 @@ fn each_utf8_sequence_across_blocks_gives_the_error_of_std() {
                     check_cursor(&input, &[0], kernel);
                 }
             }
+        }
+    }
+}
+
+/// Each input of 1 to 3 bytes, and each input of any byte and 3 bytes of `UTF8_BYTES`, as the
+/// first and last block, has a UTF-8 error in each kernel exactly when `core::str::from_utf8`
+/// refuses it. Thus each pair of bytes meets the tables of the check, and each byte meets the
+/// check of the third and fourth bytes after it.
+#[test]
+fn each_short_input_gives_the_utf8_error_of_std() {
+    let kernels = kernels();
+    let check = |input: &[u8]| {
+        let expected = core::str::from_utf8(input).is_err();
+        for &kernel in &kernels {
+            let block = classify(kernel, input, 0, Carry::default());
+            assert_eq!(block.classes.utf8_error, expected, "{kernel:?} {input:x?}");
+        }
+    };
+    for len in 1..=3 {
+        for value in 0..1_u32 << (8 * len) {
+            check(&value.to_le_bytes()[..len]);
+        }
+    }
+    for first in 0..=u8::MAX {
+        for index in 0..UTF8_BYTES.len().pow(3) {
+            let [second, third, fourth] = word(&UTF8_BYTES, index);
+            check(&[first, second, third, fourth]);
         }
     }
 }

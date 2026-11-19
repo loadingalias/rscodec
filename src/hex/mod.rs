@@ -427,38 +427,6 @@ mod kernel {
     }
 }
 
-/// The proofs of the portable backend, for `cargo kani`.
-#[cfg(kani)]
-mod proofs {
-    use super::{decoded_len, portable};
-
-    /// The largest input of the proofs.
-    const BYTES_MAX: usize = 4;
-
-    /// Each input of up to `BYTES_MAX` bytes decodes from its text to itself, and each text that
-    /// decodes is the text of its bytes.
-    #[kani::proof]
-    #[kani::unwind(9)]
-    fn each_input_round_trips_and_each_text_is_canonical() {
-        let input: [u8; BYTES_MAX] = kani::any();
-        let len = kani::any_where(|&len: &usize| len <= BYTES_MAX);
-        let mut text = [0; 2 * BYTES_MAX];
-        portable::encode(&input[..len], &mut text[..2 * len]);
-        let mut bytes = [0; BYTES_MAX];
-        assert!(portable::decode(&text[..2 * len], &mut bytes[..len]));
-        assert!(bytes[..len] == input[..len]);
-
-        let chars: [u8; 2 * BYTES_MAX] = kani::any();
-        let chars_len = kani::any_where(|&len: &usize| len <= 2 * BYTES_MAX);
-        if let Ok(len) = decoded_len(&chars[..chars_len])
-            && portable::decode(&chars[..chars_len], &mut bytes[..len])
-        {
-            portable::encode(&bytes[..len], &mut text[..chars_len]);
-            assert!(text[..chars_len] == chars[..chars_len]);
-        }
-    }
-}
-
 /// The kernel table of x86_64.
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {

@@ -710,60 +710,6 @@ impl Tables {
     }
 }
 
-/// The proofs of the portable backend, for `cargo kani`.
-#[cfg(kani)]
-mod proofs {
-    use super::{Profile, portable};
-    use crate::ct::{Class, Public, Secret};
-
-    /// The largest input of the proofs: two blocks of three bytes.
-    const BYTES_MAX: usize = 6;
-
-    fn profile() -> Profile {
-        if kani::any() { Profile::Url } else { Profile::Standard }
-    }
-
-    fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) -> usize {
-        let kernel = |bytes: &[u8], text: &mut [u8]| portable::encode(class, profile, bytes, text);
-        match profile.encode_by(bytes, out, kernel) {
-            Ok(text) => text.len(),
-            Err(_) => panic!("the output has room for the text"),
-        }
-    }
-
-    /// Each input of up to `BYTES_MAX` bytes decodes from its text to itself.
-    #[kani::proof]
-    #[kani::unwind(9)]
-    fn each_input_round_trips() {
-        let profile = profile();
-        let input: [u8; BYTES_MAX] = kani::any();
-        let len = kani::any_where(|&len: &usize| len <= BYTES_MAX);
-        let mut text = [0; 8];
-        let text_len = encode(Public, profile, &input[..len], &mut text);
-        let mut bytes = [0; BYTES_MAX];
-        let kernel = |text: &[u8], out: &mut [u8]| portable::decode(Public, profile, text, out);
-        let decoded = profile.decode_by(&text[..text_len], &mut bytes, Public, kernel);
-        assert!(decoded.is_ok_and(|decoded| *decoded == input[..len]));
-    }
-
-    /// Each text of up to 8 bytes that decodes is the text of its bytes, so no other text of those
-    /// bytes decodes. The proof runs the secret class, so it also covers its stores of zero.
-    #[kani::proof]
-    #[kani::unwind(9)]
-    fn each_text_that_decodes_is_canonical() {
-        let profile = profile();
-        let input: [u8; 8] = kani::any();
-        let len = kani::any_where(|&len: &usize| len <= 8);
-        let mut bytes = [0; BYTES_MAX];
-        let kernel = |text: &[u8], out: &mut [u8]| portable::decode(Secret, profile, text, out);
-        if let Ok(decoded) = profile.decode_by(&input[..len], &mut bytes, Secret, kernel) {
-            let mut text = [0; 8];
-            let text_len = encode(Secret, profile, decoded, &mut text);
-            assert!(text[..text_len] == input[..len]);
-        }
-    }
-}
-
 /// The kernel table of x86_64.
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {

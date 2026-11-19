@@ -196,6 +196,37 @@ fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
     }
 }
 
+/// Each text of 2 or 3 symbols of any byte, with its padding in the standard profile, decodes only
+/// if it is the canonical text of its bytes, and refuses with the error of the rules if not. Thus
+/// each noncanonical form of a short text refuses: each quantum of 4 symbols of the alphabet is the
+/// text of one input of 3 bytes, and the decoder takes each quantum on its own.
+#[test]
+fn each_short_text_decodes_only_if_it_is_canonical() {
+    let calls = calls();
+    let mut out = [0; 3];
+    for profile in PROFILES {
+        for len in [2, 3] {
+            for value in 0..1_u32 << (8 * len) {
+                let mut padded = [b'='; 4];
+                padded[..len].copy_from_slice(&value.to_le_bytes()[..len]);
+                let text = if profile == Profile::Standard {
+                    &padded
+                } else {
+                    &padded[..len]
+                };
+                let expected = expected_error(profile, text);
+                for &call in &calls {
+                    let decoded = decode_into(profile, call, text, &mut out);
+                    match expected {
+                        Some(error) => assert_eq!(decoded, Err(error), "{profile:?} {call:?} {text:x?}"),
+                        None => assert_eq!(oracle(profile, &out[..decoded.unwrap()]), text, "{profile:?} {call:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Each backend and each timing class gives the result and the error of the portable backend: on
 /// random inputs of each length to 64 bytes, on each byte at each place of their texts, and on
 /// random inputs to 1 MiB.

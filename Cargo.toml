@@ -96,8 +96,7 @@ invalid_runtime_symbol_definitions = "deny"
 raw_borrows_via_references = "deny"
 suspicious_runtime_symbol_definitions = "deny"
 unsafe_op_in_unsafe_fn = "deny"
-# `kani` selects the proofs of `cargo kani`.
-unexpected_cfgs = { level = "deny", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = "deny"
 # Unsafe code is denied everywhere. Each necessary unsafe region is the
 # smallest private module or item, with a reasoned `#[expect(unsafe_code)]`.
 unsafe_code = "deny"

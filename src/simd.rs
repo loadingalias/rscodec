@@ -222,19 +222,15 @@ pub(crate) mod x86 {
         unsafe { _mm512_mask_storeu_epi8(dst.as_mut_ptr().cast(), lanes(dst.len()), value) }
     }
 
-    /// The proof of the bounds of the masked loads and stores, for `cargo kani`.
-    #[cfg(kani)]
-    mod proofs {
+    #[cfg(test)]
+    mod tests {
         /// The mask of `len` lanes holds lanes `0..len` and no other lane, so a masked load or
-        /// store of a slice accesses only the bytes of the slice.
-        #[kani::proof]
+        /// store of a slice accesses only the bytes of the slice. The test checks each length.
+        #[test]
         fn the_mask_holds_only_the_lanes_of_the_slice() {
-            let len = kani::any_where(|&len: &usize| len <= 64);
-            let mask = super::lanes(len);
-            if len == 64 {
-                assert!(mask == u64::MAX);
-            } else {
-                assert!(mask == (1 << len) - 1);
+            for len in 0..=64 {
+                let lanes = (0..len).fold(0_u64, |mask, lane| mask | (1 << lane));
+                assert_eq!(super::lanes(len), lanes, "{len} lanes");
             }
         }
     }
