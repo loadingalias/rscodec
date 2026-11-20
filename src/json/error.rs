@@ -21,6 +21,11 @@ pub enum ErrorKind {
     Noncharacter,
     /// [`Profile::IJson`](super::Profile::IJson): binary64 does not hold the number at the offset.
     Number,
+    /// The value of the number at the offset does not fit the type that the accessor of
+    /// [`Number`](super::Number) reads. The recovery is a wider type:
+    /// [`Number::to_decimal`](super::Number::to_decimal), [`Number::to_f64`](super::Number::to_f64),
+    /// or the text of [`Number::as_str`](super::Number::as_str).
+    Range,
     /// The key at the offset equals an earlier key of its object, after unescape.
     Duplicate,
     /// The input passes a limit of [`Limits`](super::Limits). The offset is the first byte past
@@ -33,7 +38,9 @@ pub enum ErrorKind {
     /// the decoded string, and the recovery is a buffer of that length.
     Output,
     /// The value at the offset is not of the type that the call reads, or no value comes at the
-    /// offset. The writer gives it at offset 0 when its closure writes no value.
+    /// offset. [`Number::to_i64`](super::Number::to_i64) and
+    /// [`Number::to_u64`](super::Number::to_u64) give it for a number with a fraction or an
+    /// exponent. The writer gives it at offset 0 when its closure writes no value.
     Type,
     /// The writer: the slice ends before the end of the value that the call writes. The offset is
     /// the written length, which the call did not change. The recovery is a longer slice, or a new
@@ -89,6 +96,7 @@ impl fmt::Display for Error {
             ErrorKind::Surrogate => "the JSON string has a surrogate escape without its pair",
             ErrorKind::Noncharacter => "the JSON string has a noncharacter, which I-JSON does not allow",
             ErrorKind::Number => "binary64 does not hold the JSON number, which I-JSON requires",
+            ErrorKind::Range => "the JSON number does not fit the type that the decoder reads",
             ErrorKind::Duplicate => "the JSON key equals an earlier key of its object",
             ErrorKind::Limit(limit) => {
                 let name = match limit {

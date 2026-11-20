@@ -126,7 +126,7 @@ fn each_logarithm_formula_holds_on_its_whole_domain() {
             "⌊log10(3/4 × 2^{q})⌋ is {k}"
         );
     }
-    for n in super::POW10_MIN..=super::POW10_MAX {
+    for n in super::POW10_UP_MIN..=super::POW10_MAX {
         let f = floor_log2_pow10(n);
         assert!(
             at_least_one(1, -f, n) && !at_least_one(1, -f - 1, n),

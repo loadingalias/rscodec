@@ -13,6 +13,10 @@
 //! The fast path decides from approximations: each is below its exact value by less than 1.1 units
 //! of `2^−64` (see [`scale`]). When a decision is closer than [`MARGIN`] to its threshold, the exact
 //! path decides it with integer arithmetic. Thus each result is exact, with no tuned bias.
+//!
+//! [`read`] goes the other way: the binary64 value nearest to a decimal of up to 64 bits. It is
+//! the parse of unrounded scaling (Cox, 2026, "Floating-Point Printing and Parsing Can Be Simple
+//! And Fast"), which Cox proves with Ivy ("Fast Unrounded Scaling: Proof by Ivy", Theorem 1).
 
 use core::cmp::Ordering;
 
@@ -43,7 +47,26 @@ const POW10_MAX: i32 = 324;
 
 /// The 128-bit significand of `10^n` for each `n` from [`POW10_MIN`] to [`POW10_MAX`]: the high and
 /// the low 64 bits of `⌊10^n × 2^(127 − ⌊n × log2 10⌋)⌋`.
-static POW10: [(u64, u64); 618] = pow10_table();
+static POW10: [(u64, u64); 618] = pow10_table(POW10_MIN, POW10_MAX, Rounding::Down);
+
+/// The least and the greatest power of 10 of the table of [`read`]. Each `u64` of digits rounds to
+/// zero below it, and each nonzero one rounds to infinity above it.
+const POW10_UP_MIN: i32 = -343;
+const POW10_UP_MAX: i32 = 308;
+
+/// The table of Cox for [`read`]: for each `p` from [`POW10_UP_MIN`] to [`POW10_UP_MAX`],
+/// `pm = ⌈10^p × 2^(127 − ⌊p × log2 10⌋)⌉` as the pair `(hi, lo)` with `pm = hi × 2^64 − lo`. Thus
+/// the high word is rounded up.
+static POW10_UP: [(u64, u64); 652] = pow10_table(POW10_UP_MIN, POW10_UP_MAX, Rounding::Up);
+
+/// The rounding of the 128-bit significands of a table of powers of 10.
+#[derive(Clone, Copy)]
+enum Rounding {
+    /// The floor, as the high and the low word.
+    Down,
+    /// The ceiling, as `(hi, lo)` with the value `hi × 2^64 − lo`.
+    Up,
+}
 
 /// A finite nonzero value without its sign: `c × 2^q`. `irregular` marks a power of two above
 /// the subnormals, whose lower neighbor is half as far as its upper neighbor.
@@ -221,6 +244,68 @@ fn compare(p: u64, twos: i32, tens: i32, y: u64) -> Ordering {
     left.0.iter().rev().cmp(right.0.iter().rev())
 }
 
+/// The binary64 value nearest to `digits × 10^power`, with a tie to the even significand, or
+/// `None` if its magnitude rounds to infinity. Each `u64` of digits is exact.
+///
+/// With `e` such that `v = digits × 2^e × 10^power` is in `[2^52, 2^54)`, or `e = 1074` for a
+/// subnormal value, one scaling gives `v` unrounded: its integer part, a half bit, and a sticky bit
+/// that is set when a lower bit is set. Then one step rounds it to the nearest with a tie to even.
+#[inline]
+pub(super) fn read(digits: u64, power: i32) -> Option<f64> {
+    let index = usize::try_from(power.saturating_sub(POW10_UP_MIN)).ok();
+    let Some(&scale) = index.and_then(|index| POW10_UP.get(index)) else {
+        return (digits == 0 || power < 0).then_some(0.0);
+    };
+    if digits == 0 {
+        return Some(0.0);
+    }
+    let lead = digits.leading_zeros().cast_signed();
+    let log2 = floor_log2_pow10(power);
+    // `digits` is in `[2^(63 − lead), 2^(64 − lead))` and `10^power` is in `[2^log2, 2^(log2 + 1))`,
+    // so this `e` puts `v` in `[2^52, 2^54)`.
+    let e = (lead - 11 - log2).min(1074);
+    // The shift of the high word of the product keeps two bits below the integer part. It is 8
+    // when `e` is not at its cap, and more when it is.
+    let shift = lead - e - log2 - 3;
+    if shift >= 64 {
+        // `v` is under a quarter, so it rounds to zero.
+        return Some(0.0);
+    }
+    let unrounded = uscale(digits << lead, scale, shift.cast_unsigned());
+    // A value that rounds to 2^53 or more has one bit too many: `4 × 2^53 − 2` is the least
+    // unrounded value that rounds to 2^53.
+    let over = unrounded >= (1 << 55) - 2;
+    let unrounded = unrounded >> u32::from(over) | unrounded & 1;
+    let e = e - i32::from(over);
+    let significand = (unrounded + 1 + (unrounded >> 2 & 1)) >> 2;
+    // The significand is under 2^53. Under 2^52, the value is subnormal and `e` is 1074, so the
+    // biased exponent is 0.
+    if significand < 1 << 52 {
+        return Some(f64::from_bits(significand));
+    }
+    let biased = u64::try_from(1075 - e).ok().filter(|&biased| biased < 0x7ff)?;
+    Some(f64::from_bits(significand & ((1 << 52) - 1) | biased << 52))
+}
+
+/// `x × pm / 2^(128 + shift)` unrounded, for `x` with its high bit set and `pm = hi × 2^64 − lo`
+/// from [`POW10_UP`]: the integer part with two more bits, and the sticky bit in the low bit.
+///
+/// The function of Cox. The high word of `x × hi` is at most one above the high word of the exact
+/// product. A set bit of it below `shift` stops the borrow of `x × lo`, so the high bits are
+/// final and the result is inexact. Only otherwise does the second product run.
+#[inline(always)]
+fn uscale(x: u64, (hi, lo): (u64, u64), shift: u32) -> u64 {
+    let (mut top, middle) = halves(u128::from(x) * u128::from(hi));
+    let mut sticky = 1;
+    if top & ((1 << shift) - 1) == 0 {
+        let (borrow, _) = halves(u128::from(x) * u128::from(lo));
+        sticky = u64::from(middle.wrapping_sub(borrow) > 1);
+        // `top` is at least 2^62, because `x` and `hi` are each at least 2^63.
+        top -= u64::from(middle < borrow);
+    }
+    top >> shift | sticky
+}
+
 /// The high and the low 64 bits of `value`.
 #[inline(always)]
 #[expect(clippy::cast_possible_truncation, reason = "each half keeps exactly its 64 bits")]
@@ -286,21 +371,23 @@ const fn floor_log10_three_quarters_pow2(q: i32) -> i32 {
     (q * 315_653 - 131_072) >> 20
 }
 
-/// `⌊n × log2 10⌋` for `n` from [`POW10_MIN`] to [`POW10_MAX`].
+/// `⌊n × log2 10⌋` for `n` from [`POW10_UP_MIN`] to [`POW10_MAX`].
 #[inline(always)]
 const fn floor_log2_pow10(n: i32) -> i32 {
     (n * 217_706) >> 16
 }
 
-/// [`POW10`], with long arithmetic on integers of [`TABLE_LIMBS`] limbs at compile time.
-const fn pow10_table() -> [(u64, u64); 618] {
-    let mut table = [(0, 0); 618];
+/// The table of `10^n` for each `n` from `min` to `max`, a negative `min`, with long arithmetic on
+/// integers of [`TABLE_LIMBS`] limbs at compile time.
+const fn pow10_table<const LEN: usize>(min: i32, max: i32, rounding: Rounding) -> [(u64, u64); LEN] {
+    let mut table = [(0, 0); LEN];
     // 10^n for n from 0, exactly.
     let mut power = [0_u64; TABLE_LIMBS];
     power[0] = 1;
     let mut n = 0;
-    while n <= POW10_MAX {
-        table[(n - POW10_MIN).cast_unsigned() as usize] = high_128(&power);
+    while n <= max {
+        let (floor, inexact) = high_128(&power);
+        table[(n - min).cast_unsigned() as usize] = rounded(floor, inexact, rounding);
         let mut carry = 0;
         let mut index = 0;
         while index < TABLE_LIMBS {
@@ -311,11 +398,12 @@ const fn pow10_table() -> [(u64, u64); 618] {
         }
         n += 1;
     }
-    // ⌊2^1279 / 10^m⌋ for m from 1: each division by 10 floors, and ⌊⌊x / a⌋ / b⌋ = ⌊x / ab⌋.
+    // ⌊2^1279 / 10^m⌋ for m from 1: each division by 10 floors, and ⌊⌊x / a⌋ / b⌋ = ⌊x / ab⌋. No
+    // 10^−m times a power of 2 is an integer, so each of these significands is inexact.
     let mut quotient = [0_u64; TABLE_LIMBS];
     quotient[TABLE_LIMBS - 1] = 1 << 63;
     let mut m = 1;
-    while -m >= POW10_MIN {
+    while -m >= min {
         let mut remainder = 0_u128;
         let mut index = TABLE_LIMBS;
         while index > 0 {
@@ -324,17 +412,33 @@ const fn pow10_table() -> [(u64, u64); 618] {
             quotient[index] = halves(dividend / 10).1;
             remainder = dividend % 10;
         }
-        table[(-m - POW10_MIN).cast_unsigned() as usize] = high_128(&quotient);
+        table[(-m - min).cast_unsigned() as usize] = rounded(high_128(&quotient).0, true, rounding);
         m += 1;
     }
     table
 }
 
-/// Enough limbs for 10^324 and for 2^1279 / 10^293 with 128 bits.
+/// The significand whose floor is `(high, low)`, in the form of `rounding`. `inexact` is set if
+/// the exact significand is not an integer.
+const fn rounded((high, low): (u64, u64), inexact: bool, rounding: Rounding) -> (u64, u64) {
+    match rounding {
+        Rounding::Down => (high, low),
+        Rounding::Up => {
+            // The ceiling `high × 2^64 + low`, as `(high + 1) × 2^64 − (2^64 − low)` when `low` is
+            // not 0.
+            let (low, carry) = low.overflowing_add(inexact as u64);
+            let high = high + carry as u64;
+            (high + (low != 0) as u64, low.wrapping_neg())
+        }
+    }
+}
+
+/// Enough limbs for 10^324 and for 2^1279 / 10^343 with 128 bits.
 const TABLE_LIMBS: usize = 20;
 
-/// The 128 bits of `value` from its highest set bit down, with zeros after its lowest bit.
-const fn high_128(value: &[u64; TABLE_LIMBS]) -> (u64, u64) {
+/// The 128 bits of `value` from its highest set bit down, with zeros after its lowest bit, and
+/// whether a set bit of `value` is below them.
+const fn high_128(value: &[u64; TABLE_LIMBS]) -> ((u64, u64), bool) {
     let mut top = TABLE_LIMBS - 1;
     while value[top] == 0 {
         top -= 1;
@@ -348,7 +452,14 @@ const fn high_128(value: &[u64; TABLE_LIMBS]) -> (u64, u64) {
     } else {
         wide << lead | (third >> (64 - lead)) as u128
     };
-    halves(aligned)
+    // The bits of `third` below the 128, and each limb below `third`.
+    let mut inexact = third << lead != 0;
+    let mut index = 0;
+    while index + 3 <= top {
+        inexact |= value[index] != 0;
+        index += 1;
+    }
+    (halves(aligned), inexact)
 }
 
 /// Writes `decimal` from the start of `dest` in the layout of `{:?}` and returns its length.

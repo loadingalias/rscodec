@@ -8,7 +8,7 @@ use std::{format, fs, string::String, vec, vec::Vec};
 use serde_json::Value as Tree;
 
 use super::{Place, write};
-use crate::json::{Error, ErrorKind, Profile, reader::tests::tree, string_len};
+use crate::json::{Error, ErrorKind, Limits, Profile, Slot, read, reader::tests::tree, string_len};
 
 /// The JSON string of `text` with the escapes of RFC 8785, one character at a time.
 fn reference(text: &str) -> String {
@@ -310,13 +310,29 @@ fn nan_and_infinity_refuse_and_a_closure_that_writes_no_value_refuses() {
 }
 
 /// The named float sweep of [CODEC Decisions], second session of 2026-11-19: each finite f32
-/// value as an f64, and 10^9 random finite f64 values, print the digits of `core::fmt` and read
-/// back. It runs once for each change to the printer, with `--run-ignored only`, and its result
-/// goes to the evidence of the task.
+/// value as an f64, and 10^9 random finite f64 values, print the digits of `core::fmt`, and
+/// `Number::to_f64` reads each text back to its value. It runs once for each change to the printer
+/// or to the reader of numbers, with `--run-ignored only`, and its result goes to the evidence of
+/// the task.
 #[test]
-#[ignore = "the named float sweep runs for minutes, once for each change to the printer"]
+#[ignore = "the named float sweep runs for minutes, once for each change to the printer or to the reader of numbers"]
 fn float_sweep() {
     const F64_VALUES: u64 = 1_000_000_000;
+    const LIMITS: Limits = Limits {
+        input_bytes_max: 32,
+        depth_max: 0,
+        string_bytes_max: 0,
+        members_max: 0,
+        elements_max: 0,
+        number_digits_max: 32,
+    };
+    let read_back = |text: &str| {
+        let mut scratch = [Slot::EMPTY; 1];
+        let value = read(text.as_bytes(), &LIMITS, Profile::Rfc8259, &mut scratch, |reader| {
+            reader.value().number()?.to_f64()
+        });
+        value.map(f64::to_bits)
+    };
     let threads = std::thread::available_parallelism().map_or(1, usize::from);
     let threads = u64::try_from(threads).unwrap();
     std::thread::scope(|scope| {
@@ -333,11 +349,7 @@ fn float_sweep() {
                     let len = write(&mut out, |place| place.f64(value)).unwrap();
                     let text = core::str::from_utf8(&out[..len]).unwrap();
                     assert_eq!(text, format!("{value:?}"), "the form of {:#x}", value.to_bits());
-                    assert_eq!(
-                        text.parse::<f64>().map(f64::to_bits),
-                        Ok(value.to_bits()),
-                        "{text} reads back"
-                    );
+                    assert_eq!(read_back(text), Ok(value.to_bits()), "{text} reads back");
                 }
                 let mut state = 0x5eed_5eed_u64 ^ thread.wrapping_mul(0x9e37_79b9_7f4a_7c15);
                 let mut count = 0;
@@ -353,11 +365,7 @@ fn float_sweep() {
                     let len = write(&mut out, |place| place.f64(value)).unwrap();
                     let text = core::str::from_utf8(&out[..len]).unwrap();
                     assert_eq!(text, format!("{value:?}"), "the form of {:#x}", value.to_bits());
-                    assert_eq!(
-                        text.parse::<f64>().map(f64::to_bits),
-                        Ok(value.to_bits()),
-                        "{text} reads back"
-                    );
+                    assert_eq!(read_back(text), Ok(value.to_bits()), "{text} reads back");
                 }
             });
         }

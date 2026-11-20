@@ -12,3 +12,6 @@ AGENTS.md
 # Benchmark corpora with no stated license. benches/data/README.md fetches
 # them.
 /benches/data/fetched/
+# Nigel Tao's number data, too large for the repository. tests/data/README.md
+# fetches it.
+/tests/data/fetched/

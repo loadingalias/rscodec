@@ -6,8 +6,7 @@ memory, and no code recurses, so a deep document does not grow the stack.
 
 The writer writes compact JSON into a slice that you lend. It allocates no memory either.
 
-The `json` feature is in development. The first release with it is not on crates.io yet. Exact
-number accessors come later. Now the reader gives the text of a number.
+The `json` feature is in development. The first release with it is not on crates.io yet.
 
 ## Select the feature
 
@@ -80,7 +79,7 @@ A `Value` reads one value, once. Each of its methods takes the value:
 | `Value::members` | The `{` of an object. `Members::next` gives the key and the value of each member. |
 | `Value::elements` | The `[` of an array. `Elements::next` gives each element. |
 | `Value::str` | A string, as a `Str`. |
-| `Value::number` | A number, as a `Number`. `Number::as_str` gives its text. |
+| `Value::number` | A number, as a `Number`. Its accessors give its value (see [Read numbers](#read-numbers)). |
 | `Value::bool` | `true` or `false`. |
 | `Value::null` | `null`. |
 | `Value::skip` | A value of any type, with each check. |
@@ -159,6 +158,69 @@ assert!(vers.is_some_and(|vers| vers == "0.1.0") && cksum.is_some_and(|cksum| ck
 
 The keys of a nested object are also `Token::Key`. Keep a depth from the start and end tokens if
 your format can nest a key of the same name.
+
+## Read numbers
+
+`Value::number` and `Token::Number` give a `Number`. It borrows the text of the number, whose
+grammar the reader checked. Each accessor gives the exact value, or it refuses:
+
+| Method | Gives | Refuses |
+| --- | --- | --- |
+| `Number::to_i64`, `Number::to_u64` | The value of an integer: a number with no fraction and no exponent. `-0` gives 0. | `Type` for a fraction or an exponent, also `1.0` and `1e2`. `Range` for a value outside the type. |
+| `Number::to_decimal` | A `Decimal` with the scale of the text: `negative`, a `u128` `coefficient`, and an `i32` `exponent`. `1.50` gives 150 × 10^−2, and `-1.5e3` gives −15 × 10^2. | `Range` for more than 38 significant digits, or for an exponent outside `i32`. |
+| `Number::to_f64` | The nearest `f64`, with a tie to the even significand. `-0` gives `-0.0`. A nonzero value that rounds to zero gives zero with its sign. | `Range` if the magnitude rounds to infinity, for example `1e400`. |
+| `Number::class` | `NumberClass::Integer`, `Decimal` (a fraction and no exponent), or `Float` (an exponent), to choose the accessor. | Nothing. |
+| `Number::as_str` | The text, for example `-1.5e3`. Keep it for a number that no accessor holds. | Nothing. |
+
+Each refusal is at the offset of the number in the document, so `?` in the closure of `read` gives
+it. This decoder reads an integer, an amount with its scale, and a coordinate:
+
+```rust
+use rscodec::json::{self, Decimal, ErrorKind, Limits, Profile, Slot};
+
+const ORDER: Limits = Limits {
+    input_bytes_max: 8192,
+    depth_max: 8,
+    string_bytes_max: 4096,
+    members_max: 32,
+    elements_max: 32,
+    number_digits_max: 32,
+};
+
+let order = br#"{"expires":1767225600,"amount":12.50,"lat":52.5163}"#;
+let mut scratch = [Slot::EMPTY; 8];
+let (expires, amount, lat) = json::read(order, &ORDER, Profile::Rfc8259, &mut scratch, #[inline(always)] |reader| {
+    let (mut expires, mut amount, mut lat) = (None, None, None);
+    let mut members = reader.value().members()?;
+    while let Some((key, value)) = members.next()? {
+        if key == "expires" {
+            expires = Some(value.number()?.to_u64()?);
+        } else if key == "amount" {
+            amount = Some(value.number()?.to_decimal()?);
+        } else if key == "lat" {
+            lat = Some(value.number()?.to_f64()?);
+        }
+    }
+    Ok((expires, amount, lat))
+})?;
+assert_eq!(expires, Some(1_767_225_600));
+assert_eq!(amount, Some(Decimal { negative: false, coefficient: 1250, exponent: -2 }));
+assert_eq!(lat, Some(52.5163));
+
+// An integer accessor refuses a fraction, at the offset of the number.
+let late = br#"{"expires":1.5}"#;
+let error = json::read(late, &ORDER, Profile::Rfc8259, &mut scratch, |reader| {
+    let mut members = reader.value().members()?;
+    members.next()?.map(|(_, value)| value.number()?.to_u64()).transpose()
+})
+.unwrap_err();
+assert_eq!((error.kind, error.offset), (ErrorKind::Type, 11));
+# Ok::<(), json::Error>(())
+```
+
+`to_f64` reads a number of up to 19 significant digits with unrounded scaling (Russ Cox, 2026),
+which is proved exact. It reads a number of more digits with the parser of `core`.
+`number_digits_max` bounds that work.
 
 ## Select the profile
 
@@ -323,11 +385,12 @@ offset. For the writer, the offset is the written length.
 | `Surrogate` | The escape at the offset is a surrogate without its pair. | Escape the character with its pair. |
 | `Noncharacter` | `IJson`: a noncharacter at the offset. | Read with `Rfc8259`, or remove the character. |
 | `Number` | `IJson`: binary64 does not hold the number at the offset. | Read with `Rfc8259`, or send the number as a string. |
+| `Range` | The value of the number at the offset does not fit the type of the accessor. | Read with `to_decimal` or `to_f64`, or keep the text of `as_str`. |
 | `Duplicate` | The key at the offset equals an earlier key of its object, after unescape. | Remove one of the members. |
 | `Limit(limit)` | The item at the offset passes the limit `limit` of `Limits`. | Raise the limit, if the document is trusted. |
 | `Scratch` | The scratch has no slot for the container or key at the offset. | Lend a longer scratch. |
 | `Output` | The buffer of `Str::decode` is too short. The offset is the decoded length, which `Str::len` also gives. | Lend a buffer of that length. |
-| `Type` | The value at the offset does not have the type that the call reads. The writer gives it at offset 0 when its closure writes no value. | Read with `Value::kind` first, or refuse the document. Write a value at the place. |
+| `Type` | The value at the offset does not have the type that the call reads. `to_i64` and `to_u64` give it for a number with a fraction or an exponent. The writer gives it at offset 0 when its closure writes no value. | Read with `Value::kind` or `Number::class` first, or refuse the document. Write a value at the place. |
 | `Full` | The writer: the slice ends before the end of the value that the call writes. | Lend a longer slice, or continue in a new slice. |
 | `NonFinite` | The writer: the call writes NaN or an infinity, which JSON has no number for. | Write a finite value, or `null`. |
 

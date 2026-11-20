@@ -127,6 +127,22 @@ jobs:
           done
           sha256sum -c corpora.sha256
 
+      # The number tests read Nigel Tao's data, which tests/data/README.md fetches.
+      - name: Fetch the number data
+        shell: bash
+        working-directory: tests/data
+        run: |
+          set -euo pipefail
+          mkdir -p fetched/numbers
+          for name in exhaustive-float16 freetype-2-7 google-double-conversion google-wuffs ibm-fpgen \
+            lemire-fast-double-parser lemire-fast-float more-test-cases remyoudompheng-fptest-0 \
+            remyoudompheng-fptest-1 remyoudompheng-fptest-2 remyoudompheng-fptest-3 tencent-rapidjson \
+            ulfjack-ryu; do
+            curl -fsSL --compressed -o "fetched/numbers/$name.txt" \
+              "https://raw.githubusercontent.com/nigeltao/parse-number-fxx-test-data/55d79b184b7d8fac2e143e89dc19b766ec4e54b8/data/$name.txt"
+          done
+          sha256sum -c numbers.sha256
+
       - name: cargo xtask test
         shell: bash
         run: cargo xtask test

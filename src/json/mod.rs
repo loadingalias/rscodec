@@ -95,7 +95,7 @@ mod x86;
 
 pub use error::{Error, ErrorKind, Limit};
 pub use escape::string_len;
-pub use number::Number;
+pub use number::{Decimal, Number, NumberClass};
 pub use reader::{Elements, Kind, Members, Reader, Token, Value};
 pub use scratch::Slot;
 pub use string::Str;

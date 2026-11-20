@@ -3,6 +3,26 @@
 The conformance tests of the JSON reader read these files, so they need no network. Each file is
 an unchanged copy of its upstream file, under the license of its upstream.
 
+The number tests also read Nigel Tao's data, which `fetched/` holds and Git ignores. It is too large
+for the repository: 14 files, 275 MB, 5,299,993 lines. Fetch it before the tests:
+
+```sh
+cd tests/data
+mkdir -p fetched/numbers
+for name in exhaustive-float16 freetype-2-7 google-double-conversion google-wuffs ibm-fpgen \
+  lemire-fast-double-parser lemire-fast-float more-test-cases remyoudompheng-fptest-0 \
+  remyoudompheng-fptest-1 remyoudompheng-fptest-2 remyoudompheng-fptest-3 tencent-rapidjson \
+  ulfjack-ryu; do
+  curl -fsSL --compressed -o "fetched/numbers/$name.txt" \
+    "https://raw.githubusercontent.com/nigeltao/parse-number-fxx-test-data/55d79b184b7d8fac2e143e89dc19b766ec4e54b8/data/$name.txt"
+done
+sha256sum -c numbers.sha256    # On macOS: shasum -a 256 -c numbers.sha256
+```
+
+Each line holds the bits of the f16, f32, and f64 values of a string, and then the string. The
+upstream is <https://github.com/nigeltao/parse-number-fxx-test-data> at commit
+`55d79b184b7d8fac2e143e89dc19b766ec4e54b8` (2022-04-13), under Apache-2.0.
+
 | Directory | Upstream | Version | License |
 | --- | --- | --- | --- |
 | `JSONTestSuite/` | `test_parsing/` and `LICENSE` of <https://github.com/nst/JSONTestSuite> | commit `1ef36fa01286573e846ac449e8683f8833c5b26a` (2024-11-22) | MIT, in `JSONTestSuite/LICENSE` |

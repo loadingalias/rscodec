@@ -553,7 +553,7 @@ impl<'a, 's> Reader<'a, 's> {
         if self.profile == Profile::IJson && !number::binary64_holds(input, &parts) {
             return Err(Error::new(ErrorKind::Number, at));
         }
-        Ok(Number::new(self.text(at, end)))
+        Ok(Number::new(self.text(at, end), at))
     }
 
     /// Takes the literal `true`, `false`, or `null` at `at`, and gives whether it is `true`.

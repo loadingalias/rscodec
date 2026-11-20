@@ -256,12 +256,6 @@ fn texts<'a>(value: Value<'_, 'a, '_>) -> Result<Vec<Text<'a>>, json::Error> {
 }
 
 #[inline(always)]
-fn number(value: Value<'_, '_, '_>) -> Result<u64, json::Error> {
-    let number = value.number()?;
-    number.as_str().parse().map_err(|_| MISSING)
-}
-
-#[inline(always)]
 fn jwk<'a>(value: Value<'_, 'a, '_>) -> Result<Jwk<'a>, json::Error> {
     let mut key = Jwk {
         kty: Text(Cow::Borrowed("")),
@@ -382,7 +376,7 @@ impl Typed for A2 {
                         "apv" => header.apv = Some(text(value)?),
                         "crit" => header.crit = Some(texts(value)?),
                         "b64" => header.b64 = Some(value.bool()?),
-                        "exp" => header.exp = Some(number(value)?),
+                        "exp" => header.exp = Some(value.number()?.to_u64()?),
                         "epk" => header.epk = Some(jwk(value)?),
                         _ => {}
                     }
@@ -468,10 +462,10 @@ impl Typed for A3 {
                                 texts(value)?
                             }));
                         }
-                        "exp" => claims.exp = Some(number(value)?),
-                        "nbf" => claims.nbf = Some(number(value)?),
-                        "iat" => claims.iat = Some(number(value)?),
-                        "auth_time" => claims.auth_time = Some(number(value)?),
+                        "exp" => claims.exp = Some(value.number()?.to_u64()?),
+                        "nbf" => claims.nbf = Some(value.number()?.to_u64()?),
+                        "iat" => claims.iat = Some(value.number()?.to_u64()?),
+                        "auth_time" => claims.auth_time = Some(value.number()?.to_u64()?),
                         "jti" => claims.jti = Some(text(value)?),
                         "nonce" => claims.nonce = Some(text(value)?),
                         "azp" => claims.azp = Some(text(value)?),
