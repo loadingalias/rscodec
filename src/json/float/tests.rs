@@ -7,8 +7,7 @@ use core::cmp::Ordering;
 use std::{format, string::String};
 
 use super::{
-    Binary, SPAN, compare, exact, floor_log2_pow10, floor_log10_pow2, floor_log10_three_quarters_pow2, halves, scale,
-    shortest,
+    Binary, SPAN, compare, exact, floor_log2_pow10, floor_log10_pow2, floor_log10_three_quarters_pow2, scale, shortest,
 };
 
 fn printed(value: f64) -> String {
@@ -242,7 +241,7 @@ fn in_band(binary: Binary) -> bool {
     let (_, fraction, half) = scale(c, q, k);
     let lower = if irregular { half >> 1 } else { half };
     let near = |distance: u64, band: u64| distance.wrapping_add(band) <= 2 * band;
-    let (_, tenfold) = halves(u128::from(fraction) * 10 + (1 << 63));
+    let (tenfold, _) = fraction.carrying_mul(10, 1 << 63);
     near(fraction.wrapping_add(half), BAND) || near(lower.wrapping_sub(fraction), BAND) || near(tenfold, TENFOLD_BAND)
 }
 

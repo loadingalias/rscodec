@@ -136,6 +136,7 @@ fn shortest(binary: Binary) -> Decimal {
     // the sum is not 0 and `lower` is not `fraction`, so only the exact path needs the parity.
     let (sum, up) = fraction.overflowing_add(half);
     let down = lower > fraction;
+    // With `u64::carrying_mul` here, the x86_64 fast path keeps one more flag and one more branch.
     let (mut digit, tenfold) = halves(u128::from(fraction) * 10 + (1 << 63));
     let near = |distance: u64, margin: u64| distance.wrapping_add(margin) <= 2 * margin;
     let longer = !up && !down;
@@ -150,8 +151,8 @@ fn shortest(binary: Binary) -> Decimal {
     if longer && irregular {
         // The lower bound is less than half a unit of `10^k` below `v`, so the nearest can be under
         // it. The least digit in the interval is the ceiling of ten times the lower bound.
-        let least = u128::from(fraction - lower) * 10;
-        if near(halves(least).1, TENFOLD_MARGIN) {
+        let lower_bound = fraction - lower;
+        if near(lower_bound.carrying_mul(10, 0).0, TENFOLD_MARGIN) {
             let (digits, extra) = exact(c, q, irregular, k, integral, fraction);
             return Decimal {
                 digits,
@@ -159,7 +160,7 @@ fn shortest(binary: Binary) -> Decimal {
                 exponent: k,
             };
         }
-        digit = digit.max(halves(least + u128::from(u64::MAX)).0);
+        digit = digit.max(lower_bound.carrying_mul(10, u64::MAX).1);
     }
     // `longer` excludes `up`, and the 17th digit is not 0: else the interval holds a shorter form.
     Decimal {
@@ -184,8 +185,7 @@ fn scale(c: u64, q: i32, k: i32) -> (u64, u64, u64) {
     // `10^n = g × 2^(⌊n × log2 10⌋ − 127)`, and `X × 2^70 = (c × 2^shift) × g / 2^64`.
     let shift = (q + floor_log2_pow10(n) + 7).cast_unsigned();
     let scaled = c << shift;
-    let product = u128::from(scaled) * u128::from(high) + ((u128::from(scaled) * u128::from(low)) >> 64);
-    let (high_product, low_product) = halves(product);
+    let (low_product, high_product) = scaled.carrying_mul(high, scaled.carrying_mul(low, 0).1);
     let (integral, fraction) = (high_product >> 6, high_product << 58 | low_product >> 6);
     (integral, fraction, high >> (7 - shift))
 }
@@ -213,7 +213,7 @@ fn exact(c: u64, q: i32, irregular: bool, k: i32, integral: u64, fraction: u64) 
     }
     // The nearest integer to `10X` with a tie up: the greatest `d` with `2d − 1 ≤ 20X`. The
     // estimate is within one of it.
-    let mut digits = integral * 10 + halves(u128::from(fraction) * 10 + (1 << 63)).0;
+    let mut digits = integral * 10 + fraction.carrying_mul(10, 1 << 63).1;
     if compare(c, q + 1, n + 1, 2 * digits - 1).is_lt() {
         digits -= 1;
     } else if compare(c, q + 1, n + 1, 2 * digits + 1).is_ge() {
@@ -295,10 +295,10 @@ pub(super) fn read(digits: u64, power: i32) -> Option<f64> {
 /// final and the result is inexact. Only otherwise does the second product run.
 #[inline(always)]
 fn uscale(x: u64, (hi, lo): (u64, u64), shift: u32) -> u64 {
-    let (mut top, middle) = halves(u128::from(x) * u128::from(hi));
+    let (middle, mut top) = x.carrying_mul(hi, 0);
     let mut sticky = 1;
     if top & ((1 << shift) - 1) == 0 {
-        let (borrow, _) = halves(u128::from(x) * u128::from(lo));
+        let (_, borrow) = x.carrying_mul(lo, 0);
         sticky = u64::from(middle.wrapping_sub(borrow) > 1);
         // `top` is at least 2^62, because `x` and `hi` are each at least 2^63.
         top -= u64::from(middle < borrow);
@@ -306,7 +306,8 @@ fn uscale(x: u64, (hi, lo): (u64, u64), shift: u32) -> u64 {
     top >> shift | sticky
 }
 
-/// The high and the low 64 bits of `value`.
+/// The high and the low 64 bits of `value`. The `const` tables need it: `u64::carrying_mul` is
+/// not stable in `const` code.
 #[inline(always)]
 #[expect(clippy::cast_possible_truncation, reason = "each half keeps exactly its 64 bits")]
 const fn halves(value: u128) -> (u64, u64) {
@@ -334,9 +335,7 @@ impl Big {
             power -= power.min(STEP);
             let mut carry = 0;
             for limb in &mut self.0 {
-                let product = u128::from(*limb) * u128::from(factor) + carry;
-                let (high, low) = halves(product);
-                (*limb, carry) = (low, u128::from(high));
+                (*limb, carry) = limb.carrying_mul(factor, carry);
             }
             assert!(carry == 0, "each operand of `compare` fits `Big::LIMBS`");
         }
