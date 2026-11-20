@@ -9,8 +9,9 @@ use super::{
 };
 
 /// The simd128 kernel.
-#[inline(always)]
-pub(super) fn simd128(bytes: &[u8], before: u32, carry: Carry) -> Block {
+#[inline(never)]
+pub(super) fn simd128(input: &[u8], start: usize, carry: Carry) -> Block {
+    let (bytes, before) = (&input[start..], block::before(input, start));
     let quarters = match bytes.first_chunk() {
         Some(bytes) => load::quarters(bytes),
         None => {

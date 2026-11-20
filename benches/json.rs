@@ -1,5 +1,6 @@
 //! JSON: read each document into the tree of each crate, decode the documents of profile A into
-//! one struct for each class, write each tree back as compact text, and print f64 values as text.
+//! one struct for each class, write each tree back as compact text, print f64 values as text, and
+//! read number text as f64 values.
 //!
 //! A cell is one class of documents, and one call reads, decodes, or writes each document of the
 //! class. serde_json reads each document into the reference tree once. Before timing, each read
@@ -756,6 +757,88 @@ fn print_f64(criterion: &mut Criterion) {
     }
 }
 
+/// The tokens of each number of `doc`.
+fn numbers(doc: &'static [u8]) -> Vec<json::Number<'static>> {
+    let mut scratch = vec![Slot::EMPTY; SLOTS];
+    json::read(doc, &LIMITS, Profile::Rfc8259, &mut scratch, |reader| {
+        let mut numbers = Vec::new();
+        while let Some(token) = reader.token()? {
+            if let Token::Number(number) = token {
+                numbers.push(number);
+            }
+        }
+        Ok(numbers)
+    })
+    .expect("rscodec reads the document")
+}
+
+/// The numbers of canada.json, and the shortest text of the random values of [`f64_inputs`] in
+/// one array, each as the tokens of rscodec.
+fn f64_numbers() -> [(&'static str, Vec<json::Number<'static>>); 2] {
+    let canada = classes()
+        .iter()
+        .find(|class| class.name == "canada")
+        .expect("canada is a class")
+        .docs[0];
+    let [_, (_, random)] = f64_inputs();
+    let mut text = String::from("[");
+    for value in &random {
+        write!(text, "{value:?},").expect("a String takes each text");
+    }
+    text.pop();
+    text.push(']');
+    let random = Box::leak(text.into_boxed_str()).as_bytes();
+    [("canada", numbers(canada)), ("random", numbers(random))]
+}
+
+/// Reads each number of each input as an `f64`: rscodec from its tokens, which the reader
+/// scanned, and the parser of `core` from their text. Each row stores each value into a buffer of
+/// the row, and each value must equal the value of `core`.
+fn read_f64(criterion: &mut Criterion) {
+    let mut group = Group::new(criterion, "f64-read");
+    for (input, numbers) in f64_numbers() {
+        let numbers: &'static [json::Number<'static>] = numbers.leak();
+        let texts: Vec<&'static str> = numbers.iter().map(json::Number::as_str).collect();
+        let expected: Vec<u64> = texts
+            .iter()
+            .map(|text| text.parse::<f64>().expect("core reads each number").to_bits())
+            .collect();
+        let check = move |codec: &str, values: &[f64]| {
+            assert!(
+                values.iter().map(|value| value.to_bits()).eq(expected.iter().copied()),
+                "{codec} reads each number of {input} to the value of core"
+            );
+        };
+        let check_core = check.clone();
+        group.throughput(Throughput::Elements(
+            numbers.len().try_into().expect("a count fits u64"),
+        ));
+        let g = &mut group;
+        g.row(
+            "rscodec",
+            input,
+            vec![0.0; numbers.len()],
+            |values| {
+                for (value, number) in values.iter_mut().zip(numbers) {
+                    *value = number.to_f64().unwrap_or(f64::NAN);
+                }
+            },
+            |(), values| check("rscodec", values),
+        );
+        g.row(
+            "core",
+            input,
+            vec![0.0; texts.len()],
+            |values| {
+                for (value, text) in values.iter_mut().zip(&texts) {
+                    *value = text.parse().unwrap_or(f64::NAN);
+                }
+            },
+            |(), values| check_core("core", values),
+        );
+    }
+}
+
 fn main() {
-    common::run(&[read, typed, write, print_f64]);
+    common::run(&[read, typed, write, print_f64, read_f64]);
 }

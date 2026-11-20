@@ -423,6 +423,10 @@ impl<'a, 's> Reader<'a, 's> {
 
     /// Takes the string whose opening quote is at `open`. It checks each escape, each byte under
     /// 0x20, the length, and in [`Profile::IJson`], each noncharacter.
+    ///
+    /// Most strings have no escape and no byte under 0x20, so their next token is their closing
+    /// quote, and this method reads them. [`escaped`] reads each other string out of line, with the
+    /// cursor by value, so the loop of the caller stays small and in registers.
     #[inline(always)]
     fn string(&mut self, open: usize) -> Result<Str<'a>, Error> {
         self.cursor.take();
@@ -431,117 +435,18 @@ impl<'a, 's> Reader<'a, 's> {
         // The first offset past the limit. A byte of the string there passes the limit, and the
         // error of the limit comes before each error after it.
         let limit = start.saturating_add(self.limits.string_bytes_max as usize);
-        let past = |error: Error| {
-            if error.offset > limit {
-                Error::new(ErrorKind::Limit(Limit::StringBytes), limit)
-            } else {
-                error
-            }
-        };
         let ijson = self.profile == Profile::IJson;
-        // The bytes that unescape removes.
-        let mut shrink = 0;
-        // The start of the text after the last escape.
-        let mut from = start;
-        // A high surrogate escape, at its offset, before its low surrogate escape.
-        let mut high: Option<(usize, u32)> = None;
-        // Most strings have no escape and no byte under 0x20, so their next token is their closing
-        // quote.
         if let Ok(Some(at)) = self.cursor.peek()
             && input[at] == b'"'
             && at <= limit
             && (!ijson || string::first_noncharacter(&input[start..at]).is_none())
         {
             self.cursor.take();
-            return Ok(Str::new(self.text(start, at), at - start));
+            return Ok(Str::new(text(input, start, at), at - start));
         }
-        loop {
-            let (at, end) = match self.cursor.next() {
-                Ok(Some(at)) => (at, None),
-                Ok(None) => (input.len(), Some(Error::new(ErrorKind::End, input.len()))),
-                Err(invalid) => (invalid.offset, Some(Error::new(ErrorKind::Utf8, invalid.offset))),
-            };
-            if let Some((surrogate, _)) = high
-                && (at != surrogate + 6 || end.is_some() || input[at] != b'\\')
-            {
-                return Err(past(Error::new(ErrorKind::Surrogate, surrogate)));
-            }
-            if ijson && let Some(offset) = string::first_noncharacter(&input[from..at]) {
-                return Err(past(Error::new(ErrorKind::Noncharacter, from + offset)));
-            }
-            if let Some(end) = end {
-                return Err(past(end));
-            }
-            let byte = input[at];
-            if at > limit || at == limit && byte == b'\\' {
-                return Err(Error::new(ErrorKind::Limit(Limit::StringBytes), limit));
-            }
-            match byte {
-                b'"' => return Ok(Str::new(self.text(start, at), at - start - shrink)),
-                b'\\' => {}
-                _ => return Err(Error::new(ErrorKind::Syntax, at)),
-            }
-            let escape = at;
-            match input.get(escape + 1) {
-                Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') if high.is_none() => {
-                    shrink += 1;
-                    from = escape + 2;
-                }
-                Some(b'u') => {
-                    let value = string::hex4(&input[escape + 2..]).map_err(|index| {
-                        past(high.map_or_else(
-                            || unexpected(input, escape + 2 + index),
-                            |(surrogate, _)| Error::new(ErrorKind::Surrogate, surrogate),
-                        ))
-                    })?;
-                    match (high, value) {
-                        (Some((surrogate, first)), 0xdc00..0xe000) => {
-                            let value = 0x1_0000 + ((first - 0xd800) << 10) + (value - 0xdc00);
-                            if ijson && string::noncharacter(value) {
-                                return Err(past(Error::new(ErrorKind::Noncharacter, surrogate)));
-                            }
-                            high = None;
-                            // 12 bytes of escapes give 4 bytes of UTF-8.
-                            shrink += 8;
-                        }
-                        (Some((surrogate, _)), _) => {
-                            return Err(past(Error::new(ErrorKind::Surrogate, surrogate)));
-                        }
-                        (None, 0xdc00..0xe000) => return Err(past(Error::new(ErrorKind::Surrogate, escape))),
-                        (None, 0xd800..0xdc00) => high = Some((escape, value)),
-                        (None, _) => {
-                            if ijson && string::noncharacter(value) {
-                                return Err(past(Error::new(ErrorKind::Noncharacter, escape)));
-                            }
-                            shrink += 6 - string::utf8_len(value);
-                        }
-                    }
-                    from = escape + 6;
-                }
-                _ => {
-                    let error = high.map_or_else(
-                        || unexpected(input, escape + 1),
-                        |(surrogate, _)| Error::new(ErrorKind::Surrogate, surrogate),
-                    );
-                    return Err(past(error));
-                }
-            }
-        }
-    }
-
-    /// The text of the input from `start` to `end`: a string between its quotes, or a number.
-    #[inline(always)]
-    #[expect(
-        unsafe_code,
-        reason = "the cursor checked the UTF-8 of each string, and a number has only ASCII bytes"
-    )]
-    fn text(&self, start: usize, end: usize) -> &'a str {
-        let bytes = &self.cursor.input()[start..end];
-        // SAFETY: each caller passes a string or a number. For a string, the cursor gave the token
-        // at `end`, so each byte before it is UTF-8, to the last start of a character. The byte at
-        // `end` and the byte before `start` are ASCII quotes, so `bytes` starts and ends at a
-        // character. Each byte of a number passed its grammar, which has only ASCII bytes.
-        unsafe { core::str::from_utf8_unchecked(bytes) }
+        let (cursor, string) = escaped(self.cursor, start, limit, ijson);
+        self.cursor = cursor;
+        string
     }
 
     /// Takes the number at `at`.
@@ -550,38 +455,165 @@ impl<'a, 's> Reader<'a, 's> {
         self.cursor.take();
         let input = self.cursor.input();
         let (end, parts) = number::scan(input, at, self.limits.number_digits_max)?;
-        if self.profile == Profile::IJson && !number::binary64_holds(input, &parts) {
+        let number = Number::new(text(input, at, end), index(at), parts);
+        if self.profile == Profile::IJson && !number::binary64_holds(&number) {
             return Err(Error::new(ErrorKind::Number, at));
         }
-        Ok(Number::new(self.text(at, end), at))
+        Ok(number)
     }
 
-    /// Takes the literal `true`, `false`, or `null` at `at`, and gives whether it is `true`.
+    /// Takes the literal `true`, `false`, or `null` at `at`, and gives whether it is `true`. Each
+    /// literal is one compare of 4 bytes, and `false` one more byte.
     #[inline(always)]
     fn literal(&mut self, at: usize) -> Result<bool, Error> {
         self.cursor.take();
         let input = self.cursor.input();
-        let (text, value): (&[u8], _) = match input[at] {
-            b't' => (b"true", true),
-            b'f' => (b"false", false),
-            _ => (b"null", false),
+        let word = input.get(at..).and_then(<[u8]>::first_chunk::<4>);
+        let (end, value) = match word {
+            Some(b"true") => (at + 4, true),
+            Some(b"null") => (at + 4, false),
+            Some(b"fals") if input.get(at + 4) == Some(&b'e') => (at + 5, false),
+            _ => return Err(literal_error(input, at)),
         };
-        let rest = &input[at..];
-        let end = at + text.len();
-        if rest.starts_with(text)
-            && matches!(
-                input.get(end),
-                None | Some(b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'[' | b']' | b'{' | b'}' | b'"')
-            )
-        {
-            return Ok(value);
+        match input.get(end) {
+            None | Some(b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'[' | b']' | b'{' | b'}' | b'"') => Ok(value),
+            Some(_) => Err(unexpected(input, end)),
         }
-        let mismatch = text.iter().zip(rest).position(|(expected, byte)| expected != byte);
-        Err(unexpected(
-            input,
-            mismatch.map_or_else(|| end.min(input.len()), |index| at + index),
-        ))
     }
+}
+
+/// The error of the literal at `at` whose bytes are not `true`, `false`, or `null`: the first byte
+/// that differs from the literal of its first byte, or the end of the input.
+#[cold]
+fn literal_error(input: &[u8], at: usize) -> Error {
+    let text: &[u8] = match input[at] {
+        b't' => b"true",
+        b'f' => b"false",
+        _ => b"null",
+    };
+    let rest = &input[at..];
+    let mismatch = text.iter().zip(rest).position(|(expected, byte)| expected != byte);
+    unexpected(
+        input,
+        mismatch.map_or_else(|| (at + text.len()).min(input.len()), |index| at + index),
+    )
+}
+
+/// [`Reader::string`] of a string whose next token is not its closing quote: a string with an
+/// escape, a byte under 0x20, a noncharacter in [`Profile::IJson`], a byte past the limit, or no
+/// end. `start` is the offset after its opening quote, and `limit` the first offset past the limit.
+/// It takes the cursor at the next token of the string and gives it back after the string. It does
+/// not inline: the cursor is a value, so the reader of the caller stays in registers.
+#[inline(never)]
+fn escaped(mut cursor: Cursor<'_>, start: usize, limit: usize, ijson: bool) -> (Cursor<'_>, Result<Str<'_>, Error>) {
+    let string = escaped_string(&mut cursor, start, limit, ijson);
+    (cursor, string)
+}
+
+/// The string of [`escaped`].
+#[inline(always)]
+fn escaped_string<'a>(cursor: &mut Cursor<'a>, start: usize, limit: usize, ijson: bool) -> Result<Str<'a>, Error> {
+    let input = cursor.input();
+    let past = |error: Error| {
+        if error.offset() > limit {
+            Error::new(ErrorKind::Limit(Limit::StringBytes), limit)
+        } else {
+            error
+        }
+    };
+    // The bytes that unescape removes.
+    let mut shrink = 0;
+    // The start of the text after the last escape.
+    let mut from = start;
+    // A high surrogate escape, at its offset, before its low surrogate escape.
+    let mut high: Option<(usize, u32)> = None;
+    loop {
+        let (at, end) = match cursor.next() {
+            Ok(Some(at)) => (at, None),
+            Ok(None) => (input.len(), Some(Error::new(ErrorKind::End, input.len()))),
+            Err(invalid) => (invalid.offset, Some(Error::new(ErrorKind::Utf8, invalid.offset))),
+        };
+        if let Some((surrogate, _)) = high
+            && (at != surrogate + 6 || end.is_some() || input[at] != b'\\')
+        {
+            return Err(past(Error::new(ErrorKind::Surrogate, surrogate)));
+        }
+        if ijson && let Some(offset) = string::first_noncharacter(&input[from..at]) {
+            return Err(past(Error::new(ErrorKind::Noncharacter, from + offset)));
+        }
+        if let Some(end) = end {
+            return Err(past(end));
+        }
+        let byte = input[at];
+        if at > limit || at == limit && byte == b'\\' {
+            return Err(Error::new(ErrorKind::Limit(Limit::StringBytes), limit));
+        }
+        match byte {
+            b'"' => return Ok(Str::new(text(input, start, at), at - start - shrink)),
+            b'\\' => {}
+            _ => return Err(Error::new(ErrorKind::Syntax, at)),
+        }
+        let escape = at;
+        match input.get(escape + 1) {
+            Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') if high.is_none() => {
+                shrink += 1;
+                from = escape + 2;
+            }
+            Some(b'u') => {
+                let value = string::hex4(&input[escape + 2..]).map_err(|index| {
+                    past(high.map_or_else(
+                        || unexpected(input, escape + 2 + index),
+                        |(surrogate, _)| Error::new(ErrorKind::Surrogate, surrogate),
+                    ))
+                })?;
+                match (high, value) {
+                    (Some((surrogate, first)), 0xdc00..0xe000) => {
+                        let value = 0x1_0000 + ((first - 0xd800) << 10) + (value - 0xdc00);
+                        if ijson && string::noncharacter(value) {
+                            return Err(past(Error::new(ErrorKind::Noncharacter, surrogate)));
+                        }
+                        high = None;
+                        // 12 bytes of escapes give 4 bytes of UTF-8.
+                        shrink += 8;
+                    }
+                    (Some((surrogate, _)), _) => {
+                        return Err(past(Error::new(ErrorKind::Surrogate, surrogate)));
+                    }
+                    (None, 0xdc00..0xe000) => return Err(past(Error::new(ErrorKind::Surrogate, escape))),
+                    (None, 0xd800..0xdc00) => high = Some((escape, value)),
+                    (None, _) => {
+                        if ijson && string::noncharacter(value) {
+                            return Err(past(Error::new(ErrorKind::Noncharacter, escape)));
+                        }
+                        shrink += 6 - string::utf8_len(value);
+                    }
+                }
+                from = escape + 6;
+            }
+            _ => {
+                let error = high.map_or_else(
+                    || unexpected(input, escape + 1),
+                    |(surrogate, _)| Error::new(ErrorKind::Surrogate, surrogate),
+                );
+                return Err(past(error));
+            }
+        }
+    }
+}
+
+/// The text of `input` from `start` to `end`: a string between its quotes, or a number.
+#[inline(always)]
+#[expect(
+    unsafe_code,
+    reason = "the cursor checked the UTF-8 of each string, and a number has only ASCII bytes"
+)]
+fn text(input: &[u8], start: usize, end: usize) -> &str {
+    let bytes = &input[start..end];
+    // SAFETY: each caller passes a string or a number. For a string, the cursor gave the token
+    // at `end`, so each byte before it is UTF-8, to the last start of a character. The byte at
+    // `end` and the byte before `start` are ASCII quotes, so `bytes` starts and ends at a
+    // character. Each byte of a number passed its grammar, which has only ASCII bytes.
+    unsafe { core::str::from_utf8_unchecked(bytes) }
 }
 
 /// `error`, or the first duplicate key of an open object before it. An object of more than
@@ -598,7 +630,7 @@ fn earlier_duplicate(slots: &mut [Slot], mut frame: Frame, mut top: usize, input
         if frame.container == Container::Object
             && frame.count > LINEAR_KEYS_MAX
             && let Some(duplicate) = scratch::first_duplicate(&mut slots[base..top], input)
-            && duplicate < first.offset
+            && duplicate < first.offset()
         {
             first = Error::new(ErrorKind::Duplicate, duplicate);
         }

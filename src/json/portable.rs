@@ -9,10 +9,11 @@ const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
 /// 0x80 in each byte.
 const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
 
-/// The block of the first 64 bytes of `bytes`, with spaces after them when `bytes` has fewer, after
-/// the 4 bytes `before` in little-endian order and after `carry`.
-#[inline(always)]
-pub(super) fn block(bytes: &[u8], before: u32, carry: Carry) -> Block {
+/// The block of `input` at `start`: its 64 bytes, with spaces after them when the input has fewer,
+/// after the 4 bytes before `start` and after `carry`.
+#[inline(never)]
+pub(super) fn block(input: &[u8], start: usize, carry: Carry) -> Block {
+    let (bytes, before) = (&input[start..], block::before(input, start));
     let words = bytes.first_chunk::<64>().map_or_else(
         || block::tail(bytes),
         |bytes| core::array::from_fn(|index| u64::from_le_bytes(bytes.as_chunks::<8>().0[index])),

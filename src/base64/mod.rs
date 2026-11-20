@@ -86,10 +86,31 @@ pub enum ErrorKind {
 /// A refusal: its cause and the offset of the cause. It holds no byte of the input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Error {
+    kind: ErrorKind,
+    offset: usize,
+}
+
+impl Error {
+    /// The refusal of `kind` at `offset`.
+    #[inline]
+    #[must_use]
+    pub const fn new(kind: ErrorKind, offset: usize) -> Self {
+        Self { kind, offset }
+    }
+
     /// The cause.
-    pub kind: ErrorKind,
+    #[inline]
+    #[must_use]
+    pub const fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
     /// The offset in the text, or for [`ErrorKind::Output`], the length of the result.
-    pub offset: usize,
+    #[inline]
+    #[must_use]
+    pub const fn offset(&self) -> usize {
+        self.offset
+    }
 }
 
 impl fmt::Display for Error {
@@ -186,10 +207,7 @@ impl Profile {
     ) -> Result<&'o mut [u8], Error> {
         // A slice has at most `isize::MAX` bytes, so the length cannot overflow.
         let len = self.encoded_len(bytes.len()).unwrap_or(usize::MAX);
-        let out = out.get_mut(..len).ok_or(Error {
-            kind: ErrorKind::Output,
-            offset: len,
-        })?;
+        let out = out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))?;
         let (text, padding) = out.split_at_mut(symbols_len(bytes.len()));
         // At most two bytes, with a store each: a fill of a length that the compiler does not know
         // is a call to `memset`.
@@ -234,7 +252,7 @@ impl Profile {
     ///
     /// // `/` is a character of base64, not of base64url, so the text refuses at the `/`.
     /// let standard = b"NI2kalLUY/EBIuNcW6yDtzD4K6bGemOZJL9NWqY/heQ";
-    /// let refusal = Error { kind: ErrorKind::Symbol, offset: 9 };
+    /// let refusal = Error::new(ErrorKind::Symbol, 9);
     /// assert_eq!(Profile::Url.decode(standard, &mut buffer), Err(refusal));
     /// # Ok::<(), Error>(())
     /// ```
@@ -285,10 +303,7 @@ impl Profile {
     ) -> Result<&'o mut [u8], Error> {
         let symbols = self.symbols(text)?;
         let len = bytes_len(symbols.len());
-        let out = out.get_mut(..len).ok_or(Error {
-            kind: ErrorKind::Output,
-            offset: len,
-        })?;
+        let out = out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))?;
         let valid = kernel::decode(class, backend, self, symbols, out);
         // The bits of the last character after the last byte: 4 bits after 4n + 2 characters, and
         // 2 bits after 4n + 3.
@@ -308,10 +323,7 @@ impl Profile {
 
     /// The characters of `text` before the padding.
     const fn symbols(self, text: &[u8]) -> Result<&[u8], Error> {
-        let length = Error {
-            kind: ErrorKind::Length,
-            offset: text.len(),
-        };
+        let length = Error::new(ErrorKind::Length, text.len());
         match self {
             Self::Url if text.len() % 4 == 1 => Err(length),
             Self::Url => Ok(text),
@@ -328,15 +340,9 @@ impl Profile {
     fn refusal(self, symbols: &[u8]) -> Error {
         let first = ct::first_negative(symbols.iter().map(|&byte| portable::sextet(self, byte)));
         if first < symbols.len() {
-            Error {
-                kind: ErrorKind::Symbol,
-                offset: first,
-            }
+            Error::new(ErrorKind::Symbol, first)
         } else {
-            Error {
-                kind: ErrorKind::TrailingBits,
-                offset: symbols.len().saturating_sub(1),
-            }
+            Error::new(ErrorKind::TrailingBits, symbols.len().saturating_sub(1))
         }
     }
 }

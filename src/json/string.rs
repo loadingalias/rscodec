@@ -46,7 +46,7 @@ impl<'a> Str<'a> {
     #[inline]
     #[must_use]
     pub const fn borrowed(&self) -> Option<&'a str> {
-        if self.raw.len() == self.len {
+        if self.raw.len() == self.len() {
             Some(self.raw)
         } else {
             None
@@ -67,35 +67,39 @@ impl<'a> Str<'a> {
     {
         match self.borrowed() {
             Some(text) => Ok(text),
-            None => self.unescape(buf),
+            None => decode_escaped(self.raw, self.len(), buf),
         }
     }
+}
 
-    /// [`Str::decode`] of a string with escapes. It does not inline, so the common string, which
-    /// has no escape, costs one compare in the code of the caller.
-    #[expect(
-        unsafe_code,
-        reason = "the decoded bytes are runs of UTF-8 between ASCII bytes and the UTF-8 of characters"
-    )]
-    fn unescape<'b>(&self, buf: &'b mut [u8]) -> Result<&'b str, Error> {
-        let out = buf
-            .get_mut(..self.len)
-            .ok_or_else(|| Error::new(ErrorKind::Output, self.len))?;
-        let mut rest = self.raw.as_bytes();
-        let mut written = 0;
-        while let Some(at) = backslash(rest) {
-            out[written..written + at].copy_from_slice(&rest[..at]);
-            written += at;
-            let (char, len) = unescape(&rest[at + 1..]);
-            written += char.encode_utf8(&mut out[written..]).len();
-            rest = &rest[at + 1 + len..];
-        }
-        out[written..].copy_from_slice(rest);
-        // SAFETY: `out` holds the runs of `self.raw`, which is UTF-8, between its `\` bytes, which
-        // are ASCII, and the UTF-8 of the character of each escape. `self.len` is the length of
-        // their sum, so they fill `out`.
-        Ok(unsafe { core::str::from_utf8_unchecked(out) })
+/// [`Str::decode`] of the string `raw` with escapes, whose length after unescape is `len`. It does
+/// not inline, so the common string, which has no escape, costs one compare in the code of the
+/// caller. It takes plain values, not the `Str`: a reference across the call keeps each string token
+/// of the caller in memory.
+#[inline(never)]
+#[expect(
+    unsafe_code,
+    reason = "the decoded bytes are runs of UTF-8 between ASCII bytes and the UTF-8 of characters"
+)]
+fn decode_escaped<'b>(raw: &str, len: usize, buf: &'b mut [u8]) -> Result<&'b str, Error> {
+    let out = buf.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))?;
+    let mut rest = raw.as_bytes();
+    let mut written = 0;
+    loop {
+        let text = run(rest, &mut out[written..]);
+        written += text;
+        // After its run of text, `rest` ends, or it has a `\` that starts an escape.
+        let Some(after) = rest.get(text + 1..) else {
+            break;
+        };
+        let (char, used) = unescape(after);
+        written += char.encode_utf8(&mut out[written..]).len();
+        rest = &after[used..];
     }
+    // SAFETY: `out` holds the runs of `raw`, which is UTF-8, between its `\` bytes, which are
+    // ASCII, and the UTF-8 of the character of each escape. `len` is the length of their sum,
+    // so they fill `out`.
+    Ok(unsafe { core::str::from_utf8_unchecked(out) })
 }
 
 impl PartialEq for Str<'_> {
@@ -117,29 +121,45 @@ impl PartialEq<&str> for Str<'_> {
     fn eq(&self, other: &&str) -> bool {
         match self.borrowed() {
             Some(text) => text == *other,
-            None => self.len == other.len() && bytes(self.raw.as_bytes()).eq(other.bytes()),
+            None => self.len() == other.len() && bytes(self.raw.as_bytes()).eq(other.bytes()),
         }
     }
 }
 
-/// The offset of the first `\` in `bytes`, if it has one. It reads 8 bytes at a time: a byte of
-/// `word ^ 0x5c…` is zero exactly at a `\`, and the lowest bit of `(x - 0x01…) & !x & 0x80…` is in
-/// the first zero byte of `x`, because a borrow moves only up from a zero byte.
-#[inline]
-fn backslash(bytes: &[u8]) -> Option<usize> {
+/// The index of the first `\` of the 8 bytes of `word` in little-endian order, if it has one: a
+/// byte of `word ^ 0x5c…` is zero exactly at a `\`, and the lowest bit of
+/// `(x - 0x01…) & !x & 0x80…` is in the first zero byte of `x`, because a borrow moves only up from
+/// a zero byte.
+#[inline(always)]
+fn backslash(word: u64) -> Option<usize> {
     const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
     const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
-    let (words, rest) = bytes.as_chunks::<8>();
-    for (index, word) in words.iter().enumerate() {
-        let word = u64::from_le_bytes(*word) ^ (ONES * u64::from(b'\\'));
-        let zero = word.wrapping_sub(ONES) & !word & HIGH;
-        if zero != 0 {
-            return Some(8 * index + (zero.trailing_zeros() / 8) as usize);
+    let word = word ^ (ONES * u64::from(b'\\'));
+    let zero = word.wrapping_sub(ONES) & !word & HIGH;
+    (zero != 0).then_some((zero.trailing_zeros() / 8) as usize)
+}
+
+/// Copies the text of `raw` before its first `\` to the start of `out`, and gives its length: the
+/// length of `raw` if it has no `\`. While both hold 8 more bytes, each word is one load and one
+/// store, with no call. A word can copy bytes after the `\` into `out`: the caller writes the
+/// escape and the text after it over them.
+#[inline(always)]
+fn run(raw: &[u8], out: &mut [u8]) -> usize {
+    let mut at = 0;
+    while let (Some(word), Some(slot)) = (
+        raw.get(at..).and_then(<[u8]>::first_chunk::<8>),
+        out.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<8>),
+    ) {
+        *slot = *word;
+        if let Some(index) = backslash(u64::from_le_bytes(*word)) {
+            return at + index;
         }
+        at += 8;
     }
-    rest.iter()
-        .position(|&byte| byte == b'\\')
-        .map(|at| 8 * words.len() + at)
+    let rest = &raw[at..];
+    let len = rest.iter().position(|&byte| byte == b'\\').unwrap_or(rest.len());
+    out[at..at + len].copy_from_slice(&rest[..len]);
+    at + len
 }
 
 /// The UTF-8 bytes of the string `raw` between its quotes, after unescape. The reader checked the

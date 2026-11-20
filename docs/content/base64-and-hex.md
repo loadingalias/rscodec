@@ -77,7 +77,7 @@ fn main() -> Result<(), Error> {
 
     // `/` is a character of base64, not of base64url, so the text refuses at the `/`.
     let standard = b"NI2kalLUY/EBIuNcW6yDtzD4K6bGemOZJL9NWqY/heQ";
-    let refusal = Error { kind: ErrorKind::Symbol, offset: 9 };
+    let refusal = Error::new(ErrorKind::Symbol, 9);
     assert_eq!(Profile::Url.decode(standard, &mut buffer), Err(refusal));
     Ok(())
 }
@@ -184,7 +184,8 @@ Each byte string has one text, and the decoders take only that text:
 
 ## Errors
 
-Each error has a kind and an offset, and it holds no byte of the input.
+Each error has a kind, which `kind()` gives, and an offset, which `offset()` gives. It holds no byte
+of the input. `Error::new(kind, offset)` makes an error.
 
 | Kind | Cause | Offset | Recovery |
 | --- | --- | --- | --- |

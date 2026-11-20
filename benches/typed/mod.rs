@@ -220,10 +220,7 @@ pub(crate) trait Typed {
 }
 
 /// The refusal of a document that lacks a member that its struct needs.
-const MISSING: json::Error = json::Error {
-    kind: ErrorKind::Type,
-    offset: 0,
-};
+const MISSING: json::Error = json::Error::new(ErrorKind::Type, 0);
 
 /// The name of a key, which an escaped key decodes into `buf`. A key that `buf` cannot hold is
 /// longer than the name of each member of the structs, so it matches none.

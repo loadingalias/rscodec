@@ -60,7 +60,7 @@ mod tests;
 /// // A slice that is too short refuses, and the text that fits stays valid. Here the object does
 /// // not fit, so nothing is written.
 /// let error = options(&mut out[..len - 1]).unwrap_err();
-/// assert_eq!((error.kind, error.offset), (ErrorKind::Full, 0));
+/// assert_eq!((error.kind(), error.offset()), (ErrorKind::Full, 0));
 /// # Ok::<(), json::Error>(())
 /// ```
 ///
@@ -287,7 +287,7 @@ impl Place<'_> {
         let last = self.out.len().checked_sub(1).filter(|&last| at < last).ok_or(full)?;
         self.out[at] = open;
         // The container writes nothing after an error, so the written length stays `start`.
-        let end = fill(&mut self.out[..last], at + 1).map_err(|error| Error::new(error.kind, start))?;
+        let end = fill(&mut self.out[..last], at + 1).map_err(|error| Error::new(error.kind(), start))?;
         self.out[end] = close;
         *self.len = end + 1;
         Ok(())

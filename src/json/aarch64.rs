@@ -133,9 +133,10 @@ macro_rules! kernel {
             };
 
             /// The kernel.
-            #[inline(always)]
+            #[inline(never)]
             #[target_feature(enable = $features)]
-            pub(in super::super) fn block(bytes: &[u8], before: u32, carry: Carry) -> Block {
+            pub(in super::super) fn block(input: &[u8], start: usize, carry: Carry) -> Block {
+                let (bytes, before) = (&input[start..], block::before(input, start));
                 simd::scan(classify(bytes, before), carry, $prefix_xor)
             }
 

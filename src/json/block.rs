@@ -107,6 +107,12 @@ impl Classes {
     }
 }
 
+/// The 4 bytes of `input` before `at` in little-endian order, or zero before the first block.
+#[inline(always)]
+pub(super) fn before(input: &[u8], at: usize) -> u32 {
+    input[..at].last_chunk().map_or(0, |bytes| u32::from_le_bytes(*bytes))
+}
+
 /// The 8 little-endian words of the last block, whose bytes are `rest`, fewer than 64, with spaces
 /// after them. Each word comes from loads of a fixed size, so the compiler keeps the block in
 /// registers and calls no `memcpy`.

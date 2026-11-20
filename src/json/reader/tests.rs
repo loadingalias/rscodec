@@ -108,7 +108,7 @@ fn check(input: &[u8], limits: &Limits, profile: Profile, slots: usize) -> Resul
 }
 
 fn error(kind: ErrorKind, offset: usize) -> Result<(), Error> {
-    Err(Error { kind, offset })
+    Err(Error::new(kind, offset))
 }
 
 /// The serde_json tree of the tokens of `input`. A number is the serde_json value of its text.
@@ -401,7 +401,7 @@ fn each_line_of_kuhns_file_gives_the_result_of_its_profile() {
                 },
             };
             invalid += usize::from(core::str::from_utf8(line).is_err());
-            noncharacters += usize::from(expected.is_err_and(|error| error.kind == ErrorKind::Noncharacter));
+            noncharacters += usize::from(expected.is_err_and(|error| error.kind() == ErrorKind::Noncharacter));
             assert_eq!(
                 check(&document, &WIDE, profile, 1),
                 expected,
@@ -428,16 +428,12 @@ fn each_surrogate_escape_pair_gives_its_character_or_refuses() {
             let char = char::decode_utf16([first, second]).next().and_then(Result::ok);
             for profile in PROFILES {
                 let expected = match char {
-                    Some(char) if profile == Profile::IJson && u32::from(char) & 0xfffe == 0xfffe => Err(Error {
-                        kind: ErrorKind::Noncharacter,
-                        offset: 1,
-                    }),
+                    Some(char) if profile == Profile::IJson && u32::from(char) & 0xfffe == 0xfffe => {
+                        Err(Error::new(ErrorKind::Noncharacter, 1))
+                    }
                     Some(char) => Ok(Some(char)),
                     // A low surrogate first is lone, and so is a high surrogate without a low one.
-                    None => Err(Error {
-                        kind: ErrorKind::Surrogate,
-                        offset: 1,
-                    }),
+                    None => Err(Error::new(ErrorKind::Surrogate, 1)),
                 };
                 for &kernel in &kernels {
                     let read = read_with(kernel, document.as_bytes(), &WIDE, profile, &mut scratch, |reader| {
@@ -485,10 +481,7 @@ fn each_noncharacter_refuses_only_in_ijson() {
         for document in [format!("[\"ab{char}\"]"), format!("[\"ab{}\"]", escaped(char))] {
             for profile in PROFILES {
                 let expected = if refuses && profile == Profile::IJson {
-                    Err(Error {
-                        kind: ErrorKind::Noncharacter,
-                        offset: 4,
-                    })
+                    Err(Error::new(ErrorKind::Noncharacter, 4))
                 } else {
                     Ok(vec![
                         Owned::ArrayStart,
@@ -956,15 +949,17 @@ fn each_changed_document_gives_no_error_after_its_utf8_error() {
                 let result = check(&changed, &WIDE, Profile::Rfc8259, 64);
                 match core::str::from_utf8(&changed) {
                     Ok(_) => {
-                        assert!(result.is_ok_and(|()| true) || result.is_err_and(|error| error.kind != ErrorKind::Utf8))
+                        assert!(
+                            result.is_ok_and(|()| true) || result.is_err_and(|error| error.kind() != ErrorKind::Utf8)
+                        )
                     }
                     Err(utf8) => {
                         let error = result.expect_err("a document that is not UTF-8 refuses");
                         let offset = utf8.valid_up_to();
-                        assert!(error.offset <= offset, "{error:?} after {offset}");
+                        assert!(error.offset() <= offset, "{error:?} after {offset}");
                         assert_eq!(
-                            error.offset == offset,
-                            error.kind == ErrorKind::Utf8,
+                            error.offset() == offset,
+                            error.kind() == ErrorKind::Utf8,
                             "{error:?} {offset}"
                         );
                     }
@@ -1107,13 +1102,7 @@ fn the_walk_skips_the_rest_of_what_the_loop_left() {
     );
     let duplicate = br#"{"a":{"x":1,"y":[2,{"z":3,"z":4}]},"alg":"outer"}"#;
     let offset = duplicate.windows(4).rposition(|window| window == br#""z":"#).unwrap();
-    assert_eq!(
-        walk(duplicate),
-        Err(Error {
-            kind: ErrorKind::Duplicate,
-            offset
-        })
-    );
+    assert_eq!(walk(duplicate), Err(Error::new(ErrorKind::Duplicate, offset)));
 }
 
 /// The classes of `benches/data/json`, one document for each line of a `.jsonl` file.

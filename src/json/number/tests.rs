@@ -72,7 +72,7 @@ fn grammar(text: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
 /// from the digits of the text.
 fn oracle(text: &str) -> Option<Values> {
     let (integer, fraction, exponent) = grammar(text)?;
-    let refused = |kind| Error { kind, offset: 0 };
+    let refused = |kind| Error::new(kind, 0);
     let class = match (fraction, exponent) {
         (_, Some(_)) => NumberClass::Float,
         (Some(_), None) => NumberClass::Decimal,
@@ -171,10 +171,7 @@ fn each_number_of_nigel_taos_data_reads_its_binary64_value() {
             let bits = u64::from_str_radix(bits, 16).unwrap();
             let expected = grammar(text).map(|_| {
                 if f64::from_bits(bits).is_infinite() {
-                    Err(Error {
-                        kind: ErrorKind::Range,
-                        offset: 0,
-                    })
+                    Err(Error::new(ErrorKind::Range, 0))
                 } else {
                     Ok(bits)
                 }
@@ -220,14 +217,8 @@ fn at_one<T>(text: &str, accessor: impl FnOnce(Number<'_>) -> Result<T, Error>) 
 /// error at the offset of the number, so `?` in the closure of `read` gives that error.
 #[test]
 fn each_accessor_reads_to_its_limits_and_refuses_past_them() {
-    let range = Error {
-        kind: ErrorKind::Range,
-        offset: 1,
-    };
-    let other_type = Error {
-        kind: ErrorKind::Type,
-        offset: 1,
-    };
+    let range = Error::new(ErrorKind::Range, 1);
+    let other_type = Error::new(ErrorKind::Type, 1);
     for (text, expected) in [
         ("9223372036854775807", Ok(i64::MAX)),
         ("-9223372036854775808", Ok(i64::MIN)),

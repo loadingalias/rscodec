@@ -23,8 +23,9 @@ pub(super) struct InvalidUtf8 {
 /// error. No JSON value starts with such a byte.
 ///
 /// Each method inlines, so that the cursor stays in registers in the function of the reader. A
-/// cursor in memory hides the function of its kernel from the compiler.
-#[derive(Debug)]
+/// cursor in memory hides the function of its kernel from the compiler. A function out of line
+/// takes the cursor by value and gives it back, so that its caller keeps the cursor in registers.
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Cursor<'a> {
     input: &'a [u8],
     classify: Classify,
@@ -106,19 +107,19 @@ impl<'a> Cursor<'a> {
             return Err(invalid);
         }
         let start = self.next;
-        let Some(rest) = self.input.get(start..).filter(|rest| !rest.is_empty()) else {
+        if start >= self.input.len() {
             // The spaces after a short last block end each sequence, so only an input of whole
             // blocks can end in a sequence that needs more bytes.
-            if block::ends_incomplete(before(self.input, self.input.len())) {
+            if block::ends_incomplete(block::before(self.input, self.input.len())) {
                 let invalid = invalid(self.input, self.input.len());
                 self.invalid = Some(invalid);
                 return Err(invalid);
             }
             return Ok(false);
-        };
+        }
         // SAFETY: `classify` is the function of the kernel of a `Backend`, and a `Backend` exists only
         // on a CPU that has the features of its kernel.
-        let block = unsafe { (self.classify)(rest, before(self.input, start), self.carry) };
+        let block = unsafe { (self.classify)(self.input, start, self.carry) };
         self.carry = block.carry;
         self.start = start;
         self.next = start + 64;
@@ -133,12 +134,6 @@ impl<'a> Cursor<'a> {
         }
         Ok(true)
     }
-}
-
-/// The 4 bytes before `at` in little-endian order, or zero before the first block.
-#[inline]
-fn before(input: &[u8], at: usize) -> u32 {
-    input[..at].last_chunk().map_or(0, |bytes| u32::from_le_bytes(*bytes))
 }
 
 /// The first byte of `input` that is not UTF-8. The check of the block at `start`, or the check of

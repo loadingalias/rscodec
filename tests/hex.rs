@@ -72,10 +72,7 @@ fn rfc_4648_vectors() {
             let lower = text.to_ascii_lowercase();
             assert_eq!(encode(call, bytes.as_bytes()), lower.as_bytes(), "{call:?}");
             assert_eq!(decode(call, lower.as_bytes()).unwrap(), bytes.as_bytes());
-            let upper = text.find('F').map(|offset| Error {
-                kind: ErrorKind::Symbol,
-                offset,
-            });
+            let upper = text.find('F').map(|offset| Error::new(ErrorKind::Symbol, offset));
             assert_eq!(decode(call, text.as_bytes()).err(), upper, "{call:?}");
         }
     }
@@ -109,14 +106,7 @@ fn short_inputs_round_trip_and_each_other_byte_refuses() {
                     if digit {
                         assert_eq!(data_encoding::HEXLOWER.encode(&decoded.unwrap()).as_bytes(), changed);
                     } else {
-                        assert_eq!(
-                            decoded,
-                            Err(Error {
-                                kind: ErrorKind::Symbol,
-                                offset: place
-                            }),
-                            "{call:?}"
-                        );
+                        assert_eq!(decoded, Err(Error::new(ErrorKind::Symbol, place)), "{call:?}");
                     }
                 }
             }
@@ -162,7 +152,7 @@ fn each_backend_equals_the_portable_backend() {
 /// first.
 #[test]
 fn a_short_output_refuses_with_the_length() {
-    let error = |kind, offset| Err(Error { kind, offset });
+    let error = |kind, offset| Err(Error::new(kind, offset));
     for call in calls() {
         let mut out = [0; 3];
         assert_eq!(encode_into(call, &[1; 2], &mut out), error(ErrorKind::Output, 4));
@@ -188,10 +178,7 @@ fn decode_secret_wipes_its_output_after_a_refusal() {
                 let mut out = vec![UNWRITTEN; len + 4];
                 assert_eq!(
                     hex::decode_secret(dit, &changed, &mut out),
-                    Err(Error {
-                        kind: ErrorKind::Symbol,
-                        offset: place
-                    }),
+                    Err(Error::new(ErrorKind::Symbol, place)),
                     "{len}"
                 );
                 assert!(out[..len].iter().all(|&byte| byte == 0), "{len} {place}");
@@ -199,7 +186,7 @@ fn decode_secret_wipes_its_output_after_a_refusal() {
             }
         }
         let mut out = [UNWRITTEN; 8];
-        let error = |kind, offset| Err(Error { kind, offset });
+        let error = |kind, offset| Err(Error::new(kind, offset));
         assert_eq!(hex::decode_secret(dit, b"000", &mut out), error(ErrorKind::Length, 3));
         assert_eq!(
             hex::decode_secret(dit, &[b'g'; 18], &mut out),
@@ -227,10 +214,7 @@ fn the_dit_scope_holds_pstate_dit_and_restores_it() {
             );
             assert_eq!(
                 hex::decode_secret(dit, &[b'g'; 64], &mut out).map(|bytes| bytes.len()),
-                Err(Error {
-                    kind: ErrorKind::Symbol,
-                    offset: 0
-                })
+                Err(Error::new(ErrorKind::Symbol, 0))
             );
             assert_eq!(dit::get(), Some(true));
         });

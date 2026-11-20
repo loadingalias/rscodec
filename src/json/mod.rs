@@ -56,7 +56,7 @@
 //! // Each profile refuses a duplicate key, also after unescape.
 //! let twice = br#"{"alg":"none","\u0061lg":"ES256"}"#;
 //! let error = json::read(twice, &LIMITS, Profile::IJson, &mut scratch, |_| Ok(())).unwrap_err();
-//! assert_eq!((error.kind, error.offset), (ErrorKind::Duplicate, 14));
+//! assert_eq!((error.kind(), error.offset()), (ErrorKind::Duplicate, 14));
 //! # Ok::<(), json::Error>(())
 //! ```
 //!
@@ -158,9 +158,10 @@ pub struct Limits {
 ///
 /// It selects the kernel of the CPU once, and it calls `decode` at one place. Mark `decode`
 /// `#[inline(always)]`: the compiler does not inline a large closure without it, and the reader
-/// keeps its state in registers only when `decode` inlines. A kernel that the build fixes, from
-/// `-C target-feature` or without `std`, inlines into the reader. A kernel that the CPU selects at
-/// run time runs as one call for each block of 64 bytes.
+/// keeps its state in registers only when `decode` inlines. The kernel runs as one call for each
+/// block of 64 bytes, with plain values: a direct call when the build fixes the kernel, from
+/// `-C target-feature` or without `std`, and a call through a function pointer when the CPU selects
+/// it at run time.
 ///
 /// # Errors
 ///
@@ -225,10 +226,11 @@ enum Kernel {
     Simd128,
 }
 
-/// The function of a kernel: the block of the first 64 bytes of its first argument, with spaces
-/// after them when it has fewer, after the 4 bytes of its second argument in little-endian order and
-/// after the carry. A call needs the CPU features of the kernel.
-type Classify = unsafe fn(&[u8], u32, Carry) -> Block;
+/// The function of a kernel: the block of the input at an offset under its length. The block has
+/// 64 bytes, with spaces after them when the input has fewer, after the 4 bytes before the offset
+/// and after the carry. A call needs the CPU features of the kernel. No
+/// kernel inlines: each block costs one call with plain values, so the reader stays in registers.
+type Classify = unsafe fn(&[u8], usize, Carry) -> Block;
 
 impl Kernel {
     /// Each kernel of the target architecture, the fastest first.

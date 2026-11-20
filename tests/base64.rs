@@ -82,7 +82,7 @@ fn decode(profile: Profile, call: Call, text: &[u8]) -> Result<Vec<u8>, Error> {
 /// The error that a strict decoder gives for `text`, from the rules of the profile: the length,
 /// then the first byte outside the alphabet, then the trailing bits.
 fn expected_error(profile: Profile, text: &[u8]) -> Option<Error> {
-    let error = |kind, offset| Some(Error { kind, offset });
+    let error = |kind, offset| Some(Error::new(kind, offset));
     let symbols = match profile {
         Profile::Url if text.len() % 4 == 1 => return error(ErrorKind::Length, text.len()),
         Profile::Url => text,
@@ -98,10 +98,7 @@ fn expected_error(profile: Profile, text: &[u8]) -> Option<Error> {
     }
     let bits = symbols.len() * 6 % 8;
     let last = symbols.last().map_or(0, |&byte| value(byte).unwrap());
-    (last & ((1 << bits) - 1) != 0).then(|| Error {
-        kind: ErrorKind::TrailingBits,
-        offset: symbols.len() - 1,
-    })
+    (last & ((1 << bits) - 1) != 0).then(|| Error::new(ErrorKind::TrailingBits, symbols.len() - 1))
 }
 
 /// RFC 4648, section 10.
@@ -271,7 +268,7 @@ fn each_backend_equals_the_portable_backend() {
 /// first.
 #[test]
 fn a_short_output_refuses_with_the_length() {
-    let error = |kind, offset| Err(Error { kind, offset });
+    let error = |kind, offset| Err(Error::new(kind, offset));
     for call in calls() {
         let mut out = [0; 3];
         assert_eq!(
@@ -332,7 +329,7 @@ fn decode_secret_wipes_its_output_after_a_refusal() {
                     let mut out = vec![UNWRITTEN; len + 4];
                     assert_eq!(
                         profile.decode_secret(dit, &changed, &mut out),
-                        Err(Error { kind, offset }),
+                        Err(Error::new(kind, offset)),
                         "{profile:?} {len}"
                     );
                     assert!(out[..len].iter().all(|&byte| byte == 0), "{profile:?} {len} {kind:?}");
@@ -346,17 +343,11 @@ fn decode_secret_wipes_its_output_after_a_refusal() {
             };
             assert_eq!(
                 profile.decode_secret(dit, length, &mut out),
-                Err(Error {
-                    kind: ErrorKind::Length,
-                    offset: length.len()
-                })
+                Err(Error::new(ErrorKind::Length, length.len()))
             );
             assert_eq!(
                 profile.decode_secret(dit, b"AAAA*AAAAAAA", &mut out),
-                Err(Error {
-                    kind: ErrorKind::Output,
-                    offset: 9
-                })
+                Err(Error::new(ErrorKind::Output, 9))
             );
             assert_eq!(out, [UNWRITTEN; 8]);
         }

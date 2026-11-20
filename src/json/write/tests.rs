@@ -181,13 +181,7 @@ fn a_write_past_the_end_of_the_slice_refuses_and_keeps_the_written_length() {
                 len < 2,
                 "an object of {len} bytes refuses only when `{{}}` does not fit"
             );
-            assert_eq!(
-                result,
-                Err(Error {
-                    kind: ErrorKind::Full,
-                    offset: 0
-                })
-            );
+            assert_eq!(result, Err(Error::new(ErrorKind::Full, 0)));
             continue;
         };
         let Ok(Tree::Object(read)) = tree(&text, Profile::Rfc8259) else {
@@ -204,9 +198,9 @@ fn a_write_past_the_end_of_the_slice_refuses_and_keeps_the_written_length() {
             "each member writes or refuses"
         );
         for refusal in refusals {
-            assert_eq!(refusal.kind, ErrorKind::Full);
+            assert_eq!(refusal.kind(), ErrorKind::Full);
             // The written length at a refusal ends a member, or is the length after `{`.
-            assert!(refusal.offset == 1 || matches!(text.get(refusal.offset), Some(b',' | b'}')));
+            assert!(refusal.offset() == 1 || matches!(text.get(refusal.offset()), Some(b',' | b'}')));
         }
         assert_eq!(len == full.len(), text == full);
     }
@@ -283,7 +277,7 @@ fn each_float_of_a_fixed_seed_sample_writes_a_number_that_reads_back() {
 
 #[test]
 fn nan_and_infinity_refuse_and_a_closure_that_writes_no_value_refuses() {
-    let refused = |kind, offset| Err(Error { kind, offset });
+    let refused = |kind, offset| Err(Error::new(kind, offset));
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         // A refused member writes nothing and keeps the written length, here after `{"a":1`.
         let mut refusal = None;
@@ -295,13 +289,7 @@ fn nan_and_infinity_refuse_and_a_closure_that_writes_no_value_refuses() {
             })
         });
         assert_eq!(text.as_deref(), Ok(br#"{"a":1}"#.as_slice()));
-        assert_eq!(
-            refusal,
-            Some(Error {
-                kind: ErrorKind::NonFinite,
-                offset: 6
-            })
-        );
+        assert_eq!(refusal, Some(Error::new(ErrorKind::NonFinite, 6)));
         // An array that its closure fails writes nothing, so the offset is its start.
         let result = written(64, |place| place.array(|array| array.item().f64(value)));
         assert_eq!(result, refused(ErrorKind::NonFinite, 0));

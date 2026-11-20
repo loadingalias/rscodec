@@ -95,9 +95,10 @@ The compiler does not inline a large closure or helper without it, also when `re
 place. A decoder that the compiler does not inline still works, but slower, because the reader is
 then in memory.
 
-`read` selects the kernel of the CPU once. When the build fixes the kernel, from
-`-C target-feature`, `-C target-cpu`, or a target without `std`, the kernel inlines into the reader.
-When the CPU selects it at run time, the reader calls it once for each block of 64 bytes.
+`read` selects the kernel of the CPU once. The reader calls the kernel once for each block of 64
+bytes, so the code of the kernel stays out of the loop of the decoder. When the build fixes the
+kernel, from `-C target-feature`, `-C target-cpu`, or a target without `std`, the call is direct.
+When the CPU selects the kernel at run time, the call goes through a function pointer.
 
 A method for another type gives `ErrorKind::Type` at the value and reads nothing. The JWT `aud`
 claim can be a string or an array, so read it with `kind` first:
@@ -214,7 +215,7 @@ let error = json::read(late, &ORDER, Profile::Rfc8259, &mut scratch, |reader| {
     members.next()?.map(|(_, value)| value.number()?.to_u64()).transpose()
 })
 .unwrap_err();
-assert_eq!((error.kind, error.offset), (ErrorKind::Type, 11));
+assert_eq!((error.kind(), error.offset()), (ErrorKind::Type, 11));
 # Ok::<(), json::Error>(())
 ```
 
@@ -335,7 +336,7 @@ assert_eq!(
 // A slice that is too short refuses, and the text that fits stays valid. Here the object does
 // not fit, so nothing is written.
 let error = options(&mut out[..len - 1]).unwrap_err();
-assert_eq!((error.kind, error.offset), (ErrorKind::Full, 0));
+assert_eq!((error.kind(), error.offset()), (ErrorKind::Full, 0));
 # Ok::<(), json::Error>(())
 ```
 
@@ -373,9 +374,11 @@ written length. Lend a longer slice, or take the written bytes and continue in a
 
 ## Errors
 
-Each refusal is a `json::Error` with a `kind` and an `offset`. For the reader, the offset is in the
-document, and the errors come in the order of their offsets: `read` gives the error with the lowest
-offset. For the writer, the offset is the written length.
+Each refusal is a `json::Error`: `kind()` gives its `ErrorKind`, and `offset()` gives its offset.
+For the reader, the offset is in the document, and the errors come in the order of their offsets:
+`read` gives the error with the lowest offset. For the writer, the offset is the written length. A
+decoder that refuses a valid document, for example one that lacks a member that its type needs,
+makes its refusal with `json::Error::new(kind, offset)`.
 
 | `ErrorKind` | Cause | Recovery |
 | --- | --- | --- |

@@ -62,10 +62,31 @@ pub enum ErrorKind {
 /// A refusal: its cause and the offset of the cause. It holds no byte of the input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Error {
+    kind: ErrorKind,
+    offset: usize,
+}
+
+impl Error {
+    /// The refusal of `kind` at `offset`.
+    #[inline]
+    #[must_use]
+    pub const fn new(kind: ErrorKind, offset: usize) -> Self {
+        Self { kind, offset }
+    }
+
     /// The cause.
-    pub kind: ErrorKind,
+    #[inline]
+    #[must_use]
+    pub const fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
     /// The offset in the text, or for [`ErrorKind::Output`], the length of the result.
-    pub offset: usize,
+    #[inline]
+    #[must_use]
+    pub const fn offset(&self) -> usize {
+        self.offset
+    }
 }
 
 impl fmt::Display for Error {
@@ -99,10 +120,7 @@ pub const fn decoded_len(text: &[u8]) -> Result<usize, Error> {
     if text.len().is_multiple_of(2) {
         Ok(text.len() / 2)
     } else {
-        Err(Error {
-            kind: ErrorKind::Length,
-            offset: text.len(),
-        })
+        Err(Error::new(ErrorKind::Length, text.len()))
     }
 }
 
@@ -157,10 +175,7 @@ pub fn encode_with<'o>(backend: Backend, bytes: &[u8], out: &'o mut [u8]) -> Res
 fn text_of<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     // A slice has at most `isize::MAX` bytes, so the length cannot overflow.
     let len = encoded_len(bytes.len()).unwrap_or(usize::MAX);
-    out.get_mut(..len).ok_or(Error {
-        kind: ErrorKind::Output,
-        offset: len,
-    })
+    out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))
 }
 
 /// Decodes the lowercase hex `text` into the start of `out`, and gives the bytes. It runs the
@@ -219,10 +234,7 @@ pub fn decode_with<'o>(backend: Backend, text: &[u8], out: &'o mut [u8]) -> Resu
 #[inline(always)]
 fn bytes_of<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let len = decoded_len(text)?;
-    out.get_mut(..len).ok_or(Error {
-        kind: ErrorKind::Output,
-        offset: len,
-    })
+    out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))
 }
 
 /// The result of a decode of `text` into `out`, in which `valid` tells whether each character is a
@@ -233,10 +245,7 @@ fn checked<'o>(class: impl Class, valid: bool, text: &[u8], out: &'o mut [u8]) -
     if !valid {
         class.wipe(out);
         let offset = ct::first_negative(text.iter().map(|&byte| portable::nibble(byte)));
-        return Err(Error {
-            kind: ErrorKind::Symbol,
-            offset,
-        });
+        return Err(Error::new(ErrorKind::Symbol, offset));
     }
     Ok(out)
 }

@@ -70,26 +70,102 @@ pub enum Limit {
 
 /// A refusal: its cause and the offset of the cause in the input, or the written length of the
 /// writer. It holds no byte of the input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// It is two words: the offset and the code of its kind. In each `Result` of the reader, its
+/// fields are the size of the words of a token. A smaller field would make the compiler split the
+/// words of each token at its edges and join them again on each step.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Error {
-    /// The cause.
-    pub kind: ErrorKind,
-    /// The offset in the input, or for [`ErrorKind::Output`], the length of the decoded string, or
-    /// for the writer, the written length.
-    pub offset: usize,
+    offset: usize,
+    code: usize,
 }
 
+/// The kinds of [`ErrorKind`] with no field, in the order of their codes. A code past them is
+/// [`ErrorKind::Limit`] of the limit at code − 13.
+const KINDS: [ErrorKind; 13] = [
+    ErrorKind::Syntax,
+    ErrorKind::End,
+    ErrorKind::Utf8,
+    ErrorKind::Surrogate,
+    ErrorKind::Noncharacter,
+    ErrorKind::Number,
+    ErrorKind::Range,
+    ErrorKind::Duplicate,
+    ErrorKind::Scratch,
+    ErrorKind::Output,
+    ErrorKind::Type,
+    ErrorKind::Full,
+    ErrorKind::NonFinite,
+];
+
+/// The limits of [`ErrorKind::Limit`], in the order of their codes.
+const LIMITS: [Limit; 6] = [
+    Limit::InputBytes,
+    Limit::Depth,
+    Limit::StringBytes,
+    Limit::Members,
+    Limit::Elements,
+    Limit::NumberDigits,
+];
+
 impl Error {
+    /// The refusal of `kind` at `offset`. A decoder that refuses a valid document, for example
+    /// one that lacks a member that its type needs, gives its own refusal with it.
     #[inline]
-    pub(super) const fn new(kind: ErrorKind, offset: usize) -> Self {
-        Self { kind, offset }
+    #[must_use]
+    pub const fn new(kind: ErrorKind, offset: usize) -> Self {
+        let code = match kind {
+            ErrorKind::Syntax => 0,
+            ErrorKind::End => 1,
+            ErrorKind::Utf8 => 2,
+            ErrorKind::Surrogate => 3,
+            ErrorKind::Noncharacter => 4,
+            ErrorKind::Number => 5,
+            ErrorKind::Range => 6,
+            ErrorKind::Duplicate => 7,
+            ErrorKind::Scratch => 8,
+            ErrorKind::Output => 9,
+            ErrorKind::Type => 10,
+            ErrorKind::Full => 11,
+            ErrorKind::NonFinite => 12,
+            ErrorKind::Limit(limit) => 13 + limit as usize,
+        };
+        Self { offset, code }
+    }
+
+    /// The cause.
+    #[inline]
+    #[must_use]
+    pub const fn kind(&self) -> ErrorKind {
+        if self.code < KINDS.len() {
+            KINDS[self.code]
+        } else {
+            ErrorKind::Limit(LIMITS[self.code - KINDS.len()])
+        }
+    }
+
+    /// The offset in the input, or for [`ErrorKind::Output`], the length of the decoded string, or
+    /// for the writer, the written length.
+    #[inline]
+    #[must_use]
+    pub const fn offset(&self) -> usize {
+        self.offset
+    }
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Error")
+            .field("kind", &self.kind())
+            .field("offset", &self.offset)
+            .finish()
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let offset = self.offset;
-        let cause = match self.kind {
+        let cause = match self.kind() {
             ErrorKind::Syntax => "JSON does not allow the byte",
             ErrorKind::End => "the JSON text ends inside its value",
             ErrorKind::Utf8 => "the JSON text is not UTF-8",

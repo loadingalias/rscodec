@@ -28,9 +28,9 @@ pub(super) fn kernels() -> Vec<Backend> {
     unsafe_code,
     reason = "a `Backend` exists only on a CPU that has the features of its kernel"
 )]
-fn classify(kernel: Backend, bytes: &[u8], before: u32, carry: Carry) -> Block {
+fn classify(kernel: Backend, input: &[u8], start: usize, carry: Carry) -> Block {
     // SAFETY: as above.
-    unsafe { kernel.0.function()(bytes, before, carry) }
+    unsafe { kernel.0.function()(input, start, carry) }
 }
 
 /// The tokens that the cursor gives, and its end: `Ok` or the UTF-8 error.
@@ -99,24 +99,14 @@ fn check_cursor(input: &[u8], tokens: &[usize], kernel: Backend) {
     );
 }
 
-/// The blocks of `input` as the cursor gives them to a kernel: the bytes from the start of each
-/// block to the end of the input, each with the 4 bytes before it.
-fn blocks(input: &[u8]) -> impl Iterator<Item = (&[u8], u32)> {
-    (0..input.len()).step_by(64).map(|start| {
-        let before = input[..start]
-            .last_chunk()
-            .map_or(0, |before| u32::from_le_bytes(*before));
-        (&input[start..], before)
-    })
-}
-
 /// Each kernel gives the block of the reference, with its carry, on each block of `input`.
 fn check_blocks(input: &[u8], kernels: &[Backend]) {
     let mut carries = vec![Carry::default(); kernels.len()];
-    for (index, (bytes, before)) in blocks(input).enumerate() {
-        let reference = classify(kernels[kernels.len() - 1], bytes, before, carries[kernels.len() - 1]);
+    // The cursor gives a kernel each block of the input at its offset.
+    for (index, start) in (0..input.len()).step_by(64).enumerate() {
+        let reference = classify(kernels[kernels.len() - 1], input, start, carries[kernels.len() - 1]);
         for (&kernel, carry) in kernels.iter().zip(&mut carries) {
-            let block = classify(kernel, bytes, before, *carry);
+            let block = classify(kernel, input, start, *carry);
             assert_eq!(block, reference, "{kernel:?}, block {index} of {input:x?}");
             *carry = block.carry;
         }
