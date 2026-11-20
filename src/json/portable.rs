@@ -12,14 +12,13 @@ const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
 /// The block of the first 64 bytes of `bytes`, with spaces after them when `bytes` has fewer, after
 /// the 4 bytes `before` in little-endian order and after `carry`.
 #[inline(always)]
-pub(super) fn block(bytes: &[u8], before: u32, mut carry: Carry) -> Block {
+pub(super) fn block(bytes: &[u8], before: u32, carry: Carry) -> Block {
     let words = bytes.first_chunk::<64>().map_or_else(
         || block::tail(bytes),
         |bytes| core::array::from_fn(|index| u64::from_le_bytes(bytes.as_chunks::<8>().0[index])),
     );
     let classes = classify(words, before);
-    let escapes = escapes(classes.backslash, &mut carry);
-    classes.block(escapes, carry, block::prefix_xor)
+    classes.block(escapes(classes.backslash, carry.escaped()), carry, block::prefix_xor)
 }
 
 /// The classes of the little-endian `words`.
@@ -77,21 +76,17 @@ fn utf8_error(words: [u64; 8], before: u32) -> bool {
     error
 }
 
-/// The escapes of `backslash`, by a walk from its lowest `\`. A `\` that is not escaped starts an
-/// escape, and it escapes the next byte.
+/// The escapes of `backslash`, after a first byte that is escaped if `escaped` is 1, by a walk from
+/// its lowest `\`. A `\` that is not escaped starts an escape, and it escapes the next byte.
 #[inline]
-fn escapes(backslash: u64, carry: &mut Carry) -> Escapes {
-    let mut escapes = Escapes {
-        escaped: carry.escaped,
-        starts: 0,
-    };
-    let mut rest = backslash & !carry.escaped;
+fn escapes(backslash: u64, escaped: u64) -> Escapes {
+    let mut escapes = Escapes { escaped, starts: 0 };
+    let mut rest = backslash & !escaped;
     while rest != 0 {
         let start = rest.isolate_lowest_one();
         escapes.starts |= start;
         escapes.escaped |= start << 1;
         rest &= !(start | start << 1);
     }
-    carry.escaped = escapes.starts >> 63;
     escapes
 }

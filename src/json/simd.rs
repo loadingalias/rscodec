@@ -6,24 +6,25 @@ use super::block::{Block, Carry, Classes, Escapes};
 /// The block of `classes` after `carry`, with the escapes of [`escapes`]. `prefix_xor` gives the
 /// XOR of bits `0..=i` of its argument in each bit `i`.
 #[inline(always)]
-pub(super) fn scan(classes: Classes, mut carry: Carry, prefix_xor: impl Fn(u64) -> u64) -> Block {
-    let escapes = escapes(classes.backslash, &mut carry);
-    classes.block(escapes, carry, prefix_xor)
+pub(super) fn scan(classes: Classes, carry: Carry, prefix_xor: impl Fn(u64) -> u64) -> Block {
+    classes.block(escapes(classes.backslash, carry.escaped()), carry, prefix_xor)
 }
 
-/// The escapes of the `\` bytes in `backslash`, by the subtraction of simdjson
-/// (`json_escape_scanner`). The subtraction finds the parity of each run of `\` bytes with no loop.
+/// The escapes of the `\` bytes in `backslash`, after a first byte that is escaped if `escaped`
+/// is 1, by the subtraction of simdjson (`json_escape_scanner`). The subtraction finds the parity
+/// of each run of `\` bytes with no loop.
 #[inline(always)]
-pub(super) fn escapes(backslash: u64, carry: &mut Carry) -> Escapes {
+pub(super) fn escapes(backslash: u64, escaped: u64) -> Escapes {
     const ODD: u64 = 0xaaaa_aaaa_aaaa_aaaa;
-    let potential = backslash & !carry.escaped;
+    let potential = backslash & !escaped;
     // A 1 at each escaped byte and at each `\` at the start of an escape, and a 0 at the other
     // bytes.
     let code = ((potential << 1 | ODD).wrapping_sub(potential)) ^ ODD;
     let starts = code & backslash;
-    let escaped = code ^ (backslash | carry.escaped);
-    carry.escaped = starts >> 63;
-    Escapes { escaped, starts }
+    Escapes {
+        escaped: code ^ (backslash | escaped),
+        starts,
+    }
 }
 
 /// The byte of each whitespace character at the index of its low nibble, and at each other index a

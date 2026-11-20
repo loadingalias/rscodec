@@ -8,7 +8,7 @@ use std::{format, fs, path::Path, vec, vec::Vec};
 
 use super::{
     Backend, Kernel,
-    block::{Block, Carry, Classes},
+    block::{Block, Carry},
     cursor::{Cursor, InvalidUtf8},
 };
 
@@ -242,7 +242,7 @@ fn each_short_input_gives_the_utf8_error_of_std() {
         let expected = core::str::from_utf8(input).is_err();
         for &kernel in &kernels {
             let block = classify(kernel, input, 0, Carry::default());
-            assert_eq!(block.classes.utf8_error, expected, "{kernel:?} {input:x?}");
+            assert_eq!(block.carry.utf8_error(), expected, "{kernel:?} {input:x?}");
         }
     };
     for len in 1..=3 {
@@ -322,37 +322,28 @@ fn the_last_block_of_each_length_gives_the_tokens_of_the_scan() {
     }
 }
 
-/// Each byte value in each lane of a block classifies as RFC 8259 defines it.
+/// Each byte value in each lane gives the tokens of its class in RFC 8259: outside a string,
+/// between bytes of a scalar, and in a string. Outside a string, a structural byte, whitespace,
+/// and a byte of a scalar each give other tokens. In a string, only a quote, a `\\`, and a byte
+/// under 0x20 give a token.
 #[test]
-fn each_byte_in_each_lane_has_its_class() {
+fn each_byte_in_each_lane_gives_the_tokens_of_its_class() {
     let kernels = kernels();
-    for offset in 0..64 {
-        let input: Vec<u8> = (0..=u8::MAX).map(|byte| byte.wrapping_add(offset)).collect();
-        for &kernel in &kernels {
-            let mut carry = Carry::default();
-            for (bytes, before) in blocks(&input) {
-                let mut expected = Classes::default();
-                for (lane, &byte) in bytes[..64].iter().enumerate() {
-                    let bit = |class: bool| u64::from(class) << lane;
-                    expected.structural |= bit(b"{}[]:,".contains(&byte));
-                    expected.whitespace |= bit(b" \t\n\r".contains(&byte));
-                    expected.quote |= bit(byte == b'"');
-                    expected.backslash |= bit(byte == b'\\');
-                    expected.control |= bit(byte < 0x20);
+    for lane in 0..64 {
+        for byte in 0..=u8::MAX {
+            let mut outside = vec![b'x'; 64];
+            outside[lane] = byte;
+            // The quote opens a string, and the byte is in lane `lane + 1`, or in lane 0 of the
+            // second block.
+            let mut inside = [&b"\""[..], &[b'x'; 64]].concat();
+            inside[lane + 1] = byte;
+            for input in [outside, inside] {
+                check_blocks(&input, &kernels);
+                let tokens = scan(&input);
+                for &kernel in &kernels {
+                    check_cursor(&input, &tokens, kernel);
                 }
-                let block = classify(kernel, bytes, before, carry);
-                carry = block.carry;
-                let classes = block.classes;
-                assert_eq!(
-                    Classes {
-                        utf8_error: false,
-                        ..classes
-                    },
-                    expected,
-                    "{kernel:?}, offset {offset}"
-                );
             }
-            check_cursor(&input, &scan(&input), kernel);
         }
     }
 }

@@ -123,7 +123,7 @@ impl<'a> Cursor<'a> {
         self.start = start;
         self.next = start + 64;
         self.tokens = block.tokens;
-        if block.classes.utf8_error {
+        if block.carry.utf8_error() {
             let invalid = invalid(self.input, start);
             self.invalid = Some(invalid);
             // The tokens before the error. The error is in this block or in the 3 bytes before it,

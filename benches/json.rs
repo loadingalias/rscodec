@@ -6,8 +6,9 @@
 //! must give that tree, each decode must give the struct of serde_json, and serde_json must read the
 //! text of each write back into the tree. Each printed f64 must parse back to its bits.
 //!
-//! rscodec has no tree: its read row walks each token, and it decodes each string with an escape
-//! into a buffer of the row. Its check builds the serde_json tree from the tokens.
+//! rscodec has no tree: its read row walks each token, decodes each string with an escape into a
+//! buffer of the row, and reads each number as the tree of serde_json holds it. Its check builds
+//! the serde_json tree from the tokens and those numbers.
 //!
 //! Each document is a copy at a 64-byte boundary, and each row of a cell reads the same copies, so
 //! the rows differ only in their code (the same-run rule). simd-json reads in place, so its rows
@@ -238,13 +239,17 @@ fn read(criterion: &mut Criterion) {
     }
 }
 
-/// Reads each token of the document, and decodes each string with an escape into `buf`.
+/// Reads each token of the document, decodes each string with an escape into `buf`, and reads each
+/// number, as each tree of the other rows does.
 #[inline(always)]
 fn walk(reader: &mut json::Reader<'_, '_>, buf: &mut [u8]) -> Result<(), json::Error> {
     while let Some(token) = reader.token()? {
         match token {
             Token::Key(text) | Token::Str(text) => {
                 black_box(text.decode(buf)?);
+            }
+            Token::Number(value) => {
+                black_box(number(value)?);
             }
             token => {
                 black_box(token);
@@ -254,7 +259,30 @@ fn walk(reader: &mut json::Reader<'_, '_>, buf: &mut [u8]) -> Result<(), json::E
     Ok(())
 }
 
-/// The serde_json tree of the tokens of rscodec. A number is the serde_json value of its text.
+/// A number as the tree of serde_json holds it.
+#[derive(Clone, Copy, Debug)]
+enum Scalar {
+    Unsigned(u64),
+    Signed(i64),
+    Float(f64),
+}
+
+/// The value of `number` as the tree of serde_json holds it: `u64` for an integer that is not
+/// negative, `i64` for a negative integer, and `f64` for `-0` and each other number.
+#[inline(always)]
+fn number(number: json::Number<'_>) -> Result<Scalar, json::Error> {
+    let integer = if number.as_str().starts_with('-') {
+        number.to_i64().ok().filter(|&value| value != 0).map(Scalar::Signed)
+    } else {
+        number.to_u64().ok().map(Scalar::Unsigned)
+    };
+    match integer {
+        Some(integer) => Ok(integer),
+        None => number.to_f64().map(Scalar::Float),
+    }
+}
+
+/// The serde_json tree of the tokens of rscodec, with each number of [`number`].
 fn rscodec_tree(doc: &[u8], scratch: &mut [Slot], buf: &mut [u8]) -> Value {
     json::read(doc, &LIMITS, Profile::Rfc8259, scratch, |reader| {
         let mut open: Vec<(Value, Option<String>)> = Vec::new();
@@ -279,7 +307,11 @@ fn rscodec_tree(doc: &[u8], scratch: &mut [Slot], buf: &mut [u8]) -> Value {
                     value
                 }
                 Token::Str(text) => Value::String(text.decode(buf)?.to_owned()),
-                Token::Number(number) => serde_json::from_str(number.as_str()).expect("a number of JSON"),
+                Token::Number(value) => match number(value)? {
+                    Scalar::Unsigned(value) => Value::from(value),
+                    Scalar::Signed(value) => Value::from(value),
+                    Scalar::Float(value) => Value::from(value),
+                },
                 Token::Bool(value) => Value::Bool(value),
                 Token::Null => Value::Null,
             };

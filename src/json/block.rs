@@ -1,8 +1,9 @@
-//! The classes of one block of 64 bytes, which each kernel gives, the tokens of a block, and the
+//! The classes of one block of 64 bytes, the tokens and the carry that each kernel gives, and the
 //! UTF-8 check.
 
-/// The classes of the bytes of one block. Bit `i` of each mask is byte `i` of the block.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The classes of the bytes of one block, which each kernel finds on its way to the [`Block`]. Bit
+/// `i` of each mask is byte `i` of the block.
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Classes {
     /// `{`, `}`, `[`, `]`, `:`, and `,`.
     pub(super) structural: u64,
@@ -18,11 +19,11 @@ pub(super) struct Classes {
     pub(super) utf8_error: bool,
 }
 
-/// The classes of one block, its tokens, which are the positions that the cursor gives, and the
-/// carry to the next block.
+/// What a kernel gives for one block: its tokens, which are the positions that the cursor gives,
+/// and its carry. The two words fit in two registers, so a kernel that the CPU selects at run time
+/// returns them with no store to memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Block {
-    pub(super) classes: Classes,
     /// Each quote that opens or closes a string. Outside a string, each structural byte and the
     /// first byte of each scalar, which is a run of bytes that are not structural, whitespace, or a
     /// quote. In a string, each `\` that starts an escape and each byte under 0x20.
@@ -30,15 +31,45 @@ pub(super) struct Block {
     pub(super) carry: Carry,
 }
 
-/// The state that one block gives to the next.
+/// The state that one block gives to the next, and the UTF-8 check of the block, in one word. A
+/// kernel reads only the state, so the cursor passes the word to the next block as it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Carry {
+pub(super) struct Carry(u64);
+
+impl Carry {
+    /// Set if the first byte of the next block follows a `\` that starts an escape.
+    const ESCAPED: u64 = 1 << 0;
+    /// Set if the last byte of the block is in a scalar.
+    const SCALAR: u64 = 1 << 1;
+    /// Set if a byte of the block ends an error of UTF-8 ([`utf8_error_at`]).
+    const UTF8_ERROR: u64 = 1 << 2;
+    /// Set if the next block starts in a string. It is the top bit, so one arithmetic shift gives
+    /// the mask of [`Carry::in_string`].
+    const IN_STRING: u64 = 1 << 63;
+
     /// 1 if the first byte of the next block follows a `\` that starts an escape, else 0.
-    pub(super) escaped: u64,
-    /// All ones if the next block starts in a string, else 0.
-    pub(super) in_string: u64,
+    #[inline(always)]
+    pub(super) const fn escaped(self) -> u64 {
+        self.0 & Self::ESCAPED
+    }
+
     /// 1 if the last byte of the block is in a scalar, else 0.
-    pub(super) scalar: u64,
+    #[inline(always)]
+    const fn scalar(self) -> u64 {
+        (self.0 & Self::SCALAR) >> 1
+    }
+
+    /// All ones if the next block starts in a string, else 0.
+    #[inline(always)]
+    const fn in_string(self) -> u64 {
+        (self.0.cast_signed() >> 63).cast_unsigned()
+    }
+
+    /// Whether a byte of the block ends an error of UTF-8.
+    #[inline(always)]
+    pub(super) const fn utf8_error(self) -> bool {
+        self.0 & Self::UTF8_ERROR != 0
+    }
 }
 
 /// The escapes of one block.
@@ -51,24 +82,27 @@ pub(super) struct Escapes {
 }
 
 impl Classes {
-    /// The block of these classes and `escapes`, after `carry`. `prefix_xor` gives the XOR of bits
-    /// `0..=i` of its argument in each bit `i`.
+    /// The block of these classes and `escapes`, after `carry`. `escapes` starts from
+    /// [`Carry::escaped`]. `prefix_xor` gives the XOR of bits `0..=i` of its argument in each bit
+    /// `i`.
     #[inline(always)]
-    pub(super) fn block(self, escapes: Escapes, mut carry: Carry, prefix_xor: impl Fn(u64) -> u64) -> Block {
+    pub(super) fn block(self, escapes: Escapes, carry: Carry, prefix_xor: impl Fn(u64) -> u64) -> Block {
         let quote = self.quote & !escapes.escaped;
         // Bit `i` is set if an odd number of quotes are at `0..=i`: an opening quote is in its
         // string, and a closing quote is not.
-        let in_string = prefix_xor(quote) ^ carry.in_string;
-        carry.in_string = (in_string.cast_signed() >> 63).cast_unsigned();
+        let in_string = prefix_xor(quote) ^ carry.in_string();
         let inside = in_string & !quote;
         let outside = !(in_string | quote);
         let scalar = outside & !(self.structural | self.whitespace);
-        let scalar_starts = scalar & !(scalar << 1 | carry.scalar);
-        carry.scalar = scalar >> 63;
+        let scalar_starts = scalar & !(scalar << 1 | carry.scalar());
         Block {
-            classes: self,
             tokens: quote | outside & self.structural | scalar_starts | inside & (escapes.starts | self.control),
-            carry,
+            carry: Carry(
+                in_string & Carry::IN_STRING
+                    | ((scalar >> 63) * Carry::SCALAR)
+                    | ((escapes.starts >> 63) * Carry::ESCAPED)
+                    | (u64::from(self.utf8_error) * Carry::UTF8_ERROR),
+            ),
         }
     }
 }
