@@ -1,9 +1,11 @@
 # The CI gate on each push to main: `cargo xtask check`, then the tests and
-# the doctests.
+# the doctests, then the tests on wasm32-wasip1 in Wasmtime, without simd128
+# and with it.
 #
 # Each version comes from a file that `machine update all` writes:
 # rust-toolchain.toml, .config/nextest.toml, and Cargo.lock. A pin change
-# reaches CI with the next commit, and it changes the cache keys.
+# reaches CI with the next commit, and it changes the cache keys. Wasmtime is
+# the exception: its step holds the version of ~/machine/tools.txt.
 #
 # The tests use the `ci` profile of .config/nextest.toml through
 # NEXTEST_PROFILE, not a `--profile` argument: `cargo xtask test` runs the
@@ -26,6 +28,9 @@ env:
   CARGO_TERM_COLOR: always
   NEXTEST_PROFILE: ci
   RUSTUP_AUTO_INSTALL: "0"
+  # The simd128 build of the wasm32 lane. `cargo xtask test` removes RUSTFLAGS,
+  # so the flag goes through the Cargo configuration.
+  SIMD128: 'target.wasm32-wasip1.rustflags=["-C","target-feature=+simd128"]'
 
 jobs:
   check:
@@ -51,9 +56,11 @@ jobs:
           set -euo pipefail
           sum() { cat "$@" | sha256sum | cut -c1-16; }
           toolchain=$(sum rust-toolchain.toml)
+          # The steps of this file choose what the target directory holds, so
+          # a change of them saves a new entry.
           {
             echo "tooling=tooling-$RUNNER_ARCH-$(sum rust-toolchain.toml .config/nextest.toml)"
-            echo "build=build-$RUNNER_ARCH-$toolchain-$(sum Cargo.lock)"
+            echo "build=build-$RUNNER_ARCH-$toolchain-$(sum Cargo.lock .github/workflows/ci.yml)"
             echo "build-prefix=build-$RUNNER_ARCH-$toolchain-"
           } >> "$GITHUB_OUTPUT"
 
@@ -76,7 +83,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          packages=(build-essential ca-certificates curl)
+          packages=(build-essential ca-certificates curl xz-utils)
           dpkg -s "${packages[@]}" > /dev/null 2>&1 && exit 0
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends "${packages[@]}"
@@ -146,3 +153,45 @@ jobs:
       - name: cargo xtask test
         shell: bash
         run: cargo xtask test
+
+      # The runner of wasm32-wasip1 in .cargo/config.toml. The SHA-256 is the
+      # digest that GitHub publishes for the archive.
+      - name: Install Wasmtime
+        shell: bash
+        env:
+          WASMTIME_VERSION: 50.0.1
+          WASMTIME_SHA256: 685466455dd42a14774a86c36c8f2e45cbb9bd6d92a850139315df60a75498a5
+        run: |
+          set -euo pipefail
+          name="wasmtime-v$WASMTIME_VERSION-x86_64-linux"
+          curl -fsSL -o "$RUNNER_TEMP/$name.tar.xz" \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v$WASMTIME_VERSION/$name.tar.xz"
+          echo "$WASMTIME_SHA256  $RUNNER_TEMP/$name.tar.xz" | sha256sum -c
+          tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name" >> "$GITHUB_PATH"
+
+      - name: cargo xtask test on wasm32-wasip1
+        shell: bash
+        run: cargo xtask test --target wasm32-wasip1
+
+      - name: cargo xtask test on wasm32-wasip1 with simd128
+        shell: bash
+        run: cargo xtask test --target wasm32-wasip1 --config "$SIMD128"
+
+      # Wasmtime without SIMD refuses a binary that holds a SIMD instruction.
+      # Thus a test binary that it compiles holds no simd128 kernel.
+      - name: Each simd128 test binary holds the simd128 kernels
+        shell: bash
+        run: |
+          set -euo pipefail
+          binaries=$(cargo xtask test --target wasm32-wasip1 --config "$SIMD128" -p rscodec \
+            --no-run --cargo-message-format json | grep -o '"executable":"[^"]*"' | cut -d'"' -f4)
+          test -n "$binaries"
+          for binary in $binaries; do
+            if wasmtime compile -W simd=n,relaxed-simd=n -o /dev/null "$binary" 2> "$RUNNER_TEMP/refusal.txt"; then
+              echo "::error::$binary holds no simd128 kernel"
+              exit 1
+            fi
+            grep -q 'Invalid input WebAssembly code' "$RUNNER_TEMP/refusal.txt"
+            echo "$binary: refused without SIMD"
+          done
