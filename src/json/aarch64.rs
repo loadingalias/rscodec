@@ -76,21 +76,118 @@ pub(super) mod escape {
 /// The digits of the printers. Neon is in the base of each aarch64 target that has it, so the build
 /// fixes the kernel.
 #[cfg(target_feature = "neon")]
-#[expect(unsafe_code, reason = "the build has Neon")]
+#[expect(
+    unsafe_code,
+    reason = "the build has Neon, and each load and store touches only the bytes of the array that it takes"
+)]
 pub(super) mod digits {
     use core::arch::aarch64::{
-        vcreate_u32, vgetq_lane_u64, vmla_n_u32, vmlaq_n_u16, vmlaq_n_u32, vqdmulh_n_s32, vqdmulhq_n_s16,
-        vqdmulhq_n_s32, vreinterpret_s32_u32, vreinterpret_u16_u32, vreinterpret_u32_s32, vreinterpretq_s16_u16,
-        vreinterpretq_s32_u32, vreinterpretq_u8_u16, vreinterpretq_u16_s16, vreinterpretq_u16_u32,
-        vreinterpretq_u32_s32, vreinterpretq_u64_u8, vrev64q_u8, vshll_n_u16, vshr_n_u32,
+        uint8x16_t, vcreate_u32, vdupq_n_u8, vget_lane_u64, vgetq_lane_u64, vld1q_u8, vmla_n_u32, vmlaq_n_u16,
+        vmlaq_n_u32, vorrq_u8, vqdmulh_n_s32, vqdmulhq_n_s16, vqdmulhq_n_s32, vqtbl1q_u8, vreinterpret_s32_u32,
+        vreinterpret_u16_u32, vreinterpret_u32_s32, vreinterpret_u64_u8, vreinterpretq_s16_u16, vreinterpretq_s32_u32,
+        vreinterpretq_u8_u16, vreinterpretq_u16_s16, vreinterpretq_u16_u8, vreinterpretq_u16_u32,
+        vreinterpretq_u32_s32, vreinterpretq_u64_u8, vrev64q_u8, vshll_n_u16, vshr_n_u32, vshrn_n_u16, vst1q_u8,
+        vtstq_u8,
+    };
+
+    /// For each `whole` from 1 to 16, at index `whole − 1`, the bytes of the lookup of [`mantissa`]:
+    /// each digit before the point, a 0 for the point, and each other digit one place higher.
+    static POINTS: [[u8; 16]; 16] = {
+        let mut table = [[0; 16]; 16];
+        let mut whole: u8 = 1;
+        while whole <= 16 {
+            let mut at: u8 = 0;
+            while at < 16 {
+                table[whole as usize - 1][at as usize] = if at < whole {
+                    at
+                } else if at == whole {
+                    0xff
+                } else {
+                    at - 1
+                };
+                at += 1;
+            }
+            whole += 1;
+        }
+        table
     };
 
     /// [`super::super::integer::eight_digits`] of the two halves of `value`, under 10^16, high
     /// first.
     #[inline(always)]
     pub(in super::super) fn sixteen(value: u64) -> (u64, u64) {
-        // SAFETY: the build has Neon, the feature of `split`.
-        unsafe { split(value) }
+        // SAFETY: the build has Neon, the feature of `split` and of each intrinsic here.
+        unsafe {
+            let words = vreinterpretq_u64_u8(split(value));
+            (vgetq_lane_u64::<0>(words), vgetq_lane_u64::<1>(words))
+        }
+    }
+
+    /// [`super::super::float::mantissa`]. The digits stay in their register: one lookup puts the
+    /// point in, and two stores write them, so no digit goes through a general register.
+    #[inline(always)]
+    pub(in super::super) fn mantissa(digits: u64, extra: u8, whole: usize, dest: &mut [u8]) -> usize {
+        // SAFETY: the build has Neon, the feature of `text`, `load`, `store`, and `vqtbl1q_u8`.
+        let count = unsafe {
+            let (text, count) = text(digits, extra);
+            store(dest, 1, text);
+            store(dest, 0, vqtbl1q_u8(text, load(&POINTS[whole - 1])));
+            count
+        };
+        // The lookup writes 0 in the place of the point, and it cannot reach the 17th byte, which
+        // takes the point when `whole` is 16.
+        dest[whole] = b'.';
+        dest[17] = b'0' + extra;
+        count
+    }
+
+    /// [`super::super::float::plain`].
+    #[inline(always)]
+    pub(in super::super) fn plain(digits: u64, extra: u8, at: usize, dest: &mut [u8]) -> usize {
+        // SAFETY: the build has Neon, the feature of `text` and `store`.
+        let count = unsafe {
+            let (text, count) = text(digits, extra);
+            store(dest, at, text);
+            count
+        };
+        dest[at + 16] = b'0' + extra;
+        count
+    }
+
+    /// The 16 digits of `digits`, from 10^15 up and under 10^16, as text, the first in lane 0,
+    /// and their count without the zeros after the last one, or 17 when `extra` is not 0.
+    #[inline(always)]
+    #[target_feature(enable = "neon")]
+    fn text(digits: u64, extra: u8) -> (uint8x16_t, usize) {
+        let values = split(digits);
+        // Four bits for each digit that is not 0: the narrowing shift keeps the middle byte of each
+        // 16-bit lane.
+        let nonzero = vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(vreinterpretq_u16_u8(vtstq_u8(
+            values, values,
+        )))));
+        // The count with no branch, because it varies from value to value: a 17th digit sets the
+        // top bit, and without one, the bits of the first digit go and each other digit is one
+        // digit lower, which a first digit alone leaves 0.
+        let count = 17 - ((nonzero >> 4 | u64::from(extra != 0) << 63).leading_zeros() / 4) as usize;
+        (vorrq_u8(values, vdupq_n_u8(b'0')), count)
+    }
+
+    #[inline(always)]
+    #[target_feature(enable = "neon")]
+    fn load(bytes: &[u8; 16]) -> uint8x16_t {
+        // SAFETY: the load reads the 16 bytes of `bytes`, and it needs no alignment.
+        unsafe { vld1q_u8(bytes.as_ptr()) }
+    }
+
+    /// Stores `bytes` into `dest` from `at`. The offsets of the callers leave 16 bytes, so the
+    /// store always runs.
+    #[inline(always)]
+    #[target_feature(enable = "neon")]
+    fn store(dest: &mut [u8], at: usize, bytes: uint8x16_t) {
+        if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<16>) {
+            // SAFETY: the store writes the 16 bytes of `dest`, and it needs no alignment.
+            unsafe { vst1q_u8(dest.as_mut_ptr(), bytes) }
+        }
     }
 
     /// Each step splits each lane into its quotient and its remainder by a power of 10, the
@@ -98,10 +195,10 @@ pub(super) mod digits {
     /// each quotient: `x / 10^4` is `(2x × 109_951_163) >> 41` for `x < 10^8`, `x / 100` is
     /// `(2x × 21_474_837) >> 32` for `x < 10^4`, and `x / 10` is `(2x × 3_277) >> 16` for
     /// `x < 100`. Thus each half has its digits from the last, and a reverse of each half gives them
-    /// from the first.
+    /// from the first: the digit values of `value`, under 10^16, the first in lane 0.
     #[inline(always)]
     #[target_feature(enable = "neon")]
-    fn split(value: u64) -> (u64, u64) {
+    fn split(value: u64) -> uint8x16_t {
         let (high, low) = (value / 100_000_000, value % 100_000_000);
         let halves = vcreate_u32(low << 32 | high);
         let fourths = vshr_n_u32::<9>(vreinterpret_u32_s32(vqdmulh_n_s32(
@@ -113,9 +210,7 @@ pub(super) mod digits {
         let pairs = vreinterpretq_u32_s32(vqdmulhq_n_s32(vreinterpretq_s32_u32(fourths), 21_474_837));
         let pairs = vreinterpretq_u16_u32(vmlaq_n_u32(fourths, pairs, (1 << 16) - 100));
         let tens = vreinterpretq_u16_s16(vqdmulhq_n_s16(vreinterpretq_s16_u16(pairs), 3_277));
-        let digits = vrev64q_u8(vreinterpretq_u8_u16(vmlaq_n_u16(pairs, tens, (1 << 8) - 10)));
-        let words = vreinterpretq_u64_u8(digits);
-        (vgetq_lane_u64::<0>(words), vgetq_lane_u64::<1>(words))
+        vrev64q_u8(vreinterpretq_u8_u16(vmlaq_n_u16(pairs, tens, (1 << 8) - 10)))
     }
 }
 

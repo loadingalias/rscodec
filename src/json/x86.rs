@@ -218,29 +218,113 @@ pub(super) mod escape {
 }
 
 /// The digits of the printers, with SSE2, which each x86_64 CPU has, so the build fixes the kernel.
-#[expect(unsafe_code, reason = "each x86_64 CPU has SSE2")]
+#[expect(
+    unsafe_code,
+    reason = "each x86_64 CPU has SSE2, and each store writes only the bytes of the array that it takes"
+)]
 pub(super) mod digits {
     use core::arch::x86_64::{
-        _mm_add_epi64, _mm_cvtsi128_si64, _mm_mul_epu32, _mm_mulhi_epu16, _mm_mullo_epi16, _mm_or_si128,
-        _mm_set_epi64x, _mm_set1_epi16, _mm_set1_epi64x, _mm_shuffle_epi32, _mm_slli_epi16, _mm_slli_epi32,
-        _mm_srli_epi16, _mm_srli_epi64, _mm_sub_epi16, _mm_unpackhi_epi64,
+        __m128i, _mm_add_epi64, _mm_cmpgt_epi8, _mm_cvtsi128_si64, _mm_movemask_epi8, _mm_mul_epu32, _mm_mulhi_epu16,
+        _mm_mullo_epi16, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi64x,
+        _mm_setzero_si128, _mm_shuffle_epi32, _mm_slli_epi16, _mm_slli_epi32, _mm_srli_epi16, _mm_srli_epi64,
+        _mm_storeu_si128, _mm_sub_epi16, _mm_unpackhi_epi64,
     };
+
+    use super::super::float::insert;
 
     /// [`super::super::integer::eight_digits`] of the two halves of `value`, under 10^16, high
     /// first.
     #[inline(always)]
     pub(in super::super) fn sixteen(value: u64) -> (u64, u64) {
-        // SAFETY: each x86_64 CPU has SSE2, the feature of `split`.
-        unsafe { split(value) }
+        // SAFETY: each x86_64 CPU has SSE2, the feature of `split` and `words`.
+        unsafe { words(split(value)) }
+    }
+
+    /// [`super::super::float::mantissa`]. The digits go to `dest` from their register with one
+    /// store, one place after their own, and the word with the point goes over them from a
+    /// general register.
+    #[inline(always)]
+    pub(in super::super) fn mantissa(digits: u64, extra: u8, whole: usize, dest: &mut [u8]) -> usize {
+        // SAFETY: each x86_64 CPU has SSE2, the feature of `text`, `store`, and `words`.
+        let (text, count) = unsafe { text(digits, extra) };
+        // SAFETY: as above.
+        unsafe { store(dest, 1, text) };
+        match whole {
+            1..8 => {
+                // SAFETY: as above.
+                let (first, _) = unsafe { words(text) };
+                dest[..8].copy_from_slice(&insert(first, whole, b'.').0.to_le_bytes());
+            }
+            8..16 => {
+                // SAFETY: as above.
+                let (first, second) = unsafe { words(text) };
+                dest[..8].copy_from_slice(&first.to_le_bytes());
+                dest[8..16].copy_from_slice(&insert(second, whole - 8, b'.').0.to_le_bytes());
+            }
+            _ => {
+                // SAFETY: as above.
+                unsafe { store(dest, 0, text) };
+                dest[16] = b'.';
+            }
+        }
+        dest[17] = b'0' + extra;
+        count
+    }
+
+    /// [`super::super::float::plain`].
+    #[inline(always)]
+    pub(in super::super) fn plain(digits: u64, extra: u8, at: usize, dest: &mut [u8]) -> usize {
+        // SAFETY: each x86_64 CPU has SSE2, the feature of `text` and `store`.
+        let (text, count) = unsafe { text(digits, extra) };
+        // SAFETY: as above.
+        unsafe { store(dest, at, text) };
+        dest[at + 16] = b'0' + extra;
+        count
+    }
+
+    /// The 16 digits of `digits`, from 10^15 up and under 10^16, as text, the first in byte 0,
+    /// and their count without the zeros after the last one, or 17 when `extra` is not 0.
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    fn text(digits: u64, extra: u8) -> (__m128i, usize) {
+        let values = split(digits);
+        // One bit for each digit that is not 0. The first digit is not 0, so the mask is not 0.
+        let nonzero = _mm_movemask_epi8(_mm_cmpgt_epi8(values, _mm_setzero_si128())).cast_unsigned();
+        // The count with no branch, because it varies from value to value: a 17th digit sets bit
+        // 16.
+        let count = 32 - (nonzero | u32::from(extra != 0) << 16).leading_zeros() as usize;
+        (_mm_or_si128(values, _mm_set1_epi8(b'0'.cast_signed())), count)
+    }
+
+    /// The low and the high 8 bytes of `bytes`.
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    fn words(bytes: __m128i) -> (u64, u64) {
+        (
+            _mm_cvtsi128_si64(bytes).cast_unsigned(),
+            _mm_cvtsi128_si64(_mm_unpackhi_epi64(bytes, bytes)).cast_unsigned(),
+        )
+    }
+
+    /// Stores `bytes` into `dest` from `at`. The offsets of the callers leave 16 bytes, so the
+    /// store always runs.
+    #[inline(always)]
+    #[target_feature(enable = "sse2")]
+    fn store(dest: &mut [u8], at: usize, bytes: __m128i) {
+        if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<16>) {
+            // SAFETY: the store writes the 16 bytes of `dest`, and it needs no alignment.
+            unsafe { _mm_storeu_si128(dest.as_mut_ptr().cast(), bytes) }
+        }
     }
 
     /// Each step splits each lane into its quotient and its remainder by a power of 10, the
     /// quotient in the low half of the lane. A multiply that keeps the high bits gives each
     /// quotient: `x / 10^4` is `(x × 109_951_163) >> 40` for `x < 10^8`, `x / 100` is
-    /// `(x × 5_243) >> 19` for `x < 10^4`, and `x / 10` is `(x × 6_554) >> 16` for `x < 100`.
+    /// `(x × 5_243) >> 19` for `x < 10^4`, and `x / 10` is `(x × 6_554) >> 16` for `x < 100`:
+    /// the digit values of `value`, under 10^16, the first in byte 0.
     #[inline(always)]
     #[target_feature(enable = "sse2")]
-    fn split(value: u64) -> (u64, u64) {
+    fn split(value: u64) -> __m128i {
         let (high, low) = (value / 100_000_000, value % 100_000_000);
         let halves = _mm_set_epi64x(low.cast_signed(), high.cast_signed());
         let quotients = _mm_srli_epi64::<40>(_mm_mul_epu32(halves, _mm_set1_epi64x(109_951_163)));
@@ -254,11 +338,7 @@ pub(super) mod digits {
         let pairs = _mm_or_si128(hundreds, _mm_slli_epi32::<16>(remainders));
         // `t | (x − 10t) << 8` is `(x << 8) − t × (10 × 2^8 − 1)` for the tens `t` of `x`.
         let tens = _mm_mulhi_epu16(pairs, _mm_set1_epi16(6_554));
-        let digits = _mm_sub_epi16(_mm_slli_epi16::<8>(pairs), _mm_mullo_epi16(tens, _mm_set1_epi16(2_559)));
-        (
-            _mm_cvtsi128_si64(digits).cast_unsigned(),
-            _mm_cvtsi128_si64(_mm_unpackhi_epi64(digits, digits)).cast_unsigned(),
-        )
+        _mm_sub_epi16(_mm_slli_epi16::<8>(pairs), _mm_mullo_epi16(tens, _mm_set1_epi16(2_559)))
     }
 }
 

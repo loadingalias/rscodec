@@ -23,8 +23,6 @@ use core::cmp::Ordering;
 #[cfg(test)]
 mod tests;
 
-use super::integer::sixteen_digits;
-
 /// The most bytes of the form of an `f64`: `-2.2250738585072014e-308`.
 pub(super) const BYTES_MAX: usize = 24;
 
@@ -470,12 +468,8 @@ const fn high_128(value: &[u64; TABLE_LIMBS]) -> ((u64, u64), bool) {
 /// and otherwise in exponent form. The bounds are on the value, and a value is under such a bound
 /// exactly when its shortest form is, because the bound is in the rounding interval of the nearest
 /// float to it and not in another one.
-///
-/// The digits stay in three 64-bit words, and each word goes to `dest` with one store, so no load
-/// reads a stored byte back.
 #[inline(always)]
 fn layout(decimal: Decimal, dest: &mut [u8; SPAN - 1]) -> usize {
-    const ZEROS: u64 = u64::from_ne_bytes([b'0'; 8]);
     let Decimal {
         digits,
         extra,
@@ -494,19 +488,52 @@ fn layout(decimal: Decimal, dest: &mut [u8; SPAN - 1]) -> usize {
     if digits < POWERS[15] {
         (digits, extra, point) = widen(digits, point);
     }
-    let (high, low) = sixteen_digits(digits);
-    // The digits without the zeros after the last one. The 17th digit is not 0.
-    let zeros = if low != 0 {
-        low.leading_zeros() / 8
-    } else {
-        8 + high.leading_zeros() / 8
-    };
-    let count = if extra != 0 { 17 } else { 16 - zeros as usize };
-    let (high, low, extra) = (high | ZEROS, low | ZEROS, u64::from(b'0' + extra));
     match point {
         0..16 => {
             // `point + 1` digits, a point, and the rest of the digits or one zero.
             let whole = point.cast_unsigned() as usize + 1;
+            let count = mantissa(digits, extra, whole, dest);
+            // `count + 1` when a digit is after the point, else `whole + 2`, with no branch.
+            (count + 1).max(whole + 2)
+        }
+        -4..0 => {
+            // `0.`, `−point − 1` zeros, and the digits.
+            let at = point.unsigned_abs() as usize + 1;
+            dest[..8].copy_from_slice(b"0.000000");
+            at + plain(digits, extra, at, dest)
+        }
+        _ => {
+            // The first digit, a point, the other digits, and the exponent. The point stays only
+            // before other digits.
+            let count = mantissa(digits, extra, 1, dest);
+            let at = count + usize::from(count > 1);
+            let exponent = EXPONENTS[(point + EXPONENT_BIAS).cast_unsigned() as usize];
+            dest[at..at + 8].copy_from_slice(&exponent.to_le_bytes());
+            at + (exponent >> 56) as usize
+        }
+    }
+}
+
+// The text of the digits. `mantissa` writes the 16 digits of `digits`, from 10^15 up and under
+// 10^16, and `extra`, the 17th digit or 0, from the start of `dest`, with a point after the first
+// `whole` digits, from 1 to 16. `plain` writes them from `at`, at most 5, with no point. Each gives
+// the count of the digits without the zeros after the last one, or 17 when `extra` is not 0. The
+// bytes after the 17th digit are unspecified.
+cfg_select! {
+    all(target_arch = "aarch64", target_feature = "neon") => {
+        use super::aarch64::digits::{mantissa, plain};
+    }
+    target_arch = "x86_64" => {
+        use super::x86::digits::{mantissa, plain};
+    }
+    _ => {
+        use core::hint::select_unpredictable;
+
+        use super::integer::sixteen_digits;
+
+        #[inline(always)]
+        fn mantissa(digits: u64, extra: u8, whole: usize, dest: &mut [u8]) -> usize {
+            let (high, low, extra, count) = words(digits, extra);
             let words = match whole {
                 1..8 => {
                     let (first, spill) = insert(high, whole, b'.');
@@ -519,24 +546,42 @@ fn layout(decimal: Decimal, dest: &mut [u8; SPAN - 1]) -> usize {
                 _ => [high, low, u64::from(b'.') | extra << 8],
             };
             store(dest, 0, words);
-            if count > whole { count + 1 } else { whole + 2 }
+            count
         }
-        -4..0 => {
-            // `0.`, `−point − 1` zeros, and the digits.
-            let zeros = point.unsigned_abs() as usize - 1;
-            dest[..8].copy_from_slice(b"0.000000");
-            store(dest, 2 + zeros, [high, low, extra]);
-            2 + zeros + count
+
+        #[inline(always)]
+        fn plain(digits: u64, extra: u8, at: usize, dest: &mut [u8]) -> usize {
+            let (high, low, extra, count) = words(digits, extra);
+            store(dest, at, [high, low, extra]);
+            count
         }
-        _ => {
-            // The first digit, a point, the other digits, and the exponent. The point stays only
-            // before other digits.
-            let (first, spill) = insert(high, 1, b'.');
-            store(dest, 0, [first, spill | low << 8, low >> 56 | extra << 8]);
-            let at = if count > 1 { count + 1 } else { 1 };
-            let exponent = EXPONENTS[(point + EXPONENT_BIAS).cast_unsigned() as usize];
-            dest[at..at + 8].copy_from_slice(&exponent.to_le_bytes());
-            at + (exponent >> 56) as usize
+
+        /// The text of the 16 digits in two words, of the 17th digit, and their count. The
+        /// digits stay in words, and each word goes to `dest` with one store, so no load reads a
+        /// stored byte back.
+        #[inline(always)]
+        fn words(digits: u64, extra: u8) -> (u64, u64, u64, usize) {
+            const ZEROS: u64 = u64::from_ne_bytes([b'0'; 8]);
+            let (high, low) = sixteen_digits(digits);
+            let zeros = if low != 0 {
+                low.leading_zeros() / 8
+            } else {
+                8 + high.leading_zeros() / 8
+            };
+            // A select, not a branch: the count of digits varies from value to value.
+            let count = select_unpredictable(extra != 0, 17, 16 - zeros as usize);
+            (high | ZEROS, low | ZEROS, u64::from(b'0' + extra), count)
+        }
+
+        /// Stores the three little-endian `words` into `dest` from `at`.
+        #[inline(always)]
+        fn store(dest: &mut [u8], at: usize, words: [u64; 3]) {
+            if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<24>) {
+                let (chunks, _) = dest.as_chunks_mut::<8>();
+                for (chunk, word) in chunks.iter_mut().zip(words) {
+                    *chunk = word.to_le_bytes();
+                }
+            }
         }
     }
 }
@@ -553,21 +598,11 @@ fn widen(digits: u64, point: i32) -> (u64, u8, i32) {
     )
 }
 
-/// Stores the three little-endian `words` into `dest` from `at`.
-#[inline(always)]
-fn store(dest: &mut [u8], at: usize, words: [u64; 3]) {
-    if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<24>) {
-        let (chunks, _) = dest.as_chunks_mut::<8>();
-        for (chunk, word) in chunks.iter_mut().zip(words) {
-            *chunk = word.to_le_bytes();
-        }
-    }
-}
-
 /// `word` with `byte` at index `at`, under 8, and the bytes from `at` one place higher, and the
 /// byte that leaves the word at the top.
+#[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
 #[inline(always)]
-const fn insert(word: u64, at: usize, byte: u8) -> (u64, u64) {
+pub(super) const fn insert(word: u64, at: usize, byte: u8) -> (u64, u64) {
     let below = (1 << (8 * at)) - 1;
     (
         word & below | (byte as u64) << (8 * at) | (word & !below) << 8,
