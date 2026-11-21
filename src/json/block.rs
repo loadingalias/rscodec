@@ -70,6 +70,13 @@ impl Carry {
     pub(super) const fn utf8_error(self) -> bool {
         self.0 & Self::UTF8_ERROR != 0
     }
+
+    /// Whether the next block starts in a string, after no `\` that starts an escape.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    pub(super) const fn in_plain_string(self) -> bool {
+        self.0 == Self::IN_STRING
+    }
 }
 
 /// The escapes of one block.

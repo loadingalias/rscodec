@@ -61,6 +61,19 @@ pub(super) fn avx512(input: &[u8], start: usize, carry: Carry) -> Block {
     let table = |table: &[u8; 16]| _mm512_broadcast_i32x4(load::table(table));
     let set = |byte: u8| _mm512_set1_epi8(byte.cast_signed());
     let control = _mm512_cmplt_epu8_mask(input, set(0x20));
+    let (quote, backslash) = (
+        _mm512_cmpeq_epi8_mask(input, set(b'"')),
+        _mm512_cmpeq_epi8_mask(input, set(b'\\')),
+    );
+    // A block in a string with no quote, `\`, byte under 0x20, or byte of 0x80 or more stays in the
+    // string and has no token, as the full scan gives. Its UTF-8 is valid if no sequence before it
+    // needs more bytes. A long string, as in a JWKS, is mostly such blocks.
+    if carry.in_plain_string()
+        && control | quote | backslash | _mm512_movepi8_mask(input) == 0
+        && !block::ends_incomplete(before)
+    {
+        return Block { tokens: 0, carry };
+    }
     let curly = _mm512_cmpeq_epi8_mask(
         _mm512_shuffle_epi8(table(&simd::STRUCTURAL), input),
         _mm512_or_si512(input, set(0x20)),
@@ -68,8 +81,8 @@ pub(super) fn avx512(input: &[u8], start: usize, carry: Carry) -> Block {
     let classes = Classes {
         structural: curly & !control,
         whitespace: _mm512_cmpeq_epi8_mask(_mm512_shuffle_epi8(table(&simd::WHITESPACE), input), input),
-        quote: _mm512_cmpeq_epi8_mask(input, set(b'"')),
-        backslash: _mm512_cmpeq_epi8_mask(input, set(b'\\')),
+        quote,
+        backslash,
         control,
         utf8_error: utf8_error_avx512(input, before),
     };

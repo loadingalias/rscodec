@@ -745,6 +745,22 @@ fn a_duplicate_in_a_skipped_object_refuses_before_the_end_of_the_object() {
     }
 }
 
+/// After a nested container ends, the frame of its object comes back with the filter of its keys:
+/// a key after the container that equals a key before it refuses.
+#[test]
+fn a_duplicate_after_a_nested_container_refuses() {
+    for document in [r#"{"a":{"b":1},"a":2}"#, r#"{"a":[1,{"a":1}],"a":2}"#] {
+        let at = document.rfind(r#""a""#).unwrap();
+        for profile in PROFILES {
+            assert_eq!(
+                check(document.as_bytes(), &WIDE, profile, 16),
+                error(ErrorKind::Duplicate, at),
+                "{document}"
+            );
+        }
+    }
+}
+
 /// Errors come in the order of their offsets, also when an object of more than 16 members checks
 /// a later key only when it ends: an error after a duplicate key, in the object or in an object in
 /// it, or the end of the input, gives the duplicate.
