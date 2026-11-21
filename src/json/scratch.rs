@@ -149,11 +149,13 @@ impl Key {
     }
 
     /// The bit of the key in the filter of [`Frame::keys`]: one of bits 2 to 63, from its
-    /// fingerprint. Equal keys have the same bit.
+    /// fingerprint. Equal keys have the same bit. A multiply by an odd constant moves each bit of
+    /// the fingerprint into the high bits, and the high word of a product with 62 maps them to
+    /// `0..62`, with no division.
     #[inline(always)]
     pub(super) const fn bit(self) -> u64 {
-        let mixed = self.0.fingerprint ^ self.0.fingerprint >> 32;
-        1 << (2 + (mixed ^ mixed >> 11) % 62)
+        let mixed = self.0.fingerprint.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        1 << (2 + ((mixed as u128 * 62) >> 64) as u64)
     }
 
     /// Whether a key of `keys` equals this key after unescape. The loop compares the fingerprints

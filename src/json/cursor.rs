@@ -32,13 +32,17 @@ pub(super) struct Cursor<'a> {
     carry: Carry,
     /// The tokens of the current block that the cursor did not give.
     tokens: u64,
-    /// The offset of the current block.
+    /// The offset of the current block. Before the first block it is 64 under 0, in wrapping
+    /// arithmetic, so the next block is always at `start + 64`.
     start: usize,
-    /// The offset of the next block.
-    next: usize,
-    /// The first byte that is not UTF-8, after the cursor found it.
-    invalid: Option<InvalidUtf8>,
+    /// The offset of the first byte that is not UTF-8, after the cursor found it, else
+    /// [`NO_ERROR`]. A word and not an `Option`, so the cursor takes one register less.
+    invalid: usize,
 }
+
+/// [`Cursor::invalid`] before the cursor finds a byte that is not UTF-8. No offset of an input is
+/// `usize::MAX`.
+const NO_ERROR: usize = usize::MAX;
 
 impl<'a> Cursor<'a> {
     /// The cursor at the start of `input`, on the kernel of `backend`.
@@ -49,9 +53,8 @@ impl<'a> Cursor<'a> {
             classify: backend.0.function(),
             carry: Carry::default(),
             tokens: 0,
-            start: 0,
-            next: 0,
-            invalid: None,
+            start: 0_usize.wrapping_sub(64),
+            invalid: NO_ERROR,
         }
     }
 
@@ -103,16 +106,16 @@ impl<'a> Cursor<'a> {
         reason = "the function of the kernel of a `Backend` runs on each CPU that has the backend"
     )]
     fn advance(&mut self) -> Result<bool, InvalidUtf8> {
-        if let Some(invalid) = self.invalid {
-            return Err(invalid);
+        if self.invalid != NO_ERROR {
+            return Err(InvalidUtf8 { offset: self.invalid });
         }
-        let start = self.next;
+        let start = self.start.wrapping_add(64);
         if start >= self.input.len() {
             // The spaces after a short last block end each sequence, so only an input of whole
             // blocks can end in a sequence that needs more bytes.
             if block::ends_incomplete(block::before(self.input, self.input.len())) {
                 let invalid = invalid(self.input, self.input.len());
-                self.invalid = Some(invalid);
+                self.invalid = invalid.offset;
                 return Err(invalid);
             }
             return Ok(false);
@@ -122,11 +125,10 @@ impl<'a> Cursor<'a> {
         let block = unsafe { (self.classify)(self.input, start, self.carry) };
         self.carry = block.carry;
         self.start = start;
-        self.next = start + 64;
         self.tokens = block.tokens;
         if block.carry.utf8_error() {
             let invalid = invalid(self.input, start);
-            self.invalid = Some(invalid);
+            self.invalid = invalid.offset;
             // The tokens before the error. The error is in this block or in the 3 bytes before it,
             // so the count is under 64.
             let valid = u32::try_from(invalid.offset.saturating_sub(start)).unwrap_or(u32::MAX);

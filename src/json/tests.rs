@@ -250,23 +250,35 @@ fn each_short_input_gives_the_utf8_error_of_std() {
 
 /// Each invalid sequence at each place in a run of structural bytes, so that tokens come before
 /// and after the first invalid byte in its block and in the next block. The cursor gives each token
-/// before that byte, then its error, so the first error by offset comes first.
+/// before that byte, then its error, so the first error by offset comes first. Each sequence also
+/// comes at each place in a string of 256 bytes, so that the cursor must find the error in a block
+/// that has no token.
 #[test]
 fn the_cursor_gives_the_tokens_before_the_first_invalid_byte_then_its_error() {
     // A continuation byte, a byte that no UTF-8 has, an overlong form, a sequence that ends too
     // soon, and a surrogate.
     const SEQUENCES: [&[u8]; 5] = [&[0x80], &[0xff], &[0xc0, 0x80], &[0xe2, 0x82], &[0xed, 0xa0, 0x80]];
     let kernels = kernels();
+    let check = |input: &[u8]| {
+        check_blocks(input, &kernels);
+        let tokens = scan(input);
+        for &kernel in &kernels {
+            check_cursor(input, &tokens, kernel);
+        }
+    };
     for sequence in SEQUENCES {
         for at in 1..128 {
             let mut input = vec![b','; 132];
             input[0] = b'[';
             input[at..at + sequence.len()].copy_from_slice(sequence);
-            check_blocks(&input, &kernels);
-            let tokens = scan(&input);
-            for &kernel in &kernels {
-                check_cursor(&input, &tokens, kernel);
-            }
+            check(&input);
+        }
+        for at in 2..255 {
+            let mut input = vec![b'a'; 260];
+            input[..2].copy_from_slice(b"[\"");
+            input[258..].copy_from_slice(b"\"]");
+            input[at..at + sequence.len()].copy_from_slice(sequence);
+            check(&input);
         }
     }
 }

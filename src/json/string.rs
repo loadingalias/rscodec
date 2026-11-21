@@ -1,7 +1,7 @@
 //! Strings: the borrowed string token, its unescape, and the checks of the escapes and of the
 //! noncharacters.
 
-use super::{Error, ErrorKind};
+use super::{Error, ErrorKind, block};
 
 /// A string or a key of the input, as written between its quotes. The reader checked it: it is
 /// UTF-8, and each escape is valid. It borrows the input.
@@ -93,7 +93,14 @@ fn decode_escaped<'b>(raw: &str, len: usize, buf: &'b mut [u8]) -> Result<&'b st
             break;
         };
         let (char, used) = unescape(after);
-        written += char.encode_utf8(&mut out[written..]).len();
+        // Each escape but `\u` of a code point past 0x7f gives one ASCII byte.
+        match u8::try_from(char) {
+            Ok(byte) if byte.is_ascii() => {
+                out[written] = byte;
+                written += 1;
+            }
+            _ => written += char.encode_utf8(&mut out[written..]).len(),
+        }
         rest = &after[used..];
     }
     // SAFETY: `out` holds the runs of `raw`, which is UTF-8, between its `\` bytes, which are
@@ -142,7 +149,8 @@ fn backslash(word: u64) -> Option<usize> {
 /// Copies the text of `raw` before its first `\` to the start of `out`, and gives its length: the
 /// length of `raw` if it has no `\`. While both hold 8 more bytes, each word is one load and one
 /// store, with no call. A word can copy bytes after the `\` into `out`: the caller writes the
-/// escape and the text after it over them.
+/// escape and the text after it over them. The last run of fewer than 8 bytes also takes loads and
+/// stores of a fixed size, so it calls no `memcpy`.
 #[inline(always)]
 fn run(raw: &[u8], out: &mut [u8]) -> usize {
     let mut at = 0;
@@ -156,10 +164,30 @@ fn run(raw: &[u8], out: &mut [u8]) -> usize {
         }
         at += 8;
     }
+    // The run ends in the next 8 bytes: `out` holds the run, and `raw` holds it before its `\` or
+    // its end. `word` pads the bytes after `raw` with spaces, which are no `\`.
     let rest = &raw[at..];
-    let len = rest.iter().position(|&byte| byte == b'\\').unwrap_or(rest.len());
-    out[at..at + len].copy_from_slice(&rest[..len]);
+    let bytes = rest.get(..8).unwrap_or(rest);
+    let word = block::word(bytes);
+    let len = backslash(word).unwrap_or(bytes.len());
+    put(&mut out[at..at + len], word.to_le_bytes());
     at + len
+}
+
+/// Writes the first bytes of `bytes` to each byte of `out`, at most 8, with stores of a fixed size:
+/// two of 4 bytes, which can overlap, or three of 1 byte.
+#[inline(always)]
+fn put(out: &mut [u8], bytes: [u8; 8]) {
+    let len = out.len();
+    if let Some(first) = out.first_chunk_mut::<4>() {
+        *first = *bytes.first_chunk().expect("8 bytes hold 4");
+        let last = &mut out[len - 4..];
+        last.copy_from_slice(&bytes[len - 4..len]);
+    } else if let [first, ..] = out {
+        *first = bytes[0];
+        out[len / 2] = bytes[len / 2];
+        out[len - 1] = bytes[len - 1];
+    }
 }
 
 /// The UTF-8 bytes of the string `raw` between its quotes, after unescape. The reader checked the

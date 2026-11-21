@@ -250,7 +250,10 @@ fn compare(p: u64, twos: i32, tens: i32, y: u64) -> Ordering {
 /// With `e` such that `v = digits × 2^e × 10^power` is in `[2^52, 2^54)`, or `e = 1074` for a
 /// subnormal value, one scaling gives `v` unrounded: its integer part, a half bit, and a sticky bit
 /// that is set when a lower bit is set. Then one step rounds it to the nearest with a tie to even.
-#[inline]
+///
+/// It inlines into each caller, so [`Number::to_f64`](super::Number::to_f64), which a reader calls
+/// out of line, makes no second call.
+#[inline(always)]
 pub(super) fn read(digits: u64, power: i32) -> Option<f64> {
     let index = usize::try_from(power.saturating_sub(POW10_UP_MIN)).ok();
     let Some(&scale) = index.and_then(|index| POW10_UP.get(index)) else {

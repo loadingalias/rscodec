@@ -108,7 +108,7 @@ pub struct Reader<'a, 's> {
     clippy::cast_possible_truncation,
     reason = "each offset, length, and slot index is at most u32::MAX"
 )]
-const fn index(value: usize) -> u32 {
+pub(super) const fn index(value: usize) -> u32 {
     value as u32
 }
 
@@ -454,8 +454,7 @@ impl<'a, 's> Reader<'a, 's> {
     fn number(&mut self, at: usize) -> Result<Number<'a>, Error> {
         self.cursor.take();
         let input = self.cursor.input();
-        let (end, parts) = number::scan(input, at, self.limits.number_digits_max)?;
-        let number = Number::new(text(input, at, end), index(at), parts);
+        let number = number::scan(input, at, self.limits.number_digits_max)?;
         if self.profile == Profile::IJson && !number::binary64_holds(&number) {
             return Err(Error::new(ErrorKind::Number, at));
         }
@@ -607,7 +606,7 @@ fn escaped_string<'a>(cursor: &mut Cursor<'a>, start: usize, limit: usize, ijson
     unsafe_code,
     reason = "the cursor checked the UTF-8 of each string, and a number has only ASCII bytes"
 )]
-fn text(input: &[u8], start: usize, end: usize) -> &str {
+pub(super) fn text(input: &[u8], start: usize, end: usize) -> &str {
     let bytes = &input[start..end];
     // SAFETY: each caller passes a string or a number. For a string, the cursor gave the token
     // at `end`, so each byte before it is UTF-8, to the last start of a character. The byte at

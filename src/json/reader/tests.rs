@@ -870,6 +870,33 @@ fn keys_compare_after_unescape() {
             }
         }
     }
+    // Each key of 1 to 24 bytes, with each of its bytes once as an escape: the fingerprint of the
+    // key with the escape reads the same bytes as that of the key without it.
+    let letters = b"abcdefghijklmnopqrstuvwx";
+    let text = |bytes: &[u8]| core::str::from_utf8(bytes).unwrap().to_owned();
+    for len in 1..=letters.len() {
+        let plain = text(&letters[..len]);
+        for at in 0..len {
+            let escaped = format!(
+                "{}\\u{:04x}{}",
+                text(&letters[..at]),
+                letters[at],
+                text(&letters[at + 1..len])
+            );
+            for (first, second) in [(&*plain, &*escaped), (&*escaped, &*plain)] {
+                for filler in [0, 15] {
+                    let others: String = (0..filler).map(|index| format!("\"f{index}\":0,")).collect();
+                    let document = format!("{{\"{first}\":1,{others}\"{second}\":2}}");
+                    let at = document.len() - second.len() - 5;
+                    assert_eq!(
+                        check(document.as_bytes(), &WIDE, Profile::Rfc8259, 32),
+                        error(ErrorKind::Duplicate, at),
+                        "{document}"
+                    );
+                }
+            }
+        }
+    }
     for distinct in [r#"{"alg":1,"alh":2}"#, r#"{"a":1,"aa":2}"#, r#"{"é":1,"e":2}"#] {
         assert_eq!(
             check(distinct.as_bytes(), &WIDE, Profile::Rfc8259, 4),
@@ -1183,6 +1210,32 @@ fn each_short_string_decodes_as_serde_json_does() {
                     other => panic!("{other:?}"),
                 });
             assert_eq!(read, expected, "{:?}", String::from_utf8_lossy(&document));
+        }
+    }
+}
+
+/// Each byte at each of the 4 digits of a `\u` escape: the reader accepts the escape exactly when
+/// the byte is a hex digit, and gives the character of its value. Otherwise it refuses at that
+/// byte: a byte of 0x80 or more is not UTF-8, and each other byte is a syntax error.
+#[test]
+fn each_byte_at_each_digit_of_a_unicode_escape_is_a_hex_digit_or_refuses() {
+    for at in 3..7 {
+        for byte in 0..=u8::MAX {
+            let mut document = b"\"\\u0000\"".to_vec();
+            document[at] = byte;
+            let expected = if byte.is_ascii_hexdigit() {
+                let digits = core::str::from_utf8(&document[3..7]).unwrap();
+                let char = char::from_u32(u32::from_str_radix(digits, 16).unwrap()).unwrap();
+                Ok(vec![Owned::Str(char.to_string())])
+            } else {
+                let kind = if byte >= 0x80 {
+                    ErrorKind::Utf8
+                } else {
+                    ErrorKind::Syntax
+                };
+                Err(Error::new(kind, at))
+            };
+            assert_eq!(tokens(&document, &WIDE, Profile::Rfc8259, 1), expected, "{document:x?}");
         }
     }
 }

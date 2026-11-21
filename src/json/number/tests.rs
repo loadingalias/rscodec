@@ -29,19 +29,29 @@ struct Values {
 }
 
 /// The values of the accessors for the document `text`, or `None` if the reader refuses it.
+///
+/// The scan reads a number in the last 48 bytes of the input on its exact path, and each other
+/// number on its common path if it can. Thus each text also reads with 48 spaces after it, and the
+/// two reads must agree.
 fn values(text: &str) -> Option<Values> {
-    let mut scratch = [Slot::EMPTY; 1];
-    read(text.as_bytes(), &LIMITS, Profile::Rfc8259, &mut scratch, |reader| {
-        let number = reader.value().number()?;
-        Ok(Values {
-            class: number.class(),
-            i64: number.to_i64(),
-            u64: number.to_u64(),
-            decimal: number.to_decimal(),
-            f64: number.to_f64().map(f64::to_bits),
+    let read_values = |document: &[u8]| {
+        let mut scratch = [Slot::EMPTY; 1];
+        read(document, &LIMITS, Profile::Rfc8259, &mut scratch, |reader| {
+            let number = reader.value().number()?;
+            Ok(Values {
+                class: number.class(),
+                i64: number.to_i64(),
+                u64: number.to_u64(),
+                decimal: number.to_decimal(),
+                f64: number.to_f64().map(f64::to_bits),
+            })
         })
-    })
-    .ok()
+        .ok()
+    };
+    let values = read_values(text.as_bytes());
+    let padded = format!("{text}{:48}", "");
+    assert_eq!(read_values(padded.as_bytes()), values, "{text} with spaces after it");
+    values
 }
 
 /// The parts of `text` if it is a number in the ABNF of RFC 8259 section 6: the integer, the

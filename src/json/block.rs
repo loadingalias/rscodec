@@ -128,7 +128,7 @@ pub(super) fn tail(rest: &[u8]) -> [u64; 8] {
 /// The bytes of `bytes`, at most 8, from the low byte of a little-endian word, and spaces after them.
 /// Two overlapping loads of 4 bytes, or three loads of 1 byte, read each byte.
 #[inline(always)]
-fn word(bytes: &[u8]) -> u64 {
+pub(super) fn word(bytes: &[u8]) -> u64 {
     let len = bytes.len();
     let low = if let Some(all) = bytes.first_chunk::<8>() {
         u64::from_le_bytes(*all)

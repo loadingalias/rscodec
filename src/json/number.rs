@@ -3,7 +3,10 @@
 
 use core::ops::Range;
 
-use super::{Error, ErrorKind, Limit, float, reader::unexpected};
+use super::{
+    Error, ErrorKind, Limit, float,
+    reader::{index, text, unexpected},
+};
 
 #[cfg(test)]
 mod tests;
@@ -61,14 +64,17 @@ mod tests;
 #[derive(Clone, Copy, Debug)]
 pub struct Number<'a> {
     raw: &'a str,
-    /// The offset of the number in the input, for the errors of the accessors. The reader refuses
-    /// an input of more than `u32::MAX` bytes.
-    offset: u32,
-    /// The digits before the fraction, from the scan of the reader. The digits of a number are at
-    /// most [`Limits::number_digits_max`](super::Limits::number_digits_max), a `u16`.
-    integer: u16,
-    /// The digits of the fraction, or 0 if the number has no fraction.
-    fraction: u16,
+    /// Three parts in one word, so that each path of the scan writes the word with one store and
+    /// the reader reads it with one load. A load of a word that two or more stores wrote waits
+    /// until the stores leave the core. The parts:
+    ///
+    /// - Bits 0 to 31: the offset of the number in the input, for the errors of the accessors. The
+    ///   reader refuses an input of more than `u32::MAX` bytes.
+    /// - Bits 32 to 47: the digits before the fraction, from the scan of the reader. The digits of
+    ///   a number are at most [`Limits::number_digits_max`](super::Limits::number_digits_max), a
+    ///   `u16`.
+    /// - Bits 48 to 63: the digits of the fraction, or 0 if the number has no fraction.
+    place: u64,
     /// The value of the digits before the exponent, from the scan of the reader, if they are at
     /// most 19, so that a `u64` holds each value. Thus the accessors read no digit again.
     digits: u64,
@@ -112,9 +118,7 @@ impl<'a> Number<'a> {
     pub(super) const fn new(raw: &'a str, offset: u32, (integer, fraction, digits): (u16, u16, u64)) -> Self {
         Self {
             raw,
-            offset,
-            integer,
-            fraction,
+            place: offset as u64 | (integer as u64) << 32 | (fraction as u64) << 48,
             digits,
         }
     }
@@ -132,7 +136,7 @@ impl<'a> Number<'a> {
     pub fn class(&self) -> NumberClass {
         if self.parts().exponent.is_some() {
             NumberClass::Float
-        } else if self.fraction == 0 {
+        } else if self.fraction_digits() == 0 {
             NumberClass::Integer
         } else {
             NumberClass::Decimal
@@ -193,7 +197,7 @@ impl<'a> Number<'a> {
         let coefficient = digits.fold(0, |value, &digit| value * 10 + u128::from(digit - b'0'));
         let exponent = parts.exponent.map_or(0, |text| exponent(&bytes[text]));
         let exponent = exponent
-            .checked_sub(i64::from(self.fraction))
+            .checked_sub(i64::from(self.fraction_digits()))
             .and_then(|exponent| i32::try_from(exponent).ok())
             .ok_or_else(|| self.range())?;
         Ok(Decimal {
@@ -214,10 +218,16 @@ impl<'a> Number<'a> {
     ///
     /// [`ErrorKind::Range`] at the offset of the number if its magnitude rounds to infinity. The
     /// recovery is [`Number::to_decimal`], or the text of [`Number::as_str`].
-    #[inline]
+    // The common number reads here, and each other number in `f64_exact`. On aarch64 this function
+    // inlines into the read loop of its caller (C211 round 4: canada 0.91). On x86_64, with 16
+    // registers, the inlined code moved state of the reader to the stack (native b1 1.12), so it
+    // stays a call.
+    #[cfg_attr(target_arch = "aarch64", inline(always))]
+    #[cfg_attr(target_arch = "x86_64", inline(never))]
+    #[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), inline)]
     pub fn to_f64(&self) -> Result<f64, Error> {
         let bytes = self.raw.as_bytes();
-        let (integer, fraction) = (usize::from(self.integer), usize::from(self.fraction));
+        let (integer, fraction) = (usize::from(self.integer_digits()), usize::from(self.fraction_digits()));
         let negative = bytes.first() == Some(&b'-');
         let start = usize::from(negative);
         let integer_end = start + integer;
@@ -228,9 +238,17 @@ impl<'a> Number<'a> {
         };
         // The common number: no exponent, and at most 19 digits, whose value the scan gave.
         if digits_end == bytes.len() && integer + fraction <= DIGITS_MAX {
-            let value = float::read(self.digits, -i32::from(self.fraction)).ok_or_else(|| self.range())?;
+            let value = float::read(self.digits, -i32::from(self.fraction_digits())).ok_or_else(|| self.range())?;
             return Ok(if negative { -value } else { value });
         }
+        self.f64_exact()
+    }
+
+    /// [`Number::to_f64`] of a number with an exponent or of more than 19 digits. It does not
+    /// inline, so the read loop keeps only the common number.
+    #[inline(never)]
+    fn f64_exact(&self) -> Result<f64, Error> {
+        let bytes = self.raw.as_bytes();
         let parts = self.parts();
         let (integer, fraction) = (&bytes[parts.integer.clone()], &bytes[parts.fraction.clone()]);
         let count = integer.len() + fraction.len();
@@ -248,7 +266,7 @@ impl<'a> Number<'a> {
                 .wrapping_mul(scale)
                 .wrapping_add(run(bytes, parts.fraction));
             let exponent = parts.exponent.map_or(0, |text| exponent(&bytes[text]));
-            let power = exponent.saturating_sub(i64::from(self.fraction));
+            let power = exponent.saturating_sub(i64::from(self.fraction_digits()));
             // A power outside `i32` is far outside the table of `read`.
             let power = i32::try_from(power).unwrap_or(if power < 0 { i32::MIN } else { i32::MAX });
             float::read(digits, power).map(|value| if parts.negative { -value } else { value })
@@ -265,7 +283,7 @@ impl<'a> Number<'a> {
         let bytes = self.raw.as_bytes();
         let parts = self.parts();
         if parts.integer.end < bytes.len() {
-            return Err(Error::new(ErrorKind::Type, self.offset as usize));
+            return Err(Error::new(ErrorKind::Type, self.offset()));
         }
         // No integer has a leading zero, so the order of equal lengths is the order of the values.
         let digits = &bytes[parts.integer.clone()];
@@ -282,8 +300,8 @@ impl<'a> Number<'a> {
         let len = self.raw.len();
         let negative = self.raw.as_bytes().first() == Some(&b'-');
         let start = usize::from(negative);
-        let integer = start..start + usize::from(self.integer);
-        let fraction = match self.fraction {
+        let integer = start..start + usize::from(self.integer_digits());
+        let fraction = match self.fraction_digits() {
             0 => integer.end..integer.end,
             digits => integer.end + 1..integer.end + 1 + usize::from(digits),
         };
@@ -297,7 +315,30 @@ impl<'a> Number<'a> {
 
     #[inline(always)]
     const fn range(&self) -> Error {
-        Error::new(ErrorKind::Range, self.offset as usize)
+        Error::new(ErrorKind::Range, self.offset())
+    }
+
+    /// The offset of the number in the input.
+    #[inline(always)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the offset is the low 32 bits of `place`"
+    )]
+    const fn offset(&self) -> usize {
+        self.place as u32 as usize
+    }
+
+    /// The count of the digits before the fraction.
+    #[inline(always)]
+    #[expect(clippy::cast_possible_truncation, reason = "the count is bits 32 to 47 of `place`")]
+    const fn integer_digits(&self) -> u16 {
+        (self.place >> 32) as u16
+    }
+
+    /// The count of the digits of the fraction, or 0 if the number has no fraction.
+    #[inline(always)]
+    const fn fraction_digits(&self) -> u16 {
+        (self.place >> 48) as u16
     }
 }
 
@@ -359,7 +400,12 @@ fn run(bytes: &[u8], digits: Range<usize>) -> u64 {
 /// operations give the same value with no overflow check.
 #[inline(always)]
 const fn eight_digits(word: u64) -> u64 {
-    let digits = word.wrapping_sub(ASCII_ZEROS);
+    digit_values(word.wrapping_sub(ASCII_ZEROS))
+}
+
+/// [`eight_digits`] of the word whose bytes are the values of its digits, from 0 to 9.
+#[inline(always)]
+const fn digit_values(digits: u64) -> u64 {
     let pairs = digits.wrapping_mul(10).wrapping_add(digits >> 8) & 0x00ff_00ff_00ff_00ff;
     let groups = pairs.wrapping_mul(100).wrapping_add(pairs >> 16) & 0x0000_ffff_0000_ffff;
     groups.wrapping_mul(10_000).wrapping_add(groups >> 32) & 0xffff_ffff
@@ -439,58 +485,98 @@ fn digits(input: &[u8], from: usize, budget: &mut u16) -> Result<u16, Error> {
     Ok(count)
 }
 
-/// The end of the number at `at`, the count of its digits before the fraction, and the count of
-/// the digits of its fraction. Each byte of the number is ASCII. A byte that is not structural,
-/// whitespace, or a quote must not follow it.
+/// The bytes from the start of a number that [`common`] reads: a sign, 19 digits, a point, and
+/// three words of 8 bytes.
+const WINDOW: usize = 48;
+
+/// The number at `at`. Each byte of a number is ASCII. A byte that is not structural, whitespace,
+/// or a quote must not follow it.
 ///
-/// The common number has digits, perhaps a fraction, no exponent, and at most `budget` digits.
-/// This function reads it, with one check of the budget at its end. [`scan_exact`] reads each other
-/// number out of line, and it gives each refusal at the first byte that the grammar refuses.
+/// [`common`] reads the common number with one bound check, if [`WINDOW`] bytes of the input
+/// start at `at`. [`scan_exact`] reads each other number out of line, and it gives each refusal at
+/// the first byte that the grammar refuses. Each path gives the whole [`Number`], so that the
+/// caller reads each of its words as the path wrote it.
 ///
 /// # Errors
 ///
 /// The first byte that the grammar does not allow, or the first digit past `budget`.
 #[inline(always)]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "each count is at most `budget`, a u16, when the number is common"
-)]
-pub(super) fn scan(input: &[u8], at: usize, budget: u16) -> Result<(usize, (u16, u16, u64)), Error> {
-    let start = at + usize::from(input[at] == b'-');
-    let (integer, mut digits) = digit_run(&input[start..]);
-    let mut end = start + integer;
-    let dot = input.get(end) == Some(&b'.');
-    let mut fraction = 0;
-    if dot {
-        let (len, value) = digit_run(&input[end + 1..]);
-        fraction = len;
-        // Exact when the number has at most 19 digits, the only case that the accessors read.
-        digits = digits
-            .wrapping_mul(POW10.get(len).copied().unwrap_or(0))
-            .wrapping_add(value);
-        end += 1 + fraction;
+pub(super) fn scan(input: &[u8], at: usize, budget: u16) -> Result<Number<'_>, Error> {
+    if let Some(window) = input.get(at..).and_then(<[u8]>::first_chunk)
+        && let Some((len, parts)) = common(window, budget)
+    {
+        return Ok(Number::new(text(input, at, at + len), index(at), parts));
     }
-    // A number that starts with 0 has no other digit before its fraction, and a fraction has a
-    // digit.
-    let common = integer != 0
-        && (integer == 1 || input[start] != b'0')
-        && (!dot || fraction != 0)
-        && integer + fraction <= usize::from(budget)
-        && matches!(
-            input.get(end),
-            None | Some(b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'[' | b']' | b'{' | b'}' | b'"')
-        );
-    if common {
-        Ok((end, (integer as u16, fraction as u16, digits)))
-    } else {
-        scan_exact(input, at, budget)
-    }
+    scan_exact(input, at, budget)
 }
 
-/// [`scan`] of a number with an exponent, of a number past the budget, or of a refusal. It does
-/// not inline, so the read loop keeps only the common number.
+/// The length and the parts of the common number at the start of `window`, or `None` for each
+/// other text. The common number has digits, perhaps a fraction, no exponent, and at most 19 and at
+/// most `budget` digits.
+#[inline(always)]
+#[expect(clippy::cast_possible_truncation, reason = "each count is at most 19")]
+fn common(window: &[u8; WINDOW], budget: u16) -> Option<(usize, (u16, u16, u64))> {
+    let start = usize::from(window[0] == b'-');
+    let (integer, mut digits, mut next) = digits_at(window, start)?;
+    // A number that starts with 0 has no other digit before its fraction.
+    if integer == 0 || integer > DIGITS_MAX || integer > 1 && window[start] == b'0' {
+        return None;
+    }
+    let mut len = start + integer;
+    let mut fraction = 0;
+    if next == b'.' {
+        let (count, value, after) = digits_at(window, len + 1)?;
+        // A fraction has a digit.
+        if count == 0 || integer + count > DIGITS_MAX {
+            return None;
+        }
+        fraction = count;
+        digits = digits.wrapping_mul(POW10[count]).wrapping_add(value);
+        next = after;
+        len += 1 + count;
+    }
+    let ends = matches!(
+        next,
+        b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'[' | b']' | b'{' | b'}' | b'"'
+    );
+    (ends && integer + fraction <= usize::from(budget)).then_some((len, (integer as u16, fraction as u16, digits)))
+}
+
+/// The count of the ASCII digits of `window` at `from`, at most 23, their value in wrapping
+/// arithmetic, and the byte after them. It reads at most three words of 8 bytes, and it gives `None`
+/// if each byte of them is a digit or if they pass the end of `window`.
+#[inline(always)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a shift of a word by a multiple of 8 keeps one byte"
+)]
+fn digits_at(window: &[u8; WINDOW], from: usize) -> Option<(usize, u64, u8)> {
+    let mut value = 0_u64;
+    for index in 0..3 {
+        let bytes = window.get(from + 8 * index..).and_then(<[u8]>::first_chunk)?;
+        let word = u64::from_le_bytes(*bytes);
+        let other = non_digits(word);
+        if other != 0 {
+            // 8 times the count of the digits before the first other byte.
+            let bits = other.trailing_zeros() & 56;
+            // The digits move to the high bytes, and zeros fill the low bytes. A borrow of the
+            // subtraction moves only into the bytes after the digits, which the shifts drop. Two
+            // shifts drop each byte of a word with no digit.
+            let digits = word.wrapping_sub(ASCII_ZEROS) << 8 << (56 - bits);
+            let count = (bits / 8) as usize;
+            let value = value.wrapping_mul(POW10[count]).wrapping_add(digit_values(digits));
+            return Some((8 * index + count, value, (word >> bits) as u8));
+        }
+        value = value.wrapping_mul(100_000_000).wrapping_add(eight_digits(word));
+    }
+    None
+}
+
+/// [`scan`] of each number that [`common`] does not read: a number with an exponent, of more than
+/// 19 digits, past the budget, in the last [`WINDOW`] bytes of the input, or a refusal. It does not
+/// inline, so the read loop keeps only the common number.
 #[inline(never)]
-fn scan_exact(input: &[u8], at: usize, mut budget: u16) -> Result<(usize, (u16, u16, u64)), Error> {
+fn scan_exact(input: &[u8], at: usize, mut budget: u16) -> Result<Number<'_>, Error> {
     let start = at + usize::from(input[at] == b'-');
     // A number that starts with 0 has no other digit before its fraction.
     let integer = if input.get(start) == Some(&b'0') {
@@ -530,7 +616,11 @@ fn scan_exact(input: &[u8], at: usize, mut budget: u16) -> Result<(usize, (u16, 
             .wrapping_mul(scale)
             .wrapping_add(digit_run(&input[integer_end + 1..fraction_end]).1)
     };
-    Ok((end, (integer, fraction, digits)))
+    Ok(Number::new(
+        text(input, at, end),
+        index(at),
+        (integer, fraction, digits),
+    ))
 }
 
 /// The count of the ASCII digits at the start of `bytes`, and their value in wrapping arithmetic,
