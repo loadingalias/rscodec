@@ -75,10 +75,15 @@ pub struct Number<'a> {
     ///   `u16`.
     /// - Bits 48 to 63: the digits of the fraction, or 0 if the number has no fraction.
     place: u64,
-    /// The value of the digits before the exponent, from the scan of the reader, if they are at
-    /// most 19, so that a `u64` holds each value. Thus the accessors read no digit again.
+    /// The value of the digits, from the scan of the reader, if the number has no exponent and at
+    /// most 19 digits, so that a `u64` holds each value, else [`EXACT`]. Thus the accessors read no
+    /// digit again, and [`Number::to_f64`] selects the common number with one test.
     digits: u64,
 }
+
+/// [`Number::digits`] of a number with an exponent or with more than 19 digits. No value of 19
+/// digits is `u64::MAX`.
+const EXACT: u64 = u64::MAX;
 
 impl PartialEq for Number<'_> {
     #[inline]
@@ -226,20 +231,14 @@ impl<'a> Number<'a> {
     #[cfg_attr(target_arch = "x86_64", inline(never))]
     #[cfg_attr(not(any(target_arch = "aarch64", target_arch = "x86_64")), inline)]
     pub fn to_f64(&self) -> Result<f64, Error> {
-        let bytes = self.raw.as_bytes();
-        let (integer, fraction) = (usize::from(self.integer_digits()), usize::from(self.fraction_digits()));
-        let negative = bytes.first() == Some(&b'-');
-        let start = usize::from(negative);
-        let integer_end = start + integer;
-        let digits_end = if fraction == 0 {
-            integer_end
-        } else {
-            integer_end + 1 + fraction
-        };
         // The common number: no exponent, and at most 19 digits, whose value the scan gave.
-        if digits_end == bytes.len() && integer + fraction <= DIGITS_MAX {
+        if self.digits != EXACT {
             let value = float::read(self.digits, -i32::from(self.fraction_digits())).ok_or_else(|| self.range())?;
-            return Ok(if negative { -value } else { value });
+            return Ok(if self.raw.as_bytes().first() == Some(&b'-') {
+                -value
+            } else {
+                value
+            });
         }
         self.f64_exact()
     }
@@ -606,15 +605,22 @@ fn scan_exact(input: &[u8], at: usize, mut budget: u16) -> Result<Number<'_>, Er
         Some(_) => return Err(unexpected(input, end)),
     }
     let integer_end = start + usize::from(integer);
-    let digits = digit_run(&input[start..integer_end]).1;
-    let digits = if fraction == 0 {
-        digits
+    let digits_end = if fraction == 0 {
+        integer_end
     } else {
-        let fraction_end = integer_end + 1 + usize::from(fraction);
-        let scale = POW10.get(usize::from(fraction)).copied().unwrap_or(0);
-        digits
-            .wrapping_mul(scale)
-            .wrapping_add(digit_run(&input[integer_end + 1..fraction_end]).1)
+        integer_end + 1 + usize::from(fraction)
+    };
+    let digits = if digits_end < end || usize::from(integer) + usize::from(fraction) > DIGITS_MAX {
+        EXACT
+    } else {
+        let digits = digit_run(&input[start..integer_end]).1;
+        if fraction == 0 {
+            digits
+        } else {
+            digits
+                .wrapping_mul(POW10[usize::from(fraction)])
+                .wrapping_add(digit_run(&input[integer_end + 1..digits_end]).1)
+        }
     };
     Ok(Number::new(
         text(input, at, end),
