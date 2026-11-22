@@ -92,6 +92,18 @@ fn decode_escaped<'b>(raw: &str, len: usize, buf: &'b mut [u8]) -> Result<&'b st
         let Some(after) = rest.get(text + 1..) else {
             break;
         };
+        // `\u00` and two hex digits of a value under 0x80, the common escape of a control byte, is
+        // one ASCII byte.
+        if let Some([b'u', b'0', b'0', first, second]) = after.first_chunk()
+            && let Ok(value) = hex4(&[b'0', b'0', *first, *second])
+            && let Ok(byte) = u8::try_from(value)
+            && byte.is_ascii()
+        {
+            out[written] = byte;
+            written += 1;
+            rest = &after[5..];
+            continue;
+        }
         let (char, used) = unescape(after);
         // Each escape but `\u` of a code point past 0x7f gives one ASCII byte.
         match u8::try_from(char) {

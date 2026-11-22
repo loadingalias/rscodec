@@ -558,6 +558,18 @@ fn escaped_string<'a>(cursor: &mut Cursor<'a>, start: usize, limit: usize, ijson
                 shrink += 1;
                 from = escape + 2;
             }
+            // `\u00` and two hex digits, the common escape of a control byte: a value under U+0100
+            // is no surrogate and no noncharacter. A byte that is not a hex digit takes the path
+            // below, which gives its error.
+            Some(b'u')
+                if high.is_none()
+                    && let Some([b'0', b'0', first, second]) =
+                        input.get(escape + 2..).and_then(<[u8]>::first_chunk)
+                    && let Ok(value) = string::hex4(&[b'0', b'0', *first, *second]) =>
+            {
+                shrink += if value < 0x80 { 5 } else { 4 };
+                from = escape + 6;
+            }
             Some(b'u') => {
                 let value = string::hex4(&input[escape + 2..]).map_err(|index| {
                     past(high.map_or_else(
