@@ -233,11 +233,16 @@ fn main() -> Result<(), rscodec::base64::Error> {
   on the features of the fastest kernel of a class, the choice is made at compile time.
 - Without `std`, a kernel is available only if `-C target-feature` turns on its features.
 - A short input runs inline in the caller, with no choice of kernel: on aarch64, up to 64 bytes on
-  the Neon kernel, and on x86_64, for hex, up to 32 bytes on SSE2. When `-C target-feature` fixes a
-  SIMD kernel of a class, that kernel runs inline at each length. `encode_with` and `decode_with`
-  always run the kernel of their backend.
-- The AVX-512 kernels have an entry with no loop for an input of one vector of 64 characters: hex
-  up to 32 bytes, and base64 up to 48 bytes.
+  the Neon kernel, and on x86_64, for hex, an encode of up to 32 bytes and a decode of up to 16
+  bytes of result on SSE2. When `-C target-feature` fixes a SIMD kernel of a class, that kernel
+  runs inline at each length. `encode_with` and `decode_with` always run the kernel of their
+  backend.
+- Each kernel runs whole blocks, then one last block that ends at the end of the input and writes
+  some bytes of the block before it again. Thus a tail needs no copy. Only an input shorter than
+  one vector runs on arrays on the stack, or on AVX-512 with masked loads and stores.
+- The AVX-512 base64 kernels have an entry with no loop for up to 48 bytes. The AVX-512BW hex
+  kernel runs one 64-byte vector for an input of up to 32 bytes or a text of up to 64 characters,
+  and an encode of 64 KiB or more in 32-byte vectors, which keep the clock of the CPU higher.
 - WebAssembly has no run-time detection, so `Simd128` exists only with `+simd128`.
 - On an Intel hybrid CPU (Alder Lake to Arrow Lake), the AVX-512 kernels do not run, also if CPUID
   reports AVX-512. Its efficient cores do not have AVX-512.

@@ -1,7 +1,9 @@
-//! The Neon kernels: `tbl` maps each nibble to its digit, `st2` joins the two characters of each
-//! byte, and `uzp1` and `uzp2` split them. The decoder ANDs the valid lanes of each block into one
-//! vector, and tests it once after the last block. An input of up to `SHORT_MAX` bytes runs inline
-//! in the caller, and a longer one runs in a function of its own.
+//! The Neon kernels: `tbl` maps each nibble to its digit, and `zip1` and `zip2` put the two
+//! characters of each byte in order. The decoder splits the characters with `uzp1` and `uzp2`, and
+//! looks up the flag of each in a table of the 64 bytes from `0` (`tbl`): the nibble with bit 7
+//! set, or zero for a byte that is not a digit. It ANDs the flags of each block into one vector,
+//! and tests bit 7 once after the last block. An input of up to `SHORT_MAX` bytes runs inline in
+//! the caller, and a longer one runs in a function of its own.
 
 #![expect(
     clippy::missing_safety_doc,
@@ -14,72 +16,59 @@ use crate::{
     ct::Class,
     simd::{
         SHORT_MAX,
-        aarch64::{load16, store_pairs, store16},
-        blocks, whole_blocks,
+        aarch64::{load16, store16, table64},
+        overlapping, short_blocks,
     },
 };
 
 /// The digit of each nibble.
 const DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-/// The nibbles of 16 characters, and the lanes that are digits, which are all ones.
-#[inline]
-#[target_feature(enable = "neon")]
-fn nibbles(chars: uint8x16_t) -> (uint8x16_t, uint8x16_t) {
-    let value = vsubq_u8(chars, vdupq_n_u8(b'0'));
-    let digit = vcltq_u8(value, vdupq_n_u8(10));
-    let letter = vcltq_u8(vsubq_u8(chars, vdupq_n_u8(b'a')), vdupq_n_u8(6));
-    // The step from `c - '0'` to the nibble of a letter.
-    (
-        vsubq_u8(value, vandq_u8(letter, vdupq_n_u8(39))),
-        vorrq_u8(digit, letter),
-    )
-}
+/// The flag of each byte from `0`: the nibble with bit 7 set for a digit, and zero for another
+/// byte.
+const FLAGS: [u8; 64] = {
+    let mut flags = [0; 64];
+    let mut nibble: u8 = 0;
+    while nibble < 16 {
+        flags[(DIGITS[nibble as usize] - b'0') as usize] = 0x80 | nibble;
+        nibble += 1;
+    }
+    flags
+};
 
-/// Encodes `bytes` into `out`, which has twice the length. A short input runs inline in the caller.
+/// Encodes `bytes` into `out`. A short input runs inline in the caller.
 #[inline(always)]
 #[target_feature(enable = "neon")]
 pub(super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
-    if bytes.len() <= SHORT_MAX {
-        encode_16(class, bytes, out);
+    let digits = load16::<0, _>(&DIGITS);
+    if bytes.len() > SHORT_MAX {
+        encode_long(digits, bytes, out);
+    } else if bytes.len() >= 16 {
+        overlapping::<16, 32>(bytes, out, |src, dst| encode_block(digits, src, dst));
     } else {
-        encode_long(class, bytes, out);
+        short_blocks::<16, 32>(
+            class,
+            bytes,
+            out,
+            16,
+            0,
+            |len| len * 2,
+            |src, dst| {
+                encode_block(digits, src, dst);
+            },
+        );
     }
 }
 
-/// Encodes a long input: blocks of 64 bytes, then the rest in blocks of 16.
+/// Encodes a long input in blocks of 64 bytes.
 #[inline(never)]
 #[target_feature(enable = "neon")]
-fn encode_long(class: impl Class, bytes: &[u8], out: &mut [u8]) {
-    let digits = load16::<0, _>(&DIGITS);
-    let (read, written) = whole_blocks::<64, 128>(
-        bytes,
-        out,
-        64,
-        |len| len * 2,
-        |src, dst| {
-            for (src, dst) in src.as_chunks::<16>().0.iter().zip(dst.as_chunks_mut::<32>().0) {
-                encode_block(digits, src, dst);
-            }
-        },
-    );
-    encode_16(class, &bytes[read..], &mut out[written..]);
-}
-
-/// Encodes in blocks of 16 bytes.
-#[inline(always)]
-#[target_feature(enable = "neon")]
-fn encode_16(class: impl Class, bytes: &[u8], out: &mut [u8]) {
-    let digits = load16::<0, _>(&DIGITS);
-    blocks::<16, 32>(
-        class,
-        bytes,
-        out,
-        16,
-        0,
-        |len| len * 2,
-        |src, dst| encode_block(digits, src, dst),
-    );
+fn encode_long(digits: uint8x16_t, bytes: &[u8], out: &mut [u8]) {
+    overlapping::<64, 128>(bytes, out, |src, dst| {
+        for (src, dst) in src.as_chunks::<16>().0.iter().zip(dst.as_chunks_mut::<32>().0) {
+            encode_block(digits, src, dst);
+        }
+    });
 }
 
 /// The 32 characters of 16 bytes.
@@ -89,47 +78,83 @@ fn encode_block(digits: uint8x16_t, src: &[u8; 16], dst: &mut [u8; 32]) {
     let src = load16::<0, _>(src);
     let hi = vqtbl1q_u8(digits, vshrq_n_u8::<4>(src));
     let lo = vqtbl1q_u8(digits, vandq_u8(src, vdupq_n_u8(0x0f)));
-    store_pairs(dst, uint8x16x2_t(hi, lo));
+    store16::<0, _>(dst, vzip1q_u8(hi, lo));
+    store16::<16, _>(dst, vzip2q_u8(hi, lo));
 }
 
-/// Decodes `text` into `out`, which has half the length, and gives whether each character is a
-/// digit. A short input runs inline in the caller.
+/// Decodes `text` into `out`, and gives whether each character is a digit. A short input runs
+/// inline in the caller.
 #[inline(always)]
 #[target_feature(enable = "neon")]
 pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
-    if out.len() <= SHORT_MAX {
-        decode_32(class, text, out)
+    let flags = table64::<0, _>(&FLAGS);
+    let mut valid = vdupq_n_u8(0xff);
+    if out.len() > SHORT_MAX {
+        valid = decode_long(flags, text, out);
+    } else if text.len() >= 32 {
+        overlapping::<32, 16>(text, out, |src, dst| {
+            valid = vandq_u8(valid, decode_block(flags, src, dst));
+        });
+    } else if text.len() >= 16 {
+        overlapping::<16, 8>(text, out, |src, dst| {
+            let chars = load16::<0, _>(src);
+            let (hi, lo) = (
+                flag(flags, vuzp1q_u8(chars, chars)),
+                flag(flags, vuzp2q_u8(chars, chars)),
+            );
+            valid = vandq_u8(valid, vandq_u8(hi, lo));
+            let mut bytes = [0; 16];
+            store16::<0, _>(&mut bytes, vsliq_n_u8::<4>(lo, hi));
+            if let Some(low) = bytes.first_chunk() {
+                *dst = *low;
+            }
+        });
     } else {
-        decode_long(class, text, out)
+        short_blocks::<32, 16>(
+            class,
+            text,
+            out,
+            32,
+            b'0',
+            |len| len / 2,
+            |src, dst| {
+                valid = vandq_u8(valid, decode_block(flags, src, dst));
+            },
+        );
     }
+    vminvq_u8(valid) >= 0x80
 }
 
-/// Decodes a long input.
+/// Decodes a long input in blocks of 128 characters, and gives the AND of the flags.
 #[inline(never)]
 #[target_feature(enable = "neon")]
-fn decode_long(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
-    decode_32(class, text, out)
+fn decode_long(flags: uint8x16x4_t, text: &[u8], out: &mut [u8]) -> uint8x16_t {
+    let mut valid = vdupq_n_u8(0xff);
+    overlapping::<128, 64>(text, out, |src, dst| {
+        for (src, dst) in src.as_chunks::<32>().0.iter().zip(dst.as_chunks_mut::<16>().0) {
+            valid = vandq_u8(valid, decode_block(flags, src, dst));
+        }
+    });
+    valid
 }
 
-/// Decodes in blocks of 32 characters.
-#[inline(always)]
+/// The flag of each of 16 characters.
+#[inline]
 #[target_feature(enable = "neon")]
-fn decode_32(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
-    let mut valid = vdupq_n_u8(0xff);
-    blocks::<32, 16>(
-        class,
-        text,
-        out,
-        32,
-        b'0',
-        |len| len / 2,
-        |src, dst| {
-            let (first, second) = (load16::<0, _>(src), load16::<16, _>(src));
-            let (hi, lo) = (vuzp1q_u8(first, second), vuzp2q_u8(first, second));
-            let ((hi, hi_valid), (lo, lo_valid)) = (nibbles(hi), nibbles(lo));
-            valid = vandq_u8(valid, vandq_u8(hi_valid, lo_valid));
-            store16::<0, _>(dst, vorrq_u8(vshlq_n_u8::<4>(hi), lo));
-        },
+fn flag(flags: uint8x16x4_t, chars: uint8x16_t) -> uint8x16_t {
+    vqtbl4q_u8(flags, vsubq_u8(chars, vdupq_n_u8(b'0')))
+}
+
+/// The 16 bytes of 32 characters, and the AND of their flags. `sli` keeps only the low nibble of
+/// the second flag of each byte, so bit 7 leaves no trace in the bytes.
+#[inline]
+#[target_feature(enable = "neon")]
+fn decode_block(flags: uint8x16x4_t, src: &[u8; 32], dst: &mut [u8; 16]) -> uint8x16_t {
+    let (first, second) = (load16::<0, _>(src), load16::<16, _>(src));
+    let (hi, lo) = (
+        flag(flags, vuzp1q_u8(first, second)),
+        flag(flags, vuzp2q_u8(first, second)),
     );
-    vminvq_u8(valid) == 0xff
+    store16::<0, _>(dst, vsliq_n_u8::<4>(lo, hi));
+    vandq_u8(hi, lo)
 }

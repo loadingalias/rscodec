@@ -1,30 +1,34 @@
-//! The parts that the SIMD kernels of each codec share: the loop over the blocks, and the loads
-//! and stores, which are the only unsafe operations of the kernels.
+//! The parts that the SIMD kernels of each codec share: the loops over the blocks, the tails, and
+//! the loads and stores, which are the only unsafe operations of the kernels.
+//!
+//! A tail overlaps: after the whole blocks, the last block reads one whole vector that ends at the
+//! end of the input, and writes some bytes again, with the same values. Only an input shorter than
+//! one vector runs on arrays on the stack ([`short_blocks`]).
 
 use crate::ct::Class;
 
-/// The largest input of the short path of a codec, in bytes: it runs inline in the caller, with no
-/// choice of kernel and no call. On x86_64 the short path is SSE2, and at 64 bytes the AVX-512BW
-/// kernel with its call is two times faster (C105 run 1).
-#[cfg(any(all(feature = "hex", target_arch = "x86_64"), target_arch = "aarch64"))]
-pub(crate) const SHORT_MAX: usize = cfg_select! {
-    target_arch = "x86_64" => 32,
-    _ => 64,
-};
+/// The largest input of the short path of a codec on aarch64, in bytes: it runs inline in the
+/// caller, and a longer input runs in a function of its own.
+#[cfg(target_arch = "aarch64")]
+pub(crate) const SHORT_MAX: usize = 64;
 
-/// Runs `block` over `input` and `output`. Each block reads `IN` bytes of input and uses the first
-/// `step`. It writes `OUT` bytes of output, and the first `out_len(step)` of them are the result.
+/// The lanes 0 to 15, the index of the identity shuffle.
+#[cfg(any(feature = "base64", target_arch = "aarch64"))]
+const IOTA: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// Runs `block` over an input shorter than one vector, on arrays on the stack. Each block reads `IN`
+/// bytes of input and uses the first `step`. It writes `OUT` bytes of output, and the first
+/// `out_len(step)` of them are the result.
 ///
-/// The last blocks run on arrays on the stack: the input after its end is `fill`, and only the
-/// result goes to `output`. Thus no SIMD load or store passes the end of a slice, and no scalar
-/// code decodes a tail. `output` has the length `out_len` of all of `input`. In the secret
-/// `class`, each array is zero before the function returns.
+/// The input after its end is `fill`, and only the result goes to `output`. Thus no SIMD load or
+/// store passes the end of a slice, and no scalar code decodes a tail. `output` has the length
+/// `out_len` of all of `input`. In the secret `class`, each array is zero before the function
+/// returns. Gives the byte after the result in the output of the last block, for example the
+/// trailing bits of base64.
 ///
 /// The arrays take and give their bytes in 16-byte pieces, each with loads or stores of a fixed
 /// size. Thus the compiler keeps an array of 16 bytes in registers: a copy of a variable length is
-/// a call to `memcpy`, and a vector load of bytes that smaller stores wrote waits for them. A
-/// kernel with wider vectors runs only [`whole_blocks`], and gives the rest to a kernel of 16-byte
-/// vectors.
+/// a call to `memcpy`, and a vector load of bytes that smaller stores wrote waits for them.
 #[inline(always)]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 #[cfg_attr(
@@ -34,7 +38,7 @@ pub(crate) const SHORT_MAX: usize = cfg_select! {
         reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
     )
 )]
-pub(crate) fn blocks<const IN: usize, const OUT: usize>(
+pub(crate) fn short_blocks<const IN: usize, const OUT: usize>(
     class: impl Class,
     input: &[u8],
     output: &mut [u8],
@@ -42,9 +46,9 @@ pub(crate) fn blocks<const IN: usize, const OUT: usize>(
     fill: u8,
     out_len: impl Fn(usize) -> usize,
     mut block: impl FnMut(&[u8; IN], &mut [u8; OUT]),
-) {
+) -> u8 {
     const { assert!(IN.is_multiple_of(16) && OUT.is_multiple_of(16)) };
-    let (mut read, mut written) = whole_blocks(input, output, step, &out_len, &mut block);
+    let (mut read, mut written, mut after) = (0, 0, 0);
     while let Some(rest) = input.get(read..).filter(|rest| !rest.is_empty()) {
         let len = rest.len().min(step);
         let mut src = [fill; IN];
@@ -66,42 +70,35 @@ pub(crate) fn blocks<const IN: usize, const OUT: usize>(
         {
             write16(chunk, piece);
         }
+        after = dst.get(len_out).copied().unwrap_or(0);
         class.clear(&mut src);
         class.clear(&mut dst);
         read += len;
         written += len_out;
     }
+    after
 }
 
-/// The loop of [`blocks`] over each block whose load and store fit in `input` and `output`. Gives
-/// the bytes that it read and wrote.
+/// Runs `block` over the whole blocks of `input`, at least one, and then over the last `IN` bytes,
+/// which overlap the block before them, if `input` is not a multiple of `IN`. Each block writes
+/// `OUT` bytes, and `output` has `OUT` bytes for each `IN` bytes of `input`. Thus the last block
+/// writes again some bytes of the block before it, with the same values.
+#[cfg(feature = "hex")]
 #[inline(always)]
-pub(crate) fn whole_blocks<const IN: usize, const OUT: usize>(
+pub(crate) fn overlapping<const IN: usize, const OUT: usize>(
     input: &[u8],
     output: &mut [u8],
-    step: usize,
-    out_len: impl Fn(usize) -> usize,
     mut block: impl FnMut(&[u8; IN], &mut [u8; OUT]),
-) -> (usize, usize) {
-    let step_out = out_len(step);
-    // Blocks that use all of their load and their store do not overlap, so one count bounds the
-    // loop. The arguments are constants, so the compiler keeps only one of the two loops.
-    if step == IN && step_out == OUT {
-        let blocks = input.as_chunks::<IN>().0.iter().zip(output.as_chunks_mut::<OUT>().0);
-        let count = blocks.len();
-        blocks.for_each(|(src, dst)| block(src, dst));
-        return (count * IN, count * OUT);
-    }
-    let (mut read, mut written) = (0, 0);
-    while let (Some(src), Some(dst)) = (
-        input.get(read..).and_then(<[u8]>::first_chunk),
-        output.get_mut(written..).and_then(<[u8]>::first_chunk_mut),
-    ) {
+) {
+    let (chunks, rest) = input.as_chunks::<IN>();
+    for (src, dst) in chunks.iter().zip(output.as_chunks_mut::<OUT>().0) {
         block(src, dst);
-        read += step;
-        written += step_out;
     }
-    (read, written)
+    if !rest.is_empty()
+        && let (Some(src), Some(dst)) = (input.last_chunk(), output.last_chunk_mut())
+    {
+        block(src, dst);
+    }
 }
 
 /// The bytes of `src`, at most 16, in the first bytes of the result, and `fill` in the other bytes.
@@ -137,7 +134,7 @@ fn read16(src: &[u8], fill: u8) -> [u8; 16] {
 /// registers: a load at a variable offset in a copy of it on the stack waits for the copy.
 #[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
-fn write16(dst: &mut [u8], value: &[u8; 16]) {
+pub(crate) fn write16(dst: &mut [u8], value: &[u8; 16]) {
     let len = dst.len();
     assert!(len <= 16);
     let value = u128::from_le_bytes(*value);
@@ -201,10 +198,10 @@ fn read16(src: &[u8], fill: u8) -> [u8; 16] {
     bytes
 }
 
-/// Writes the first `dst.len()` bytes, at most 16, of `value` into `dst`. The bits of the length
-/// give stores of 8, 4, 2, and 1 bytes, each from the first lane of a vector register (`str d`,
-/// `str s`, `str h`, `str b`), and `ext` moves the next bytes to the first lane. Thus the bytes go
-/// from vector registers to memory, with no general register.
+/// Writes the first `dst.len()` bytes, at most 16, of `value` into `dst`, with two overlapping
+/// stores of 8, 4, 2, or 1 bytes from the first lanes of vector registers (`str d`, `str s`,
+/// `str h`, `str b`). A `tbl` with an index from the length moves the bytes of the second store to
+/// the first lanes. Thus the bytes go from vector registers to memory, with no general register.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 #[target_feature(enable = "neon")]
@@ -212,34 +209,226 @@ fn read16(src: &[u8], fill: u8) -> [u8; 16] {
     clippy::missing_safety_doc,
     reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
 )]
-fn write16(dst: &mut [u8], value: &[u8; 16]) {
+pub(crate) fn write16(dst: &mut [u8], value: &[u8; 16]) {
     use core::arch::aarch64::*;
     if let Ok(full) = <&mut [u8; 16]>::try_from(&mut *dst) {
         *full = *value;
         return;
     }
     let len = dst.len();
-    assert!(len < 16);
-    let mut value = aarch64::load16::<0, _>(value);
-    let mut rest = dst;
-    if let (true, Some((word, after))) = (len & 8 != 0, rest.split_first_chunk_mut::<8>()) {
-        *word = vgetq_lane_u64::<0>(vreinterpretq_u64_u8(value)).to_le_bytes();
-        value = vextq_u8::<8>(value, value);
-        rest = after;
+    let value = aarch64::load16::<0, _>(value);
+    // The bytes from `at`, which is less than 16, in the first lanes.
+    let from = |at: usize| {
+        let at = u8::try_from(at).unwrap_or_default();
+        vqtbl1q_u8(value, vaddq_u8(aarch64::load16::<0, _>(&IOTA), vdupq_n_u8(at)))
+    };
+    let words = |value| vreinterpretq_u64_u8(value);
+    match len {
+        8.. => {
+            if let Some(first) = dst.first_chunk_mut::<8>() {
+                *first = vgetq_lane_u64::<0>(words(value)).to_le_bytes();
+            }
+            if let Some(last) = dst.last_chunk_mut::<8>() {
+                *last = vgetq_lane_u64::<0>(words(from(len - 8))).to_le_bytes();
+            }
+        }
+        4.. => {
+            if let Some(first) = dst.first_chunk_mut::<4>() {
+                *first = vgetq_lane_u32::<0>(vreinterpretq_u32_u8(value)).to_le_bytes();
+            }
+            if let Some(last) = dst.last_chunk_mut::<4>() {
+                *last = vgetq_lane_u32::<0>(vreinterpretq_u32_u8(from(len - 4))).to_le_bytes();
+            }
+        }
+        2.. => {
+            if let Some(first) = dst.first_chunk_mut::<2>() {
+                *first = vgetq_lane_u16::<0>(vreinterpretq_u16_u8(value)).to_le_bytes();
+            }
+            if let Some(last) = dst.last_chunk_mut::<2>() {
+                *last = vgetq_lane_u16::<0>(vreinterpretq_u16_u8(from(len - 2))).to_le_bytes();
+            }
+        }
+        1 => {
+            if let Some(first) = dst.first_mut() {
+                *first = vgetq_lane_u8::<0>(value);
+            }
+        }
+        0 => {}
     }
-    if let (true, Some((word, after))) = (len & 4 != 0, rest.split_first_chunk_mut::<4>()) {
-        *word = vgetq_lane_u32::<0>(vreinterpretq_u32_u8(value)).to_le_bytes();
-        value = vextq_u8::<4>(value, value);
-        rest = after;
-    }
-    if let (true, Some((half, after))) = (len & 2 != 0, rest.split_first_chunk_mut::<2>()) {
-        *half = vgetq_lane_u16::<0>(vreinterpretq_u16_u8(value)).to_le_bytes();
-        value = vextq_u8::<2>(value, value);
-        rest = after;
-    }
-    if let (true, [byte, ..]) = (len & 1 != 0, rest) {
-        *byte = vgetq_lane_u8::<0>(value);
-    }
+}
+
+/// The number of the last bytes of a vector to keep, from a length of at most 16.
+#[cfg(feature = "base64")]
+#[inline(always)]
+fn kept(len: usize) -> u8 {
+    u8::try_from(len.min(16)).unwrap_or(16)
+}
+
+/// The last `len` bytes of `last`, at most 16, in the first lanes, and `fill` in the other lanes.
+/// One shuffle with an index from the length moves them, so the bytes stay in vector registers.
+#[cfg(all(feature = "base64", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "ssse3")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+pub(crate) fn from_end(last: &[u8; 16], len: usize, fill: u8) -> [u8; 16] {
+    use core::arch::x86_64::*;
+    // Lane `i` takes byte `16 - len + i`. `pshufb` gives zero to a lane whose index has bit 7, so
+    // the `0x70` in the index sets bit 7 for each lane from `len`, and keeps the low four bits of
+    // the other lanes.
+    let index = _mm_add_epi8(
+        x86::load16::<0, _>(&IOTA),
+        _mm_set1_epi8((0x80 - kept(len)).cast_signed()),
+    );
+    let fill = _mm_set1_epi8(fill.cast_signed());
+    let bytes = _mm_add_epi8(
+        _mm_shuffle_epi8(_mm_sub_epi8(x86::load16::<0, _>(last), fill), index),
+        fill,
+    );
+    let mut out = [0; 16];
+    x86::store16::<0, _>(&mut out, bytes);
+    out
+}
+
+/// The first `len` bytes of `first`, at most 16, in the last lanes, and zero in the other lanes:
+/// the inverse of [`from_end`].
+#[cfg(all(feature = "base64", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "ssse3")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+pub(crate) fn to_end(first: &[u8; 16], len: usize) -> [u8; 16] {
+    use core::arch::x86_64::*;
+    // Lane `i` takes byte `i + len - 16`, and a lane before `16 - len` has an index that wraps to
+    // bit 7, so `pshufb` gives it zero.
+    let index = _mm_add_epi8(
+        x86::load16::<0, _>(&IOTA),
+        _mm_set1_epi8(kept(len).wrapping_sub(16).cast_signed()),
+    );
+    let mut out = [0; 16];
+    x86::store16::<0, _>(&mut out, _mm_shuffle_epi8(x86::load16::<0, _>(first), index));
+    out
+}
+
+/// The last `len` bytes of `last`, at most 16, in the first lanes, and `fill` in the other lanes.
+/// One `tbx` with an index from the length moves them, so the bytes stay in vector registers.
+#[cfg(all(feature = "base64", target_arch = "aarch64"))]
+#[inline(always)]
+#[target_feature(enable = "neon")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+pub(crate) fn from_end(last: &[u8; 16], len: usize, fill: u8) -> [u8; 16] {
+    use core::arch::aarch64::*;
+    // Lane `i` takes byte `16 - len + i`, and a lane from `len` has an index past the table, so
+    // `tbx` keeps its `fill`.
+    let index = vaddq_u8(aarch64::load16::<0, _>(&IOTA), vdupq_n_u8(16 - kept(len)));
+    let last = aarch64::load16::<0, _>(last);
+    let bytes = if fill == 0 {
+        vqtbl1q_u8(last, index)
+    } else {
+        vqtbx1q_u8(vdupq_n_u8(fill), last, index)
+    };
+    let mut out = [0; 16];
+    aarch64::store16::<0, _>(&mut out, bytes);
+    out
+}
+
+/// The first `len` bytes of `first`, at most 16, in the last lanes, and zero in the other lanes:
+/// the inverse of [`from_end`].
+#[cfg(all(feature = "base64", target_arch = "aarch64"))]
+#[inline(always)]
+#[target_feature(enable = "neon")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+pub(crate) fn to_end(first: &[u8; 16], len: usize) -> [u8; 16] {
+    use core::arch::aarch64::*;
+    // Lane `i` takes byte `i + len - 16`, and a lane before `16 - len` has an index that wraps past
+    // the table, so `tbl` gives it zero.
+    let index = vaddq_u8(aarch64::load16::<0, _>(&IOTA), vdupq_n_u8(kept(len).wrapping_sub(16)));
+    let mut out = [0; 16];
+    aarch64::store16::<0, _>(&mut out, vqtbl1q_u8(aarch64::load16::<0, _>(first), index));
+    out
+}
+
+/// The last `len` bytes of `last`, at most 16, in the first lanes, and `fill` in the other lanes.
+/// One `i8x16.swizzle` with an index from the length moves them, so the bytes stay in vector
+/// registers.
+#[cfg(all(feature = "base64", target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+pub(crate) fn from_end(last: &[u8; 16], len: usize, fill: u8) -> [u8; 16] {
+    use core::arch::wasm32::*;
+    // Lane `i` takes byte `16 - len + i`, and `swizzle` gives zero to a lane from `len`, whose index
+    // is past the vector.
+    let index = i8x16_add(wasm32::load16::<0, _>(&IOTA), u8x16_splat(16 - kept(len)));
+    let fill = u8x16_splat(fill);
+    let bytes = i8x16_add(
+        i8x16_swizzle(i8x16_sub(wasm32::load16::<0, _>(last), fill), index),
+        fill,
+    );
+    let mut out = [0; 16];
+    wasm32::store16::<0, _>(&mut out, bytes);
+    out
+}
+
+/// The first `len` bytes of `first`, at most 16, in the last lanes, and zero in the other lanes:
+/// the inverse of [`from_end`].
+#[cfg(all(feature = "base64", target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+pub(crate) fn to_end(first: &[u8; 16], len: usize) -> [u8; 16] {
+    use core::arch::wasm32::*;
+    // Lane `i` takes byte `i + len - 16`, and a lane before `16 - len` has an index that wraps past
+    // the vector, so `swizzle` gives it zero.
+    let index = i8x16_add(wasm32::load16::<0, _>(&IOTA), u8x16_splat(kept(len).wrapping_sub(16)));
+    let mut out = [0; 16];
+    wasm32::store16::<0, _>(&mut out, i8x16_swizzle(wasm32::load16::<0, _>(first), index));
+    out
+}
+
+/// The byte at `at` of `value`, or zero from 16. A shuffle moves it to the first lane, so the bytes
+/// stay in vector registers until the last move.
+#[cfg(all(feature = "base64", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "ssse3")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+pub(crate) fn byte_at(value: &[u8; 16], at: usize) -> u8 {
+    use core::arch::x86_64::*;
+    // The `0x70` sets bit 7 of the index from 16, as in `from_end`.
+    let index = _mm_set1_epi8((0x70 + kept(at)).cast_signed());
+    _mm_cvtsi128_si32(_mm_shuffle_epi8(x86::load16::<0, _>(value), index)).to_le_bytes()[0]
+}
+
+/// The byte at `at` of `value`, or zero from 16. A `tbl` moves it to the first lane, so the bytes
+/// stay in vector registers until the last move.
+#[cfg(all(feature = "base64", target_arch = "aarch64"))]
+#[inline(always)]
+#[target_feature(enable = "neon")]
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+)]
+pub(crate) fn byte_at(value: &[u8; 16], at: usize) -> u8 {
+    use core::arch::aarch64::*;
+    vgetq_lane_u8::<0>(vqtbl1q_u8(aarch64::load16::<0, _>(value), vdupq_n_u8(kept(at))))
+}
+
+/// The byte at `at` of `value`, or zero from 16. A `swizzle` moves it to the first lane, so the
+/// bytes stay in vector registers until the last move.
+#[cfg(all(feature = "base64", target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+pub(crate) fn byte_at(value: &[u8; 16], at: usize) -> u8 {
+    use core::arch::wasm32::*;
+    u8x16_extract_lane::<0>(i8x16_swizzle(wasm32::load16::<0, _>(value), u8x16_splat(kept(at))))
 }
 
 /// The loads and stores of x86_64. Each takes an array and an offset in it, and a constant
@@ -320,6 +509,13 @@ pub(crate) mod x86 {
         if lanes == 0 { 0 } else { u64::MAX >> (64 - lanes) }
     }
 
+    /// The mask of lane `at` alone, or no lane from 64.
+    #[cfg(feature = "base64")]
+    #[inline]
+    pub(crate) fn lane(at: usize) -> u64 {
+        u32::try_from(at).ok().and_then(|at| 1_u64.checked_shl(at)).unwrap_or(0)
+    }
+
     /// The first bytes of `src`, at most 64, in the first lanes, and `fill` in the other lanes.
     #[inline]
     #[target_feature(enable = "avx512bw")]
@@ -365,11 +561,9 @@ pub(crate) mod x86 {
     reason = "each function is safe; only its target feature makes a call from code without the feature unsafe"
 )]
 pub(crate) mod aarch64 {
-    use core::arch::aarch64::{uint8x16_t, vld1q_u8, vst1q_u8};
-    #[cfg(feature = "hex")]
-    use core::arch::aarch64::{uint8x16x2_t, vst2q_u8};
+    use core::arch::aarch64::{uint8x16_t, uint8x16x4_t, vld1q_u8, vld1q_u8_x4, vst1q_u8};
     #[cfg(feature = "base64")]
-    use core::arch::aarch64::{uint8x16x3_t, uint8x16x4_t, vld1q_u8_x4, vld3q_u8, vld4q_u8, vst3q_u8, vst4q_u8};
+    use core::arch::aarch64::{uint8x16x3_t, vld3q_u8, vld4q_u8, vst3q_u8};
 
     /// The 16 bytes at `AT` in `src`.
     #[inline]
@@ -389,7 +583,6 @@ pub(crate) mod aarch64 {
         unsafe { vst1q_u8(dst.as_mut_ptr().add(AT), value) }
     }
 
-    #[cfg(feature = "base64")]
     /// The 64 bytes at `AT` in `src` as four vectors, for a table lookup.
     #[inline]
     #[target_feature(enable = "neon")]
@@ -397,15 +590,6 @@ pub(crate) mod aarch64 {
         const { assert!(AT + 64 <= N) };
         // SAFETY: the bytes `AT..AT + 64` are in `src`, and the load needs no alignment.
         unsafe { vld1q_u8_x4(src.as_ptr().add(AT)) }
-    }
-
-    #[cfg(feature = "hex")]
-    /// Stores the bytes of the two vectors in turn.
-    #[inline]
-    #[target_feature(enable = "neon")]
-    pub(crate) fn store_pairs(dst: &mut [u8; 32], value: uint8x16x2_t) {
-        // SAFETY: `dst` has 32 bytes, and the store needs no alignment.
-        unsafe { vst2q_u8(dst.as_mut_ptr(), value) }
     }
 
     #[cfg(feature = "base64")]
@@ -433,15 +617,6 @@ pub(crate) mod aarch64 {
     pub(crate) fn load_quads(src: &[u8; 64]) -> uint8x16x4_t {
         // SAFETY: `src` has 64 bytes, and the load needs no alignment.
         unsafe { vld4q_u8(src.as_ptr()) }
-    }
-
-    #[cfg(feature = "base64")]
-    /// Stores the bytes of the four vectors in turn.
-    #[inline]
-    #[target_feature(enable = "neon")]
-    pub(crate) fn store_quads(dst: &mut [u8; 64], value: uint8x16x4_t) {
-        // SAFETY: `dst` has 64 bytes, and the store needs no alignment.
-        unsafe { vst4q_u8(dst.as_mut_ptr(), value) }
     }
 }
 

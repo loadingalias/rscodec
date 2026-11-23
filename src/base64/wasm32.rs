@@ -5,11 +5,11 @@
 
 use core::arch::wasm32::*;
 
-use super::{Profile, Tables, bytes_len, symbols_len};
+use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
     simd::{
-        blocks,
+        byte_at, from_end, to_end,
         wasm32::{load16, store16},
     },
 };
@@ -23,7 +23,11 @@ const DECODE_ORDER: [u8; 16] = [2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, 0xff, 0x
 pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
     let shift = load16::<0, _>(&Tables::of(profile).nibbles.shift);
     let order = load16::<0, _>(&ENCODE_ORDER);
-    blocks::<16, 16>(class, bytes, out, 12, 0, symbols_len, |src, dst| {
+    let ends = (
+        |last: &[u8; 16], len| from_end(last, len, 0),
+        |first: &[u8; 16], len| to_end(first, len),
+    );
+    encode_steps(class, bytes, out, ends, |src, dst| {
         let input = i8x16_swizzle(load16::<0, _>(src), order);
         // In each 32-bit lane, the low 16 bits hold the first and the second sextet at bits 10
         // and 4, and the high 16 bits hold the third and the fourth at bits 6 and 0.
@@ -47,7 +51,7 @@ pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut
     let special_index = u8x16_splat(tables.special_index);
     let order = load16::<0, _>(&DECODE_ORDER);
     let mut invalid = u8x16_splat(0);
-    blocks::<16, 16>(class, text, out, 16, b'A', bytes_len, |src, dst| {
+    let trailing = decode_steps(class, text, out, (from_end, byte_at), |src, dst| {
         let src = load16::<0, _>(src);
         let hi = u8x16_shr(src, 4);
         let lo = v128_and(src, u8x16_splat(0x0f));
@@ -65,5 +69,5 @@ pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut
         let words = i32x4_dot_i16x8(pairs, u32x4_splat(0x0001_1000));
         store16::<0, _>(dst, i8x16_swizzle(words, order));
     });
-    !v128_any_true(invalid)
+    !v128_any_true(invalid) & (trailing == 0)
 }

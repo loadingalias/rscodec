@@ -13,12 +13,12 @@
 
 use core::arch::x86_64::*;
 
-use super::{Profile, Tables, bytes_len, symbols_len};
+use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
     simd::{
-        blocks, whole_blocks,
-        x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
+        byte_at, from_end, to_end,
+        x86::{lane, load_masked, load16, load32, load64, store_masked, store16, store32, store64},
     },
 };
 
@@ -46,7 +46,7 @@ pub(super) mod ssse3 {
 
     use super::{
         Class, DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, HIGH_SHIFTS, LOW_SEXTETS, LOW_SHIFTS, PAIRS, Profile, Tables,
-        WORDS, blocks, bytes_len, load16, store16, symbols_len,
+        WORDS, byte_at, decode_steps, encode_steps, from_end, load16, store16, to_end,
     };
 
     #[target_feature(enable = "ssse3")]
@@ -54,7 +54,11 @@ pub(super) mod ssse3 {
         let tables = &Tables::of(profile).nibbles;
         let shift = load16::<0, _>(&tables.shift);
         let order = load16::<0, _>(&ENCODE_ORDER);
-        blocks::<16, 16>(class, bytes, out, 12, 0, symbols_len, |src, dst| {
+        let ends = (
+            |last: &[u8; 16], len| from_end(last, len, 0),
+            |first: &[u8; 16], len| to_end(first, len),
+        );
+        encode_steps(class, bytes, out, ends, |src, dst| {
             let input = _mm_shuffle_epi8(load16::<0, _>(src), order);
             let high = _mm_mulhi_epu16(
                 _mm_and_si128(input, _mm_set1_epi32(HIGH_SEXTETS)),
@@ -84,7 +88,11 @@ pub(super) mod ssse3 {
         let order = load16::<0, _>(&DECODE_ORDER);
         let nibble = _mm_set1_epi8(0x0f);
         let mut invalid = _mm_setzero_si128();
-        blocks::<16, 16>(class, text, out, 16, b'A', bytes_len, |src, dst| {
+        let ends = (
+            |last: &[u8; 16], len, fill| from_end(last, len, fill),
+            |value: &[u8; 16], at| byte_at(value, at),
+        );
+        let trailing = decode_steps(class, text, out, ends, |src, dst| {
             let src = load16::<0, _>(src);
             let hi = _mm_and_si128(_mm_srli_epi32(src, 4), nibble);
             let lo = _mm_and_si128(src, nibble);
@@ -95,7 +103,7 @@ pub(super) mod ssse3 {
             let words = _mm_madd_epi16(_mm_maddubs_epi16(sextets, _mm_set1_epi32(PAIRS)), _mm_set1_epi32(WORDS));
             store16::<0, _>(dst, _mm_shuffle_epi8(words, order));
         });
-        _mm_movemask_epi8(_mm_cmpeq_epi8(invalid, _mm_setzero_si128())) == 0xffff
+        (_mm_movemask_epi8(_mm_cmpeq_epi8(invalid, _mm_setzero_si128())) == 0xffff) & (trailing == 0)
     }
 }
 
@@ -104,7 +112,7 @@ pub(super) mod avx2 {
 
     use super::{
         Class, DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, HIGH_SHIFTS, LOW_SEXTETS, LOW_SHIFTS, PAIRS, Profile, Tables,
-        WORDS, bytes_len, load16, load32, ssse3, store32, symbols_len, whole_blocks,
+        WORDS, load16, load32, ssse3, store32,
     };
 
     /// A table of 16 bytes in each 128-bit lane.
@@ -120,7 +128,11 @@ pub(super) mod avx2 {
         let order = each_lane(&ENCODE_ORDER);
         // The 12 bytes of each 128-bit lane: the 32-bit words 0 to 2 and 3 to 5.
         let spread = _mm256_setr_epi32(0, 1, 2, 2, 3, 4, 5, 5);
-        let (read, written) = whole_blocks::<32, 32>(bytes, out, 24, symbols_len, |src, dst| {
+        // Block `i` reads the bytes from `24 i` to `24 i + 32`. The blocks leave 16 to 39 bytes, for
+        // the kernel of 16-byte vectors.
+        let blocks = bytes.len().saturating_sub(16) / 24;
+        let windows = bytes.array_windows::<32>().step_by(24).zip(out.as_chunks_mut::<32>().0);
+        for (src, dst) in windows.take(blocks) {
             let input = _mm256_shuffle_epi8(_mm256_permutevar8x32_epi32(load32::<0, _>(src), spread), order);
             let high = _mm256_mulhi_epu16(
                 _mm256_and_si256(input, _mm256_set1_epi32(HIGH_SEXTETS)),
@@ -136,9 +148,9 @@ pub(super) mod avx2 {
                 _mm256_and_si256(_mm256_cmpgt_epi8(_mm256_set1_epi8(26), sextets), _mm256_set1_epi8(13)),
             );
             store32::<0, _>(dst, _mm256_add_epi8(sextets, _mm256_shuffle_epi8(shift, class)));
-        });
+        }
         // The rest, in vectors of 16 bytes.
-        ssse3::encode(class, profile, &bytes[read..], &mut out[written..]);
+        ssse3::encode(class, profile, &bytes[24 * blocks..], &mut out[32 * blocks..]);
     }
 
     #[target_feature(enable = "avx2")]
@@ -153,7 +165,13 @@ pub(super) mod avx2 {
         let pack = _mm256_setr_epi32(0, 1, 2, 4, 5, 6, 3, 7);
         let nibble = _mm256_set1_epi8(0x0f);
         let mut invalid = _mm256_setzero_si256();
-        let (read, written) = whole_blocks::<32, 32>(text, out, 32, bytes_len, |src, dst| {
+        // Block `i` writes 32 bytes from byte `24 i`. The blocks leave 16 to 47 characters, for the
+        // kernel of 16-byte vectors.
+        let blocks = text.len().saturating_sub(16) / 32;
+        for (src, at) in text.as_chunks::<32>().0.iter().zip((0..).step_by(24)).take(blocks) {
+            let Some(dst) = out.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<32>) else {
+                break;
+            };
             let src = load32::<0, _>(src);
             let hi = _mm256_and_si256(_mm256_srli_epi32(src, 4), nibble);
             let lo = _mm256_and_si256(src, nibble);
@@ -169,9 +187,9 @@ pub(super) mod avx2 {
                 dst,
                 _mm256_permutevar8x32_epi32(_mm256_shuffle_epi8(words, order), pack),
             );
-        });
+        }
         // The rest, in vectors of 16 bytes.
-        let rest_valid = ssse3::decode(class, profile, &text[read..], &mut out[written..]);
+        let rest_valid = ssse3::decode(class, profile, &text[32 * blocks..], &mut out[24 * blocks..]);
         (_mm256_movemask_epi8(_mm256_cmpeq_epi8(invalid, _mm256_setzero_si256())) == -1) & rest_valid
     }
 }
@@ -275,8 +293,8 @@ pub(super) mod avx512bw {
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
-        decode_64(text, out, decoder(profile, &mut invalid));
-        _mm512_test_epi8_mask(invalid, invalid) == 0
+        let trailing = decode_64(text, out, decoder(profile, &mut invalid));
+        (_mm512_test_epi8_mask(invalid, invalid) == 0) & trailing
     }
 
     /// Decodes a text of at most `ONE_MAX` bytes of result, with no loop.
@@ -284,8 +302,8 @@ pub(super) mod avx512bw {
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode_one(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
-        decode_rest(text, out, decoder(profile, &mut invalid));
-        _mm512_test_epi8_mask(invalid, invalid) == 0
+        let trailing = decode_rest(text, out, decoder(profile, &mut invalid));
+        (_mm512_test_epi8_mask(invalid, invalid) == 0) & trailing
     }
 }
 
@@ -383,8 +401,8 @@ pub(super) mod avx512vbmi {
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
-        decode_64(text, out, decoder(profile, &mut invalid));
-        _mm512_movepi8_mask(invalid) == 0
+        let trailing = decode_64(text, out, decoder(profile, &mut invalid));
+        (_mm512_movepi8_mask(invalid) == 0) & trailing
     }
 
     /// Decodes a text of at most `ONE_MAX` bytes of result, with no loop.
@@ -392,29 +410,38 @@ pub(super) mod avx512vbmi {
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn decode_one(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
-        decode_rest(text, out, decoder(profile, &mut invalid));
-        _mm512_movepi8_mask(invalid) == 0
+        let trailing = decode_rest(text, out, decoder(profile, &mut invalid));
+        (_mm512_movepi8_mask(invalid) == 0) & trailing
     }
 }
 
 /// Encodes in blocks of 48 bytes with `block`, which gives the 64 characters of the first 48
-/// bytes of a vector. A masked load of 48 lanes, with a constant mask, reads each block, so the
-/// loop has no branch on the place of a block. Each step of the loop runs two blocks.
+/// bytes of a vector. A full load reads each block whose 64 bytes are in the input, two blocks in
+/// each step of the loop, so `vpermb` can take the load. A masked load of 48 lanes, with a constant
+/// mask, reads a last block that has fewer than 64 bytes, and masked accesses the rest.
 #[inline]
 #[target_feature(enable = "avx512bw")]
 fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
     let zero = _mm512_setzero_si512();
-    let (pairs, rest) = bytes.as_chunks::<96>();
-    let (texts, out) = out.split_at_mut(pairs.len() * 128);
-    for (pair, text) in pairs.iter().zip(texts.as_chunks_mut::<128>().0) {
-        for (chunk, text) in pair.as_chunks::<48>().0.iter().zip(text.as_chunks_mut::<64>().0) {
-            store64::<0, _>(text, block(load_masked(chunk, zero)));
-        }
+    // Step `i` reads the bytes from `96 i` to `96 i + 112`.
+    let steps = bytes.len().saturating_sub(16) / 96;
+    let windows = bytes
+        .array_windows::<112>()
+        .step_by(96)
+        .zip(out.as_chunks_mut::<128>().0);
+    for (src, text) in windows.take(steps) {
+        store64::<0, _>(text, block(load64::<0, _>(src)));
+        store64::<64, _>(text, block(load64::<48, _>(src)));
     }
-    let (chunks, rest) = rest.as_chunks::<48>();
+    let (bytes, out) = (&bytes[96 * steps..], &mut out[128 * steps..]);
+    let (chunks, rest) = bytes.as_chunks::<48>();
     let (texts, tail) = out.split_at_mut(chunks.len() * 64);
-    for (chunk, text) in chunks.iter().zip(texts.as_chunks_mut::<64>().0) {
-        store64::<0, _>(text, block(load_masked(chunk, zero)));
+    for ((chunk, text), at) in chunks.iter().zip(texts.as_chunks_mut::<64>().0).zip((0..).step_by(48)) {
+        let src = bytes
+            .get(at..)
+            .and_then(<[u8]>::first_chunk::<64>)
+            .map_or_else(|| load_masked(chunk, zero), |src| load64::<0, _>(src));
+        store64::<0, _>(text, block(src));
     }
     if !rest.is_empty() {
         encode_rest(rest, tail, block);
@@ -432,20 +459,26 @@ fn encode_rest(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> _
 }
 
 /// Decodes a text of at most `ONE_MAX` bytes of result in one block with `block`, with masked
-/// loads and stores. 'A', which is zero, is in place of the characters after the end.
+/// loads and stores. 'A', which is zero, is in place of the characters after the end. Gives whether
+/// the trailing bits are zero: they are in the byte after the result. Only a last group of 2 or 3
+/// characters has them, and then that byte is in the first 48 lanes, the bytes of the block.
 #[inline]
 #[target_feature(enable = "avx512bw")]
-fn decode_rest(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
-    store_masked(out, block(load_masked(text, _mm512_set1_epi8(b'A'.cast_signed()))));
+fn decode_rest(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) -> bool {
+    let bytes = block(load_masked(text, _mm512_set1_epi8(b'A'.cast_signed())));
+    store_masked(out, bytes);
+    let after = lane(out.len()) & (u64::MAX >> 16);
+    _mm512_mask_test_epi8_mask(after, bytes, bytes) == 0
 }
 
 /// Decodes in blocks of 64 characters with `block`, which gives the 48 bytes of a vector of
 /// characters. Each step of the loop runs four blocks, and three full stores write their 192 bytes:
 /// two-source permutes of 64-bit words join the blocks. A masked store of 48 lanes, with a constant
 /// mask, writes each of the last blocks, so the loops have no branch on the place of a block.
+/// Gives whether the trailing bits are zero.
 #[inline]
 #[target_feature(enable = "avx512bw")]
-fn decode_64(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
+fn decode_64(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) -> bool {
     // The six words of each block in turn: words 0 to 7 of the first source, then 8 to 15 of the
     // second.
     let first = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 8, 9);
@@ -465,7 +498,5 @@ fn decode_64(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m5
     for (chunk, bytes) in chunks.iter().zip(outs.as_chunks_mut::<48>().0) {
         store_masked(bytes, block(load64::<0, _>(chunk)));
     }
-    if !rest.is_empty() {
-        decode_rest(rest, tail, block);
-    }
+    rest.is_empty() || decode_rest(rest, tail, block)
 }

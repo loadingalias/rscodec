@@ -181,7 +181,7 @@ fn text_of<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
 /// Decodes the lowercase hex `text` into the start of `out`, and gives the bytes. It runs the
 /// fastest kernel of the CPU, for public text. Decode a secret with [`decode_secret`].
 ///
-/// On x86_64, a result of up to 32 bytes comes from SSE2, inline and with no choice of kernel. When
+/// On x86_64, a result of up to 16 bytes comes from SSE2, inline and with no choice of kernel. When
 /// `-C target-feature` fixes a SIMD kernel, that kernel runs inline at each length.
 ///
 /// The bytes of `out` after the result, and all of `out` after an error, are unspecified.
@@ -243,11 +243,24 @@ fn bytes_of<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
 fn checked<'o>(class: impl Class, valid: bool, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     // One branch for the whole text.
     if !valid {
-        class.wipe(out);
-        let offset = ct::first_negative(text.iter().map(|&byte| portable::nibble(byte)));
-        return Err(Error::new(ErrorKind::Symbol, offset));
+        return Err(refusal(class, text, out));
     }
     Ok(out)
+}
+
+/// The error of `text`, which has a byte that is not a digit. Its time depends only on the length.
+/// In the secret `class`, it writes zero to `out` first.
+///
+/// It is cold and out of line, so that the decoder keeps its registers for the valid text: a call
+/// on the hot path makes the caller save and load its vector registers (C109, Graviton4).
+#[cold]
+#[inline(never)]
+fn refusal(class: impl Class, text: &[u8], out: &mut [u8]) -> Error {
+    class.wipe(out);
+    Error::new(
+        ErrorKind::Symbol,
+        ct::first_negative(text.iter().map(|&byte| portable::nibble(byte))),
+    )
 }
 
 /// A kernel of the codec: its code for one instruction set. The variants depend on the target
@@ -267,7 +280,8 @@ pub enum Kernel {
     /// AVX2, with 32-byte vectors.
     #[cfg(target_arch = "x86_64")]
     Avx2,
-    /// AVX-512F and AVX-512BW, with 64-byte vectors.
+    /// AVX-512F and AVX-512BW, with 64-byte vectors. An encode of 64 KiB or more runs the AVX2
+    /// code, with 32-byte vectors.
     #[cfg(target_arch = "x86_64")]
     Avx512Bw,
     /// Neon (Advanced SIMD), with 16-byte vectors.
@@ -306,8 +320,9 @@ impl Kernel {
             // The AVX2 kernels give the rest of each input to the SSSE3 kernels.
             #[cfg(target_arch = "x86_64")]
             Self::Avx2 => (AVX2.union(SSSE3), Timing::Secret),
+            // The AVX-512BW encoder runs the AVX2 code for a long input.
             #[cfg(target_arch = "x86_64")]
-            Self::Avx512Bw => (AVX512F.union(AVX512BW), Timing::Secret),
+            Self::Avx512Bw => (AVX512F.union(AVX512BW).union(AVX2), Timing::Secret),
             #[cfg(target_arch = "aarch64")]
             Self::Neon => (cpu::aarch64::NEON, Timing::Secret),
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -352,6 +367,15 @@ impl Kernel {
             Timing::Secret => (SECRET, &KEPT[1]),
         };
         let index = fixed.unwrap_or_else(|| kept.index(|| Self::fastest(cpu::caps(), class)));
+        // The fastest kernel of the target first: one compare, and then the caller calls it with
+        // no table.
+        let top = match class {
+            Timing::Public => const { Self::fastest(Caps::ALL, Timing::Public) },
+            Timing::Secret => const { Self::fastest(Caps::ALL, Timing::Secret) },
+        };
+        if index == top {
+            return Self::ALL[top];
+        }
         Self::ALL.get(index).copied().unwrap_or(Self::Portable)
     }
 }
@@ -401,9 +425,16 @@ mod kernel {
     #[cfg(target_arch = "x86_64")]
     use super::x86;
     use super::{Backend, Kernel, portable};
-    #[cfg(target_arch = "x86_64")]
-    use crate::simd::SHORT_MAX;
     use crate::{cpu::Timing, ct::Class};
+
+    /// The largest input of the SSE2 short path of x86_64 that encodes. A longer input runs the
+    /// chosen kernel, whose call costs less than the SSE2 work (C109).
+    #[cfg(target_arch = "x86_64")]
+    const ENCODE_INLINE_MAX: usize = 32;
+
+    /// The largest result of the SSE2 short path of x86_64 that decodes, as [`ENCODE_INLINE_MAX`].
+    #[cfg(target_arch = "x86_64")]
+    const DECODE_INLINE_MAX: usize = 16;
 
     /// Whether the short path runs for `timing`: unless the build fixes a SIMD kernel, which then
     /// runs inline at each length.
@@ -419,19 +450,14 @@ mod kernel {
         }
     }
 
-    /// Encodes `bytes` into `out` in a function of `timing` with no backend argument: on x86_64, an
-    /// input of up to `SHORT_MAX` bytes on the short path, and otherwise on the chosen kernel.
+    /// Encodes `bytes` into `out` in a function of `timing` with no backend argument: on x86_64, a
+    /// short input on the short path, and otherwise on the chosen kernel.
     #[inline(always)]
     pub(super) fn encode_chosen(class: impl Class, timing: Timing, bytes: &[u8], out: &mut [u8]) {
         #[cfg(target_arch = "x86_64")]
-        if short(timing) {
-            if bytes.len() <= SHORT_MAX {
-                // SAFETY: each x86_64 target has SSE2.
-                return unsafe { x86::sse2::encode(class, bytes, out) };
-            }
-            // A longer input needs no entry of one vector, and a choice at run time pays for its
-            // test in each call.
-            return encode_any(class, Backend(Kernel::chosen(timing)), bytes, out);
+        if short(timing) && bytes.len() <= ENCODE_INLINE_MAX {
+            // SAFETY: each x86_64 target has SSE2.
+            return unsafe { x86::sse2::encode(class, bytes, out) };
         }
         encode(class, Backend(Kernel::chosen(timing)), bytes, out);
     }
@@ -440,29 +466,14 @@ mod kernel {
     #[inline(always)]
     pub(super) fn decode_chosen(class: impl Class, timing: Timing, text: &[u8], out: &mut [u8]) -> bool {
         #[cfg(target_arch = "x86_64")]
-        if short(timing) {
-            if out.len() <= SHORT_MAX {
-                // SAFETY: each x86_64 target has SSE2.
-                return unsafe { x86::sse2::decode(class, text, out) };
-            }
-            return decode_any(class, Backend(Kernel::chosen(timing)), text, out);
+        if short(timing) && out.len() <= DECODE_INLINE_MAX {
+            // SAFETY: each x86_64 target has SSE2.
+            return unsafe { x86::sse2::decode(class, text, out) };
         }
         decode(class, Backend(Kernel::chosen(timing)), text, out)
     }
 
-    /// Encodes `bytes` into `out`, which has twice the length. On x86_64, an input of one vector
-    /// runs the AVX-512BW entry with no loop.
-    #[inline(always)]
-    pub(super) fn encode(class: impl Class, backend: Backend, bytes: &[u8], out: &mut [u8]) {
-        #[cfg(target_arch = "x86_64")]
-        if backend.0 == Kernel::Avx512Bw && bytes.len() <= x86::avx512bw::ONE_MAX {
-            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            return unsafe { x86::avx512bw::encode_one(bytes, out) };
-        }
-        encode_any(class, backend, bytes, out);
-    }
-
-    /// Encodes `bytes` into `out` on the kernel of `backend`, at each length.
+    /// Encodes `bytes` into `out`, which has twice the length, on the kernel of `backend`.
     #[cfg_attr(
         not(any(
             target_arch = "x86_64",
@@ -472,7 +483,7 @@ mod kernel {
         expect(unused_variables, reason = "only the SIMD kernels have a temporary array")
     )]
     #[inline(always)]
-    fn encode_any(class: impl Class, backend: Backend, bytes: &[u8], out: &mut [u8]) {
+    pub(super) fn encode(class: impl Class, backend: Backend, bytes: &[u8], out: &mut [u8]) {
         match backend.0 {
             Kernel::Portable => portable::encode(bytes, out),
             #[cfg(target_arch = "x86_64")]
@@ -483,7 +494,7 @@ mod kernel {
             Kernel::Avx2 => unsafe { x86::avx2::encode(class, bytes, out) },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Bw => unsafe { x86::avx512bw::encode(bytes, out) },
+            Kernel::Avx512Bw => unsafe { x86::avx512bw::encode(class, bytes, out) },
             #[cfg(target_arch = "aarch64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Neon => unsafe { aarch64::encode(class, bytes, out) },
@@ -492,19 +503,8 @@ mod kernel {
         }
     }
 
-    /// Decodes `text` into `out`, which has half the length, and gives whether each character is a
-    /// digit. On x86_64, a result of one vector runs the AVX-512BW entry with no loop.
-    #[inline(always)]
-    pub(super) fn decode(class: impl Class, backend: Backend, text: &[u8], out: &mut [u8]) -> bool {
-        #[cfg(target_arch = "x86_64")]
-        if backend.0 == Kernel::Avx512Bw && out.len() <= x86::avx512bw::ONE_MAX {
-            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            return unsafe { x86::avx512bw::decode_one(text, out) };
-        }
-        decode_any(class, backend, text, out)
-    }
-
-    /// Decodes `text` into `out` on the kernel of `backend`, at each length.
+    /// Decodes `text` into `out`, which has half the length, on the kernel of `backend`, and gives
+    /// whether each character is a digit.
     #[cfg_attr(
         not(any(
             target_arch = "x86_64",
@@ -514,7 +514,7 @@ mod kernel {
         expect(unused_variables, reason = "only the SIMD kernels have a temporary array")
     )]
     #[inline(always)]
-    fn decode_any(class: impl Class, backend: Backend, text: &[u8], out: &mut [u8]) -> bool {
+    pub(super) fn decode(class: impl Class, backend: Backend, text: &[u8], out: &mut [u8]) -> bool {
         match backend.0 {
             Kernel::Portable => portable::decode(text, out),
             #[cfg(target_arch = "x86_64")]

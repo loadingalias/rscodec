@@ -43,6 +43,13 @@ use crate::{
     ct::{self, Class, Public, Secret},
 };
 
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+))]
+use crate::simd::{short_blocks, write16};
+
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
 mod portable;
@@ -304,19 +311,9 @@ impl Profile {
         let symbols = self.symbols(text)?;
         let len = bytes_len(symbols.len());
         let out = out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))?;
-        let valid = kernel::decode(class, backend, self, symbols, out);
-        // The bits of the last character after the last byte: 4 bits after 4n + 2 characters, and
-        // 2 bits after 4n + 3.
-        let trailing_bits = match symbols.len() % 4 {
-            2 => 0x0f,
-            3 => 0x03,
-            _ => 0,
-        };
-        let last = symbols.last().map_or(0, |&byte| portable::sextet(self, byte));
-        // One branch for the whole text.
-        if !(valid & (last & trailing_bits == 0)) {
-            class.wipe(out);
-            return Err(self.refusal(symbols));
+        // The kernel checks the alphabet and the trailing bits. One branch for the whole text.
+        if !kernel::decode(class, backend, self, symbols, out) {
+            return Err(self.refusal(class, symbols, out));
         }
         Ok(out)
     }
@@ -336,8 +333,14 @@ impl Profile {
     }
 
     /// The error of `symbols`, which have a byte outside the alphabet or nonzero trailing bits. Its
-    /// time depends only on the length.
-    fn refusal(self, symbols: &[u8]) -> Error {
+    /// time depends only on the length. In the secret `class`, it writes zero to `out` first.
+    ///
+    /// It is cold and out of line, so that the decoder keeps its registers for the valid text: a
+    /// call on the hot path makes the caller save and load its vector registers (C109, Graviton4).
+    #[cold]
+    #[inline(never)]
+    fn refusal(self, class: impl Class, symbols: &[u8], out: &mut [u8]) -> Error {
+        class.wipe(out);
         let first = ct::first_negative(symbols.iter().map(|&byte| portable::sextet(self, byte)));
         if first < symbols.len() {
             Error::new(ErrorKind::Symbol, first)
@@ -469,6 +472,15 @@ impl Kernel {
             Timing::Secret => (SECRET, &KEPT[1]),
         };
         let index = fixed.unwrap_or_else(|| kept.index(|| Self::fastest(cpu::caps(), class)));
+        // The fastest kernel of the target first: one compare, and then the caller calls it with
+        // no table.
+        let top = match class {
+            Timing::Public => const { Self::fastest(Caps::ALL, Timing::Public) },
+            Timing::Secret => const { Self::fastest(Caps::ALL, Timing::Secret) },
+        };
+        if index == top {
+            return Self::ALL[top];
+        }
         Self::ALL.get(index).copied().unwrap_or(Self::Portable)
     }
 }
@@ -588,6 +600,130 @@ mod kernel {
             Kernel::Simd128 => wasm32::decode(class, profile, text, out),
         }
     }
+}
+
+/// Encodes `bytes` into the characters `out`, with no padding, with the `block` of a kernel of
+/// 16-byte vectors: each block takes 12 bytes at the start of 16 and gives 16 characters.
+///
+/// The steps read 16 bytes at each 12. The last one or two blocks take the last 16 bytes of the
+/// input, put in place by `from_end` (see [`crate::simd`]). The last block runs first, and
+/// `to_end` puts its characters at the end of `out`: the blocks before it then write the other
+/// lanes of that store again. An input of fewer than 16 bytes runs on arrays on the stack.
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+))]
+#[inline(always)]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(
+        clippy::missing_safety_doc,
+        reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+    )
+)]
+fn encode_steps(
+    class: impl Class,
+    bytes: &[u8],
+    out: &mut [u8],
+    ends: (
+        impl Fn(&[u8; 16], usize) -> [u8; 16],
+        impl Fn(&[u8; 16], usize) -> [u8; 16],
+    ),
+    mut block: impl FnMut(&[u8; 16], &mut [u8; 16]),
+) {
+    let (from_end, to_end) = ends;
+    let Some(last) = bytes.last_chunk::<16>() else {
+        short_blocks::<16, 16>(class, bytes, out, 12, 0, symbols_len, block);
+        return;
+    };
+    // Step `i` reads the bytes from `12 i` to `12 i + 16`, so the steps leave 4 to 15 bytes. A rest
+    // of more than 12 bytes needs one more whole block.
+    let steps = (bytes.len() - 4) / 12;
+    let rest = bytes.len() - 12 * steps;
+    let rest_last = if rest > 12 { rest - 12 } else { rest };
+    let (mut src, mut dst) = (from_end(last, rest_last), [0; 16]);
+    block(&src, &mut dst);
+    // `out` has at least 22 characters.
+    if let Some(end) = out.last_chunk_mut() {
+        *end = to_end(&dst, symbols_len(rest_last));
+    }
+    class.clear(&mut src);
+    class.clear(&mut dst);
+    let mut outs = out.as_chunks_mut().0.iter_mut();
+    for (src, dst) in bytes.array_windows().step_by(12).zip(outs.by_ref()).take(steps) {
+        block(src, dst);
+    }
+    if rest > 12
+        && let Some(dst) = outs.next()
+    {
+        let mut src = from_end(last, rest);
+        block(&src, dst);
+        class.clear(&mut src);
+    }
+}
+
+/// Decodes the characters `text`, with no padding, into `out` with the `block` of a kernel of
+/// 16-byte vectors: each block takes 16 characters and gives 12 bytes at the start of 16.
+///
+/// A block writes all 16 bytes where `out` has room, and the next block writes its bytes over the
+/// last 4. The characters after the last whole block come from the last 16 characters of the text,
+/// put in place by `from_end`, with `A` after them. A text of fewer than 16 characters runs on
+/// arrays on the stack. Gives the byte after the result in the last block, from `byte_at`: the
+/// trailing bits, which are zero in a canonical text. A load of it from memory would wait for the
+/// store of the vector (C109, Graviton4).
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+))]
+#[inline(always)]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(
+        clippy::missing_safety_doc,
+        reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+    )
+)]
+fn decode_steps(
+    class: impl Class,
+    text: &[u8],
+    out: &mut [u8],
+    ends: (
+        impl Fn(&[u8; 16], usize, u8) -> [u8; 16],
+        impl Fn(&[u8; 16], usize) -> u8,
+    ),
+    mut block: impl FnMut(&[u8; 16], &mut [u8; 16]),
+) -> u8 {
+    let (from_end, byte_at) = ends;
+    let Some(last) = text.last_chunk::<16>() else {
+        return short_blocks::<16, 16>(class, text, out, 16, b'A', bytes_len, block);
+    };
+    let (chunks, rest) = text.as_chunks::<16>();
+    for (src, at) in chunks.iter().zip((0..).step_by(12)) {
+        if let Some(dst) = out.get_mut(at..).and_then(<[u8]>::first_chunk_mut) {
+            block(src, dst);
+        } else if let Some(bytes) = out.get_mut(at..at + 12) {
+            // The last whole block, with no room for 16 bytes.
+            let mut dst = [0; 16];
+            block(src, &mut dst);
+            write16(bytes, &dst);
+            class.clear(&mut dst);
+        }
+    }
+    if rest.is_empty() {
+        return 0;
+    }
+    let (mut src, mut dst) = (from_end(last, rest.len(), b'A'), [0; 16]);
+    block(&src, &mut dst);
+    let rest_out = out.get_mut(12 * chunks.len()..).unwrap_or_default();
+    let after = byte_at(&dst, rest_out.len());
+    write16(rest_out, &dst);
+    class.clear(&mut src);
+    class.clear(&mut dst);
+    after
 }
 
 /// The tables of the SIMD kernels of a profile.

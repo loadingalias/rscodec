@@ -119,12 +119,13 @@ pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mu
 }
 
 /// Decodes the characters `text`, which have no padding, into `out`, which has the length of the
-/// bytes. Gives whether each character is in the alphabet. It does not check the trailing bits.
+/// bytes. Gives whether each character is in the alphabet and the bits after the last byte are
+/// zero.
 pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
     let alphabet = Alphabet::of(profile);
     let (blocks, rest) = text.as_chunks::<4>();
     let (chunks, tail) = out.as_chunks_mut::<3>();
-    let mut values = 0;
+    let (mut values, mut trailing) = (0, 0);
     for (block, chunk) in blocks.iter().zip(chunks) {
         let block_values;
         (*chunk, block_values) = alphabet.decode_block(*block);
@@ -137,8 +138,10 @@ pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut
         let (mut bytes, block_values) = alphabet.decode_block(block);
         values |= block_values;
         tail.copy_from_slice(&bytes[..tail.len()]);
+        // The byte after the result holds the trailing bits, and the `A` after the text adds none.
+        trailing = bytes.get(tail.len()).copied().unwrap_or(0);
         class.clear(&mut block);
         class.clear(&mut bytes);
     }
-    values >= 0
+    (values >= 0) & (trailing == 0)
 }
