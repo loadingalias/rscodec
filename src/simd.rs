@@ -222,35 +222,34 @@ pub(crate) fn write16(dst: &mut [u8], value: &[u8; 16]) {
         let at = u8::try_from(at).unwrap_or_default();
         vqtbl1q_u8(value, vaddq_u8(aarch64::load16::<0, _>(&IOTA), vdupq_n_u8(at)))
     };
-    let words = |value| vreinterpretq_u64_u8(value);
     match len {
         8.. => {
             if let Some(first) = dst.first_chunk_mut::<8>() {
-                *first = vgetq_lane_u64::<0>(words(value)).to_le_bytes();
+                aarch64::store_first(first, value);
             }
             if let Some(last) = dst.last_chunk_mut::<8>() {
-                *last = vgetq_lane_u64::<0>(words(from(len - 8))).to_le_bytes();
+                aarch64::store_first(last, from(len - 8));
             }
         }
         4.. => {
             if let Some(first) = dst.first_chunk_mut::<4>() {
-                *first = vgetq_lane_u32::<0>(vreinterpretq_u32_u8(value)).to_le_bytes();
+                aarch64::store_first(first, value);
             }
             if let Some(last) = dst.last_chunk_mut::<4>() {
-                *last = vgetq_lane_u32::<0>(vreinterpretq_u32_u8(from(len - 4))).to_le_bytes();
+                aarch64::store_first(last, from(len - 4));
             }
         }
         2.. => {
             if let Some(first) = dst.first_chunk_mut::<2>() {
-                *first = vgetq_lane_u16::<0>(vreinterpretq_u16_u8(value)).to_le_bytes();
+                aarch64::store_first(first, value);
             }
             if let Some(last) = dst.last_chunk_mut::<2>() {
-                *last = vgetq_lane_u16::<0>(vreinterpretq_u16_u8(from(len - 2))).to_le_bytes();
+                aarch64::store_first(last, from(len - 2));
             }
         }
         1 => {
-            if let Some(first) = dst.first_mut() {
-                *first = vgetq_lane_u8::<0>(value);
+            if let Some(first) = dst.first_chunk_mut::<1>() {
+                aarch64::store_first(first, value);
             }
         }
         0 => {}
@@ -581,6 +580,35 @@ pub(crate) mod aarch64 {
         const { assert!(AT + 16 <= N) };
         // SAFETY: the bytes `AT..AT + 16` are in `dst`, and the store needs no alignment.
         unsafe { vst1q_u8(dst.as_mut_ptr().add(AT), value) }
+    }
+
+    /// Stores the first `N` bytes of `value`, 8, 4, 2, or 1, in `dst` with one store from the
+    /// vector register (`str d`, `str s`, `str h`, `str b`). The asm fixes the instruction: from a
+    /// lane of an intrinsic, LLVM can move the bytes to a general register with `fmov`, which is not
+    /// on the DIT list of Arm (C103).
+    #[inline]
+    #[target_feature(enable = "neon")]
+    pub(crate) fn store_first<const N: usize>(dst: &mut [u8; N], value: uint8x16_t) {
+        use core::arch::asm;
+        const { assert!(matches!(N, 1 | 2 | 4 | 8)) };
+        let dst = dst.as_mut_ptr();
+        // SAFETY: each store writes the `N` bytes of `dst`, and needs no alignment.
+        unsafe {
+            match N {
+                8 => {
+                    asm!("str {value:d}, [{dst}]", value = in(vreg) value, dst = in(reg) dst, options(nostack, preserves_flags))
+                }
+                4 => {
+                    asm!("str {value:s}, [{dst}]", value = in(vreg) value, dst = in(reg) dst, options(nostack, preserves_flags))
+                }
+                2 => {
+                    asm!("str {value:h}, [{dst}]", value = in(vreg) value, dst = in(reg) dst, options(nostack, preserves_flags))
+                }
+                _ => {
+                    asm!("str {value:b}, [{dst}]", value = in(vreg) value, dst = in(reg) dst, options(nostack, preserves_flags))
+                }
+            }
+        }
     }
 
     /// The 64 bytes at `AT` in `src` as four vectors, for a table lookup.

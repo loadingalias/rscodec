@@ -13,8 +13,9 @@
 //!
 //! The source of each kernel has no branch and no table load that depends on the bytes or the
 //! characters. The time is to depend only on the lengths, and for an error, on its offset. A check
-//! of the compiled code and a timing test of this rule are not complete yet. An [`Error`] holds no
-//! byte of the input.
+//! of the compiled code holds this rule in the shipped builds on x86_64 and aarch64 Linux. A build
+//! whose target features add AVX-512 VBMI or AVX512-FP16 has no such check, and neither has
+//! WebAssembly. An [`Error`] holds no byte of the input.
 //!
 //! ```
 //! use rscodec::hex;

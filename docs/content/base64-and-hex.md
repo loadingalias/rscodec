@@ -36,9 +36,10 @@ Each operation has a function for public data and a function for secret data:
 Both classes give the same result and the same error for each input. They differ in four ways:
 
 - **Kernel.** The public functions run the fastest kernel of the CPU. The secret functions run only
-  the kernels whose instructions Intel lists with data operand independent timing (DOIT) and Arm
-  lists with data independent timing (DIT). On x86_64 with AVX-512 VBMI, public base64 runs the
-  VBMI kernel, and secret base64 runs the AVX-512BW kernel. hex runs the same kernel in each class.
+  the kernels whose instructions on secret data Intel lists with data operand independent timing
+  (DOIT) and Arm lists with data independent timing (DIT). On x86_64 with AVX-512 VBMI, public
+  base64 runs the VBMI kernel, and secret base64 runs the AVX-512BW kernel. hex runs the same kernel
+  in each class.
 - **`PSTATE.DIT`.** A secret function takes `&Dit`, a proof that only `rscodec::with_dit` gives.
   On aarch64, `with_dit` sets `PSTATE.DIT` for its scope, if the CPU has DIT, then runs a
   speculation barrier (`sb`, or `dsb nsh` and `isb` on a CPU without SB), and at the end restores
@@ -60,6 +61,47 @@ where the compiler spills registers.
 The secret functions can be slower. On x86_64 with VBMI, the AVX-512BW kernel of base64 is slower
 than the VBMI kernel. On aarch64, a scope of `with_dit` writes `PSTATE.DIT` two times and runs one
 speculation barrier, which costs most for one short input. If you are not sure that the data is public, use the secret functions.
+
+## Timing evidence
+
+The harness `rscodec-ct` of the repository checks the compiled code of both classes. It checks
+the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C) and aarch64
+(Graviton4), and the build with `-C target-cpu=native` on aarch64.
+
+| Check | Result |
+| --- | --- |
+| Path count: the counters of the instructions and the branches of each call, on each kernel of the CPU, at each length up to 200 bytes and at 13 longer lengths, with random and fixed inputs | One count for each length and outcome |
+| Scan of the disassembly | No load or store at an address from the data, no write of `PSTATE.DIT` in the secret code, and each instruction that reads secret data on the DOIT or DIT list |
+| Painted stack: each secret call on a private stack | No run of 8 secret bytes or 16 secret characters stays in the stack |
+| DudeCT: a statistical test of a fixed input against random inputs of the same length | No difference up to 64 bytes. At 4096 bytes, see the limits |
+
+The result that the caller sees is public, so the time can show it: the lengths, the validity of a
+text, the kind and the offset of a refusal, and the padding of base64.
+
+Limits:
+
+- A build whose target features add instructions off the DOIT list has no timing claim. With
+  `-C target-cpu=native` on a CPU with AVX-512 VBMI or AVX512-FP16, LLVM puts VBMI and FP16
+  instructions in the secret code.
+- WebAssembly has no timing claim. It has no list of instructions with data independent timing,
+  and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
+- At 4096 bytes, DudeCT finds a difference between a fixed input and random inputs: up to 5% when
+  the input comes from outside the cache, on both CPUs, and about 0.05% for hex encode and base64
+  decode on Graviton4 when the input is in the cache. The path count and the scan find no path or
+  address that depends on the data. This result is open.
+- Intel guarantees the DOIT list only in DOIT mode (DOITM), which the operating system sets on a CPU
+  that has it. The tests did not set it.
+
+To scan a build with your target features, run the scan from the repository. It needs `objdump`,
+and it exits with 0 when it finds nothing and with 1 when it finds something:
+
+```sh
+RUSTFLAGS="-C target-cpu=native" cargo run --release -p rscodec-ct -- scan
+```
+
+The last line of its output gives the number of findings, for example `scan: 18 entries, 0
+findings`. The path count, `cargo run --release -p rscodec-ct -- paths`, needs the counters of
+Linux.
 
 ## Decode a base64url token into a stack buffer
 
@@ -248,7 +290,5 @@ fn main() -> Result<(), rscodec::base64::Error> {
   reports AVX-512. Its efficient cores do not have AVX-512.
 
 The source of each kernel has no branch and no table load that depends on the bytes or the
-characters. The time is to depend only on the lengths, and for an error, on its offset. A check of
-the compiled code and a timing test of this rule are not complete yet, so this release makes no
-timing claim. WebAssembly has no list of instructions with data independent timing, so its kernels
-keep only this rule of the source.
+characters. The time is to depend only on the lengths, and for an error, on its offset.
+[Timing evidence](#timing-evidence) gives the checks of the compiled code and their limits.
