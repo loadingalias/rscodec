@@ -6,9 +6,7 @@ extern crate std;
 use core::cmp::Ordering;
 use std::{format, string::String};
 
-use super::{
-    Binary, SPAN, compare, exact, floor_log2_pow10, floor_log10_pow2, floor_log10_three_quarters_pow2, scale, shortest,
-};
+use super::{Binary, SPAN, floor_log2_pow10, floor_log10_pow2, floor_log10_three_quarters_pow2, scale, shortest};
 
 fn printed(value: f64) -> String {
     let mut dest = [0; SPAN];
@@ -194,8 +192,10 @@ fn each_value_of_a_fixed_seed_sample_prints_as_core_fmt_and_reads_back() {
     }
 }
 
+/// `shortest` gives the digits of `core::fmt` on a sample, on each power of two, and on the hard
+/// values, before the layout.
 #[test]
-fn the_exact_path_gives_the_digits_of_core_fmt() {
+fn shortest_gives_the_digits_of_core_fmt() {
     let sample = random(0x5eed_0003).take(1 << 16).map(f64::from_bits);
     let powers = (1..0x7ff_u64).map(|biased| f64::from_bits(biased << 52));
     for value in sample.chain(powers).chain(HARD.iter().copied()) {
@@ -203,18 +203,6 @@ fn the_exact_path_gives_the_digits_of_core_fmt() {
             continue;
         }
         let (binary, expected) = binary_and_digits(value);
-        let k = if binary.irregular {
-            floor_log10_three_quarters_pow2(binary.q)
-        } else {
-            floor_log10_pow2(binary.q)
-        };
-        let (integral, fraction, _) = scale(binary.c, binary.q, k);
-        let (digits, extra) = exact(binary.c, binary.q, binary.irregular, k, integral, fraction);
-        assert_eq!(
-            normal((digits * 10 + u64::from(extra), k)),
-            expected,
-            "the digits of {value:e}"
-        );
         let decimal = shortest(binary);
         assert_eq!(
             normal((decimal.digits * 10 + u64::from(decimal.extra), decimal.exponent)),
@@ -224,13 +212,13 @@ fn the_exact_path_gives_the_digits_of_core_fmt() {
     }
 }
 
-/// The band around each threshold of the fast path in which it calls the exact path, in units of
-/// `2^−64`: the margins of the printer.
+/// The band around each threshold, in units of `2^−64`, in which the approximations of [`scale`]
+/// are closest to a decision: the margins that the printer had before C216.
 const BAND: u64 = 4;
 const TENFOLD_BAND: u64 = 16;
 
-/// Whether the estimates of the fast path for `binary` are in a band, so that the exact path
-/// decides the value.
+/// Whether the estimates for `binary` are in a band, so that only an exact decision gives the
+/// form of `core::fmt`.
 fn in_band(binary: Binary) -> bool {
     let Binary { c, q, irregular } = binary;
     let k = if irregular {
@@ -291,7 +279,7 @@ fn band_values() -> std::vec::Vec<f64> {
 }
 
 #[test]
-fn each_value_in_a_band_of_the_fast_path_prints_as_core_fmt() {
+fn each_value_in_a_band_prints_as_core_fmt() {
     let values = band_values();
     // The ties of `c / 4`, the bounds on a decimal, and the powers of two in a band, such as 2^-25.
     assert!(values.len() > 1 << 12, "{} values are in a band", values.len());
@@ -301,5 +289,66 @@ fn each_value_in_a_band_of_the_fast_path_prints_as_core_fmt() {
     for value in values {
         check_f64(value);
         check_f64(-value);
+    }
+}
+
+/// The order of `p × 2^twos × 10^tens` and `y`, exactly: the oracle of the logarithm formulas.
+fn compare(p: u64, twos: i32, tens: i32, y: u64) -> Ordering {
+    let (mut left, mut right) = (Big::new(p), Big::new(y));
+    if tens >= 0 {
+        left.mul_pow5(tens.cast_unsigned());
+    } else {
+        right.mul_pow5(tens.unsigned_abs());
+    }
+    let twos = twos + tens;
+    if twos >= 0 {
+        left.shl(twos.cast_unsigned());
+    } else {
+        right.shl(twos.unsigned_abs());
+    }
+    left.0.iter().rev().cmp(right.0.iter().rev())
+}
+
+/// An unsigned integer of [`Big::LIMBS`] 64-bit limbs, the least significant first.
+struct Big([u64; Big::LIMBS]);
+
+impl Big {
+    /// 896 bits: the greatest operand of [`compare`] is `(2^54 + 1) × 5^325`, under 2^810.
+    const LIMBS: usize = 14;
+
+    const fn new(value: u64) -> Self {
+        let mut limbs = [0; Self::LIMBS];
+        limbs[0] = value;
+        Self(limbs)
+    }
+
+    fn mul_pow5(&mut self, mut power: u32) {
+        /// The greatest power of 5 under 2^64.
+        const STEP: u32 = 27;
+        while power > 0 {
+            let factor = 5_u64.pow(power.min(STEP));
+            power -= power.min(STEP);
+            let mut carry = 0;
+            for limb in &mut self.0 {
+                (*limb, carry) = limb.carrying_mul(factor, carry);
+            }
+            assert!(carry == 0, "each operand of `compare` fits `Big::LIMBS`");
+        }
+    }
+
+    fn shl(&mut self, bits: u32) {
+        let (limbs, bits) = ((bits / 64) as usize, bits % 64);
+        assert!(
+            self.0[Self::LIMBS - limbs..].iter().all(|&limb| limb == 0),
+            "each operand of `compare` fits `Big::LIMBS`"
+        );
+        self.0.rotate_right(limbs);
+        if bits > 0 {
+            let mut carry = 0;
+            for limb in &mut self.0 {
+                (*limb, carry) = (*limb << bits | carry, *limb >> (64 - bits));
+            }
+            assert!(carry == 0, "each operand of `compare` fits `Big::LIMBS`");
+        }
     }
 }

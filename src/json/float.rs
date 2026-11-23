@@ -10,15 +10,16 @@
 //! and the digit after the integer part of `X`, rounded to the nearest with a tie up as
 //! `core::fmt` does, gives the nearest such integer. No loop and no division by 10 run.
 //!
-//! The fast path decides from approximations: each is below its exact value by less than 1.1 units
-//! of `2^−64` (see [`scale`]). When a decision is closer than [`MARGIN`] to its threshold, the exact
-//! path decides it with integer arithmetic. Thus each result is exact, with no tuned bias.
+//! The decisions follow zmij with no margin and no second path (C216). Schubfach proves that the
+//! 128-bit table of [`scale`] decides each bound of the interval exactly, with the parity of `c` for
+//! a bound that is a candidate, and that no value is closer to a threshold than the error of the
+//! approximations unless it is on it. The 17th digit takes the bias of zmij against the floor of the
+//! fraction. A tie of that digit, which only a fraction of exactly a quarter gives, rounds up, as
+//! `core::fmt` does; zmij rounds it down. The tests compare each form with `core::fmt`.
 //!
 //! [`read`] goes the other way: the binary64 value nearest to a decimal of up to 64 bits. It is
 //! the parse of unrounded scaling (Cox, 2026, "Floating-Point Printing and Parsing Can Be Simple
 //! And Fast"), which Cox proves with Ivy ("Fast Unrounded Scaling: Proof by Ivy", Theorem 1).
-
-use core::cmp::Ordering;
 
 #[cfg(test)]
 mod tests;
@@ -30,13 +31,9 @@ pub(super) const BYTES_MAX: usize = 24;
 /// one from byte 29 at most.
 pub(super) const SPAN: usize = 32;
 
-/// The distance from a threshold, in units of `2^−64`, under which the fast path does not
-/// decide. Each approximation is below its exact value by less than 1.1 units, so 4 is safe for
-/// a sum or a difference of two of them.
-const MARGIN: u64 = 4;
-
-/// [`MARGIN`] for ten times an approximation.
-const TENFOLD_MARGIN: u64 = 16;
+/// Half a unit of `2^−64`, and the bias of zmij for the 17th digit of a regular value: the fraction
+/// of [`scale`] is below its exact value by less than 1.1 units, so ten times it by less than 11.
+const BIASED_HALF: u64 = (1 << 63) + 6;
 
 /// The least and the greatest `n` of the table of `10^n`: `n = −k − 1` for the `k` of each finite
 /// binary64 value.
@@ -129,38 +126,26 @@ fn shortest(binary: Binary) -> Decimal {
         floor_log10_pow2(q)
     };
     let (integral, fraction, half) = scale(c, q, k);
-    let lower = if irregular { half >> 1 } else { half };
-    // A bound of the interval belongs to it when `c` is even, but off the margin of each threshold
-    // the sum is not 0 and `lower` is not `fraction`, so only the exact path needs the parity.
-    let (sum, up) = fraction.overflowing_add(half);
-    let down = lower > fraction;
-    // With `u64::carrying_mul` here, the x86_64 fast path keeps one more flag and one more branch.
-    let (mut digit, tenfold) = halves(u128::from(fraction) * 10 + (1 << 63));
-    let near = |distance: u64, margin: u64| distance.wrapping_add(margin) <= 2 * margin;
+    // The nearest integer to ten times `fraction`, in units of 2^−64, after the bias `add`.
+    let tenfold = |fraction: u64, add: u64| fraction.carrying_mul(10, add).1;
+    let (up, down, digit) = if irregular {
+        // The lower neighbor of a power of two is half as far, so the lower bound is a quarter unit
+        // below. The least digit in the interval is the ceiling of ten times the lower bound.
+        let lower = half >> 1;
+        let digit = tenfold(fraction, 1 << 63).max(tenfold(fraction.wrapping_sub(lower), u64::MAX));
+        (fraction.overflowing_add(half).1, lower > fraction, digit)
+    } else {
+        // A bound belongs to the interval when `c` is even: one more unit of `half` takes it in.
+        let half = half + u64::from(c & 1 == 0);
+        (
+            fraction.overflowing_add(half).1,
+            half > fraction,
+            tenfold(fraction, BIASED_HALF),
+        )
+    };
+    // With neither bound past an integer, the interval holds no shorter form, so the 17th digit
+    // is not 0.
     let longer = !up && !down;
-    if near(sum, MARGIN) || near(lower.wrapping_sub(fraction), MARGIN) || longer && near(tenfold, TENFOLD_MARGIN) {
-        let (digits, extra) = exact(c, q, irregular, k, integral, fraction);
-        return Decimal {
-            digits,
-            extra,
-            exponent: k,
-        };
-    }
-    if longer && irregular {
-        // The lower bound is less than half a unit of `10^k` below `v`, so the nearest can be under
-        // it. The least digit in the interval is the ceiling of ten times the lower bound.
-        let lower_bound = fraction - lower;
-        if near(lower_bound.carrying_mul(10, 0).0, TENFOLD_MARGIN) {
-            let (digits, extra) = exact(c, q, irregular, k, integral, fraction);
-            return Decimal {
-                digits,
-                extra,
-                exponent: k,
-            };
-        }
-        digit = digit.max(lower_bound.carrying_mul(10, u64::MAX).1);
-    }
-    // `longer` excludes `up`, and the 17th digit is not 0: else the interval holds a shorter form.
     Decimal {
         digits: integral + u64::from(up),
         extra: if longer { u8::try_from(digit).unwrap_or(0) } else { 0 },
@@ -186,60 +171,6 @@ fn scale(c: u64, q: i32, k: i32) -> (u64, u64, u64) {
     let (low_product, high_product) = scaled.carrying_mul(high, scaled.carrying_mul(low, 0).1);
     let (integral, fraction) = (high_product >> 6, high_product << 58 | low_product >> 6);
     (integral, fraction, high >> (7 - shift))
-}
-
-/// The digits and the 17th digit of [`shortest`], with exact integer arithmetic, from the estimates
-/// of [`scale`]. It takes and gives scalars, so a call passes no value in memory.
-#[cold]
-#[inline(never)]
-fn exact(c: u64, q: i32, irregular: bool, k: i32, integral: u64, fraction: u64) -> (u64, u8) {
-    let n = -k - 1;
-    let inclusive = c & 1 == 0;
-    let inside = |order: Ordering| order.is_lt() || inclusive && order.is_eq();
-    // The estimate of the integer part is its floor, or one below it.
-    let floor = integral + u64::from(compare(c, q, n, integral + 1).is_ge());
-    let (lower, lower_exponent) = if irregular {
-        (4 * c - 1, q - 2)
-    } else {
-        (2 * c - 1, q - 1)
-    };
-    if inside(compare(lower, lower_exponent, n, floor)) {
-        return (floor, 0);
-    }
-    if inside(compare(2 * c + 1, q - 1, n, floor + 1).reverse()) {
-        return (floor + 1, 0);
-    }
-    // The nearest integer to `10X` with a tie up: the greatest `d` with `2d − 1 ≤ 20X`. The
-    // estimate is within one of it.
-    let mut digits = integral * 10 + fraction.carrying_mul(10, 1 << 63).1;
-    if compare(c, q + 1, n + 1, 2 * digits - 1).is_lt() {
-        digits -= 1;
-    } else if compare(c, q + 1, n + 1, 2 * digits + 1).is_ge() {
-        digits += 1;
-    }
-    // The lower bound of an irregular value is a third of the interval below it, at least a third
-    // of a unit, so one step up reaches the interval.
-    if irregular && compare(lower, lower_exponent, n + 1, digits).is_gt() {
-        digits += 1;
-    }
-    (digits / 10, u8::try_from(digits % 10).unwrap_or(0))
-}
-
-/// The order of `p × 2^twos × 10^tens` and `y`, exactly.
-fn compare(p: u64, twos: i32, tens: i32, y: u64) -> Ordering {
-    let (mut left, mut right) = (Big::new(p), Big::new(y));
-    if tens >= 0 {
-        left.mul_pow5(tens.cast_unsigned());
-    } else {
-        right.mul_pow5(tens.unsigned_abs());
-    }
-    let twos = twos + tens;
-    if twos >= 0 {
-        left.shl(twos.cast_unsigned());
-    } else {
-        right.shl(twos.unsigned_abs());
-    }
-    left.0.iter().rev().cmp(right.0.iter().rev())
 }
 
 /// The binary64 value nearest to `digits × 10^power`, with a tie to the even significand, or
@@ -313,50 +244,6 @@ fn uscale(x: u64, (hi, lo): (u64, u64), shift: u32) -> u64 {
 #[expect(clippy::cast_possible_truncation, reason = "each half keeps exactly its 64 bits")]
 const fn halves(value: u128) -> (u64, u64) {
     ((value >> 64) as u64, value as u64)
-}
-
-/// An unsigned integer of [`Big::LIMBS`] 64-bit limbs, the least significant first.
-struct Big([u64; Big::LIMBS]);
-
-impl Big {
-    /// 896 bits: the greatest operand of [`compare`] is `(2^54 + 1) × 5^325`, under 2^810.
-    const LIMBS: usize = 14;
-
-    const fn new(value: u64) -> Self {
-        let mut limbs = [0; Self::LIMBS];
-        limbs[0] = value;
-        Self(limbs)
-    }
-
-    fn mul_pow5(&mut self, mut power: u32) {
-        /// The greatest power of 5 under 2^64.
-        const STEP: u32 = 27;
-        while power > 0 {
-            let factor = 5_u64.pow(power.min(STEP));
-            power -= power.min(STEP);
-            let mut carry = 0;
-            for limb in &mut self.0 {
-                (*limb, carry) = limb.carrying_mul(factor, carry);
-            }
-            assert!(carry == 0, "each operand of `compare` fits `Big::LIMBS`");
-        }
-    }
-
-    fn shl(&mut self, bits: u32) {
-        let (limbs, bits) = ((bits / 64) as usize, bits % 64);
-        assert!(
-            self.0[Self::LIMBS - limbs..].iter().all(|&limb| limb == 0),
-            "each operand of `compare` fits `Big::LIMBS`"
-        );
-        self.0.rotate_right(limbs);
-        if bits > 0 {
-            let mut carry = 0;
-            for limb in &mut self.0 {
-                (*limb, carry) = (*limb << bits | carry, *limb >> (64 - bits));
-            }
-            assert!(carry == 0, "each operand of `compare` fits `Big::LIMBS`");
-        }
-    }
 }
 
 /// `⌊q × log10 2⌋` for `q` from −1074 to 971.
