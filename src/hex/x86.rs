@@ -382,7 +382,36 @@ pub(super) mod avx512bw {
         });
     }
 
-    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
+    /// Decodes one vector of text and gives whether each character is a digit.
+    #[inline]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn decode32(src: &[u8; 64], dst: &mut [u8; 32]) -> bool {
+        let (bytes, valid) = decode_half(load64::<0, _>(src));
+        store32::<0, _>(dst, bytes);
+        valid == u64::MAX
+    }
+
+    /// Decodes two vectors of text and gives whether each character is a digit.
+    #[inline]
+    #[target_feature(enable = "avx512bw")]
+    pub(in super::super) fn decode64(src: &[u8; 128], dst: &mut [u8; 64]) -> bool {
+        decode_pair(src, dst) == u64::MAX
+    }
+
+    /// Decodes two vectors of text and gives the mask of lanes valid in both.
+    #[inline]
+    #[target_feature(enable = "avx512bw")]
+    fn decode_pair(src: &[u8; 128], dst: &mut [u8; 64]) -> u64 {
+        let pair = _mm512_set1_epi16(PAIR);
+        let order = _mm512_setr_epi32(0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15);
+        let (first, first_valid) = nibbles(load64::<0, _>(src));
+        let (second, second_valid) = nibbles(load64::<64, _>(src));
+        let bytes = _mm512_packus_epi16(_mm512_maddubs_epi16(first, pair), _mm512_maddubs_epi16(second, pair));
+        store64::<0, _>(dst, _mm512_permutexvar_epi32(order, bytes));
+        _kand_mask64(first_valid, second_valid)
+    }
+
+    /// Decodes a result shorter than one half block or at least two whole blocks.
     #[cfg_attr(target_feature = "avx512bw", inline)]
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
@@ -393,22 +422,8 @@ pub(super) mod avx512bw {
             return valid == u64::MAX;
         }
         let mut valid = u64::MAX;
-        if text.len() < 128 {
-            overlapping::<64, 32>(text, out, |src, dst| {
-                let (bytes, block_valid) = decode_half(load64::<0, _>(src));
-                valid = _kand_mask64(valid, block_valid);
-                store32::<0, _>(dst, bytes);
-            });
-            return valid == u64::MAX;
-        }
-        let pair = _mm512_set1_epi16(PAIR);
-        let order = _mm512_setr_epi32(0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15);
         overlapping::<128, 64>(text, out, |src, dst| {
-            let (first, first_valid) = nibbles(load64::<0, _>(src));
-            let (second, second_valid) = nibbles(load64::<64, _>(src));
-            valid = _kand_mask64(valid, _kand_mask64(first_valid, second_valid));
-            let bytes = _mm512_packus_epi16(_mm512_maddubs_epi16(first, pair), _mm512_maddubs_epi16(second, pair));
-            store64::<0, _>(dst, _mm512_permutexvar_epi32(order, bytes));
+            valid = _kand_mask64(valid, decode_pair(src, dst));
         });
         valid == u64::MAX
     }

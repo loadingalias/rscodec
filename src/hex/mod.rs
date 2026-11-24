@@ -526,7 +526,20 @@ mod kernel {
             Kernel::Avx2 => unsafe { x86::avx2::decode(class, text, out) },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Bw => unsafe { x86::avx512bw::decode(text, out) },
+            Kernel::Avx512Bw => unsafe {
+                // The caller has checked both lengths. Pass fixed blocks across the CPU feature boundary.
+                let mut valid = true;
+                match out.len() {
+                    32..64 => {
+                        crate::simd::overlapping(text, out, |src, dst| valid &= x86::avx512bw::decode32(src, dst))
+                    }
+                    64..128 => {
+                        crate::simd::overlapping(text, out, |src, dst| valid &= x86::avx512bw::decode64(src, dst))
+                    }
+                    _ => return x86::avx512bw::decode(text, out),
+                }
+                valid
+            },
             #[cfg(target_arch = "aarch64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Neon => unsafe { aarch64::decode(class, text, out) },

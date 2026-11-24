@@ -68,6 +68,8 @@ The harness `rscodec-ct` of the repository checks the compiled code of both clas
 the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C) and aarch64
 (Graviton4), and the build with `-C target-cpu=native` on aarch64.
 
+The results below cover revision `28bdb86`. The short AVX-512BW hex decoder changed after that run and needs new x86_64 timing measurements.
+
 | Check | Result |
 | --- | --- |
 | Path count: the counters of the instructions and the branches of each call, on each kernel of the CPU, at each length up to 200 bytes and at 13 longer lengths, with random and fixed inputs | One count for each length and outcome |
@@ -284,9 +286,10 @@ fn main() -> Result<(), rscodec::base64::Error> {
 - Each kernel runs whole blocks, then one last block that ends at the end of the input and writes
   some bytes of the block before it again. Thus a tail needs no copy. Only an input shorter than
   one vector runs on arrays on the stack, or on AVX-512 with masked loads and stores.
-- The AVX-512 base64 kernels have an entry with no loop for up to 48 bytes. The AVX-512BW hex
-  kernel runs one 64-byte vector for an input of up to 32 bytes or a text of up to 64 characters,
-  and an encode of 64 KiB or more in 32-byte vectors, which keep the clock of the CPU higher.
+- The AVX-512 base64 kernels have an entry with no loop for up to 48 bytes.
+- The AVX-512BW hex kernel uses one vector to encode up to 32 bytes or decode up to 64 characters.
+  For 32 through 127 decoded bytes, it processes one block and a second overlapping block only if a tail remains.
+  For an encode of 64 KiB or more, it uses 32-byte vectors to keep the CPU clock higher.
 - WebAssembly has no run-time detection, so `Simd128` exists only with `+simd128`.
 - On an Intel hybrid CPU (Alder Lake to Arrow Lake), the AVX-512 kernels do not run, also if CPUID
   reports AVX-512. Its efficient cores do not have AVX-512.
