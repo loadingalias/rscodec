@@ -4,13 +4,12 @@
 //! second order. The decision is the one of rscrypto (`ct.toml`): |t| at most 8, and a second
 //! measurement with 4 times the samples and a new seed when |t| reaches 0.75 of that threshold.
 //!
-//! The fixed input is random data, drawn once, as in the cases of rscrypto that measure the
-//! distribution of production: a fixed input of zeros against random data also compares the power
-//! of the switching of the data, which is outside the claim. As diagnostics, `dudect samples zero`
-//! measures with a fixed input of zeros, and `dudect samples aa` measures two classes of random
-//! inputs, which must not differ. A third and a fourth argument keep only the cases whose names
-//! start with it and the inputs of that number of bytes. A fifth sets the least calls of a sample:
-//! with more than one, an untimed call first reads the input and writes the output.
+//! Each fixed/random and A/A sample generates and copies its input before the batch is timed.
+//! A fixed random input uses the same seed each time. A/A uses fresh seeds for both classes.
+//! The zero diagnostic uses zeros for its fixed input.
+//! The case prefix and length select the inputs. The call count sets the minimum for calibration.
+//! A minimum above one adds one untimed call. With explicit `warm` or `unwarmed`, the count is exact.
+//! The `buffers` control copies over the same input and output ranges as the selected operation.
 
 use core::hint::black_box;
 
@@ -54,6 +53,12 @@ const SAMPLES: usize = 10_000_000;
 
 /// The seed of the first measurement.
 const SEED: u64 = 0xd0de;
+
+#[derive(Clone, Copy)]
+enum Calls {
+    Calibrate(usize),
+    Exact { count: usize, warmups: usize },
+}
 
 /// Welch's t-test of two classes, with Welford's sums.
 #[derive(Clone, Copy, Debug, Default)]
@@ -125,7 +130,24 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     };
     let prefix = args.get(2).map_or("", String::as_str);
     let only = number(3, "length")?;
-    let calls_min = number(4, "call count")?.unwrap_or(1);
+    let count = number(4, "call count")?.unwrap_or(1);
+    if !(1..=1 << 20).contains(&count) {
+        return Err(Failure::Host(format!("call count outside 1..=1048576: {count}")));
+    }
+    let calls = match args.get(5).map(String::as_str) {
+        None => Calls::Calibrate(count),
+        Some("warm") => Calls::Exact { count, warmups: 1 },
+        Some("unwarmed") => Calls::Exact { count, warmups: 0 },
+        Some(value) => return Err(Failure::Host(format!("unknown warm-up: {value}"))),
+    };
+    let buffers = match args.get(6).map(String::as_str) {
+        None | Some("codec") => false,
+        Some("buffers") => true,
+        Some(value) => return Err(Failure::Host(format!("unknown operation: {value}"))),
+    };
+    if args.len() > 7 {
+        return Err(Failure::Host(crate::USAGE.to_owned()));
+    }
     let cases: Vec<Case> = Case::all()
         .into_iter()
         .filter(|case| case.class == Class::Secret && case.name.starts_with(prefix))
@@ -133,7 +155,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     let mut failures = 0_usize;
     let mut measured = 0_usize;
     rscodec::with_dit(|dit| -> Result<(), Failure> {
-        for case in &cases {
+        for mut case in cases {
+            if buffers {
+                case.use_buffer_control();
+            }
             let mut shapes: Vec<(usize, Outcome)> = LENGTHS.iter().map(|&bytes| (bytes, Outcome::Valid)).collect();
             if case.direction == Direction::Decode {
                 shapes.push((REFUSAL_BYTES, Outcome::Symbol));
@@ -142,17 +167,17 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                 .into_iter()
                 .filter(|&(bytes, _)| only.is_none_or(|only| only == bytes))
             {
-                let first = measure(case, dit, (bytes, outcome, fixed), (samples, calls_min), SEED)?;
+                let first = measure(&case, dit, (bytes, outcome, fixed), (samples, calls), SEED)?;
                 let mut line = report(&case.name, bytes, outcome, &first);
                 let pass = if first.t > THRESHOLD {
                     false
                 } else if first.t >= REVIEW * THRESHOLD {
                     // A new seed gives new inputs and a new order of the classes.
                     let second = measure(
-                        case,
+                        &case,
                         dit,
                         (bytes, outcome, fixed),
-                        (confirmation, calls_min),
+                        (confirmation, calls),
                         timer::ticks(),
                     )?;
                     line.push_str(&format!("\n  second: {}", report(&case.name, bytes, outcome, &second)));
@@ -202,45 +227,54 @@ fn report(name: &str, bytes: usize, outcome: Outcome, measure: &Measure) -> Stri
     )
 }
 
+/// Generates and copies each input before the batch is timed.
+fn fill_batch<'a>(
+    random: &mut Random,
+    fixed: Option<(Fill, u64)>,
+    slots: impl Iterator<Item = &'a mut [u8]>,
+    classes: &mut [usize],
+    mut input: impl FnMut(Fill, u64) -> Result<Vec<u8>, Failure>,
+) -> Result<(), Failure> {
+    for (slot, class) in slots.zip(classes) {
+        *class = usize::from(random.next() & 1 == 1);
+        // Draw both words for every slot. A/A keeps the class order and the class-one inputs.
+        let fresh = (Fill::Random, random.next());
+        let (fill, seed) = if *class == 0 { fixed.unwrap_or(fresh) } else { fresh };
+        slot.copy_from_slice(&input(fill, seed)?);
+    }
+    Ok(())
+}
+
 /// One DudeCT measurement of `case`.
 fn measure(
     case: &Case,
     dit: &Dit,
     (bytes, outcome, fixed): (usize, Outcome, Option<Fill>),
-    (samples, calls_min): (usize, usize),
+    (samples, sampling): (usize, Calls),
     seed: u64,
 ) -> Result<Measure, Failure> {
-    let mut random = Random::new(seed);
+    // The schedule and the fixed input start from different generator states.
+    let mut random = Random::new(Random::new(seed).next());
+    let fixed = fixed.map(|fill| (fill, seed));
     // A refusal keeps its bad character at one offset: its time may depend on the offset.
     let at = Some(bytes);
-    let fixed_input = case
-        .input(bytes, outcome, fixed.unwrap_or(Fill::Random), at, &mut random)?
-        .ok_or_else(|| Failure::Host(format!("{} has no input of {bytes} bytes with {outcome:?}", case.name)))?;
-    let len = fixed_input.len();
+    let input = |fill, seed| {
+        case.input(bytes, outcome, fill, at, &mut Random::new(seed))?
+            .ok_or_else(|| Failure::Host(format!("{} has no input of {bytes} bytes with {outcome:?}", case.name)))
+    };
+    let len = input(Fill::Random, seed)?.len();
     let mut out = vec![0; case.out_len(bytes)?];
     let mut inputs = vec![0; BATCH * len];
     let mut classes = [0_usize; BATCH];
     let mut ticks = [0_u64; BATCH];
-    let fill = |random: &mut Random, inputs: &mut [u8], classes: &mut [usize; BATCH]| -> Result<(), Failure> {
-        for (slot, class) in inputs.chunks_exact_mut(len).zip(classes.iter_mut()) {
-            *class = usize::from(random.next() & 1 == 1);
-            // The A/A control has no fixed input: each slot of each class is random.
-            if *class == 0 && fixed.is_some() {
-                slot.copy_from_slice(&fixed_input);
-            } else {
-                let input = case
-                    .input(bytes, outcome, Fill::Random, at, random)?
-                    .unwrap_or_default();
-                slot.copy_from_slice(&input);
-            }
-        }
-        Ok(())
+    let (mut calls, warmups) = match sampling {
+        Calls::Calibrate(min) => (min, usize::from(min > 1)),
+        Calls::Exact { count, warmups } => (count, warmups),
     };
-    // With `warm`, a call before the timer puts the input and the output in the cache.
-    let warm = calls_min > 1;
+    println!("schedule {} seed={seed} warmups={warmups}", case.name);
     let mut time = |calls: usize, inputs: &[u8], ticks: &mut [u64; BATCH]| {
         for (input, slot) in inputs.chunks_exact(len).zip(ticks.iter_mut()) {
-            if warm {
+            for _ in 0..warmups {
                 black_box(case.call(dit, black_box(input), &mut out));
             }
             let start = timer::ticks();
@@ -251,20 +285,19 @@ fn measure(
         }
     };
     // The calls of one sample: the least power of two whose median sample spans twice the floor.
-    let mut calls = calls_min.max(1);
-    fill(&mut random, &mut inputs, &mut classes)?;
+    fill_batch(&mut random, fixed, inputs.chunks_exact_mut(len), &mut classes, input)?;
     let median = loop {
         time(calls, &inputs, &mut ticks);
         let mut sorted = ticks;
         sorted.sort_unstable();
         let median = sorted[BATCH / 2];
-        if median >= 2 * TICKS_MIN || calls >= 1 << 20 {
+        if matches!(sampling, Calls::Exact { .. }) || median >= 2 * TICKS_MIN || calls >= 1 << 20 {
             break median;
         }
         calls *= 2;
     };
     if median < TICKS_MIN {
-        return Err(Failure::Check(format!(
+        return Err(Failure::Host(format!(
             "{}: a sample of {calls} calls spans {median} ticks",
             case.name
         )));
@@ -289,7 +322,7 @@ fn measure(
     let mut cropped = vec![Test::default(); PERCENTILES];
     let mut taken = 0_usize;
     while taken < samples {
-        fill(&mut random, &mut inputs, &mut classes)?;
+        fill_batch(&mut random, fixed, inputs.chunks_exact_mut(len), &mut classes, input)?;
         time(calls, &inputs, &mut ticks);
         for (&class, &sample) in classes.iter().zip(&ticks) {
             let x = sample as f64;
@@ -352,6 +385,40 @@ fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_random_and_aa_prepare_every_slot_in_the_same_order() {
+        let batch = |fixed| {
+            let mut classes = [0; 32];
+            let mut slots = [[0u8; 8]; 32];
+            let mut generated = 0;
+            fill_batch(
+                &mut Random::new(17),
+                fixed,
+                slots.iter_mut().map(<[u8; 8]>::as_mut_slice),
+                &mut classes,
+                |_, seed| {
+                    generated += 1;
+                    Ok(seed.to_le_bytes().to_vec())
+                },
+            )
+            .expect("the generator always returns eight bytes");
+            assert_eq!(generated, classes.len());
+            (classes, slots)
+        };
+        let (classes, fixed) = batch(Some((Fill::Random, SEED)));
+        let (aa_classes, aa) = batch(None);
+        assert_eq!(classes, aa_classes);
+        assert!(classes.contains(&0) && classes.contains(&1));
+        for ((class, fixed), aa) in classes.into_iter().zip(fixed).zip(aa) {
+            if class == 0 {
+                assert_eq!(fixed, SEED.to_le_bytes());
+                assert_ne!(fixed, aa);
+            } else {
+                assert_eq!(fixed, aa);
+            }
+        }
+    }
 
     #[test]
     fn the_timing_report_gives_the_observed_difference_when_the_second_order_test_wins() {

@@ -257,6 +257,28 @@ impl Case {
         Ok(Some(text))
     }
 
+    /// Replaces the codec with a copy over its full input and output ranges.
+    pub(crate) fn use_buffer_control(&mut self) {
+        self.name.push_str("-buffers");
+        self.call = Call::Plain(|_, input, out| {
+            if input.is_empty() || out.is_empty() {
+                return 0;
+            }
+            if input.len() <= out.len() {
+                for dst in out.chunks_mut(input.len()) {
+                    dst.copy_from_slice(&input[..dst.len()]);
+                }
+            } else {
+                for src in input.chunks(out.len()) {
+                    out[..src.len()].copy_from_slice(src);
+                    // Keep each store observable before the next chunk overwrites it.
+                    core::hint::black_box(&*out);
+                }
+            }
+            core::hint::black_box(out).len()
+        });
+    }
+
     /// Runs the function of the case. It gives the length of the result, or `usize::MAX` for a
     /// refusal.
     #[inline(always)]

@@ -10,9 +10,10 @@
 //! - `stack [public]`: runs each secret call on a private stack, and finds no run of 8 bytes of its
 //!   secret bytes or 16 characters of its secret text in that stack after the call. With `public`,
 //!   the control: the same search over the public calls must find a residue.
-//! - `dudect [samples] [random|zero|aa] [case] [bytes] [calls]`: compares the time of one fixed input with
-//!   random inputs of the same length, for each secret function. The fixed input is random data, or
-//!   zeros, or with `aa` there is none: the A/A control.
+//! - `dudect [samples] [random|zero|aa] [case] [bytes] [calls] [warm|unwarmed] [codec|buffers]`
+//!   compares fixed and random inputs of the same length. The A/A control gives each class fresh random inputs.
+//!   Length counts the decoded bytes. An explicit warm-up mode fixes the timed call count.
+//!   The buffer control copies over both byte ranges.
 //!
 //! Each command prints its record. It exits with 1 when a check fails, and with 2 when this host
 //! cannot run the check.
@@ -53,7 +54,7 @@ cfg_select! {
 use std::{env, process::ExitCode};
 
 /// The usage of the harness.
-const USAGE: &str = "usage: rscodec-ct paths [case] | scan [binary] [isa] | stack [public] | dudect [samples] [random|zero|aa] [case] [bytes] [calls]";
+const USAGE: &str = "usage: rscodec-ct paths [case] | scan [binary] [isa] | stack [public] | dudect [samples] [random|zero|aa] [case] [bytes] [calls] [warm|unwarmed] [codec|buffers]";
 
 /// Why a command did not pass.
 #[derive(Debug)]

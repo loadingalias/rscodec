@@ -85,10 +85,11 @@ Limits:
   instructions in the secret code.
 - WebAssembly has no timing claim. It has no list of instructions with data independent timing,
   and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
-- At 4096 bytes, both shipped builds exceeded the timing threshold on some operations.
-  After one warm-up call, all six x86_64 operations passed with eight timed calls per sample.
-  Graviton4 still exceeded the threshold for hex encode and standard base64 decode.
-  The size and cause of the difference remain open.
+- At 4096 bytes, the first measurements exceeded the timing threshold on both shipped builds.
+  With one warm-up and eight timed calls, x86_64 passed. Graviton4 exceeded the threshold for hex encode and standard base64 decode.
+  A second Graviton4 test generated and copied every input by the same procedure.
+  Both operations then passed with eight timed calls, with and without a warm-up.
+  The 4096-byte check with its usual call count remains open.
 - Intel guarantees the DOIT list only in DOIT mode (DOITM), which the operating system sets on a CPU
   that has it. The tests did not set it.
 
