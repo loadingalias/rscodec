@@ -16,10 +16,12 @@ Each codec is a feature. Select only the codecs that you use:
 
 ```toml
 [dependencies]
-rscodec = { version = "0.1.0-alpha.2", features = ["base64", "hex"] }
+rscodec = { version = "=0.1.0-alpha.2", features = ["base64", "hex"] }
 ```
 
-The first release with these codecs, `0.1.0-alpha.2`, is not on crates.io yet.
+`0.1.0-alpha.2` is the first release with these codecs. An alpha release can change the API, so
+pin the exact version. The release needs a nightly toolchain, which the
+[README](../../README.md#toolchain) names.
 
 The `std` feature is on by default. Without it (`default-features = false`), the crate needs only
 `core`, and it selects each kernel at compile time from `-C target-feature`.

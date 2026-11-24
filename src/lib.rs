@@ -1,10 +1,10 @@
-//! Codecs for Rust. This crate is in development.
+//! Codecs for Rust. This release is an alpha: each alpha release can change the API.
 //!
 //! Each codec is a leaf feature, so a build compiles only the codecs that it selects:
 //!
 //! - `base64`: [`base64`], base64 with padding and base64url without padding.
 //! - `hex`: [`hex`], lowercase hex.
-//! - `json`: [`json`], a JSON reader and writer.
+//! - `json`: [`json`], a JSON reader and writer. This codec is in development.
 //!
 //! The `std` feature is on by default. Without it, the crate needs only `core`.
 //!
