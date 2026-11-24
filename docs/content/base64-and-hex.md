@@ -73,7 +73,11 @@ the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C
 | Path count: the counters of the instructions and the branches of each call, on each kernel of the CPU, at each length up to 200 bytes and at 13 longer lengths, with random and fixed inputs | One count for each length and outcome |
 | Scan of the disassembly | No load or store at an address from the data, no write of `PSTATE.DIT` in the secret code, and each instruction that reads secret data on the DOIT or DIT list |
 | Painted stack: each secret call on a private stack | No run of 8 secret bytes or 16 secret characters stays in the stack |
-| DudeCT compares a fixed input with random inputs of the same length | The tests passed at 16, 32, and 64 bytes. The 4096-byte result is open. |
+| DudeCT compares a fixed input with random inputs of the same length | All six secret operations passed at 16, 32, 64, and 4096 decoded bytes in the three builds above. |
+
+At 4096 decoded bytes, the harness generated and copied each input before timing. Each operation ran for 10,000,384 samples per build.
+The timer used one or two calls per sample, with no warm-up. The largest absolute t statistic was 3.15. The limit was 8.
+Each build also detected one extra timed call in a control with random inputs in both classes.
 
 The result that the caller sees is public, so the time can show it: the lengths, the validity of a
 text, the kind and the offset of a refusal, and the padding of base64.
@@ -85,11 +89,8 @@ Limits:
   instructions in the secret code.
 - WebAssembly has no timing claim. It has no list of instructions with data independent timing,
   and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
-- At 4096 bytes, the first measurements exceeded the timing threshold on both shipped builds.
-  With one warm-up and eight timed calls, x86_64 passed. Graviton4 exceeded the threshold for hex encode and standard base64 decode.
-  A second Graviton4 test generated and copied every input by the same procedure.
-  Both operations then passed with eight timed calls, with and without a warm-up.
-  The 4096-byte check with its usual call count remains open.
+- Earlier 4096-byte measurements exceeded the threshold on both shipped builds. Those runs copied a saved input for one class and generated inputs for the other.
+  The calibrated measurements with matched input preparation did not reproduce the earlier difference. Its cause remains open.
 - Intel guarantees the DOIT list only in DOIT mode (DOITM), which the operating system sets on a CPU
   that has it. The tests did not set it.
 
