@@ -15,3 +15,4 @@ AGENTS.md
 # Nigel Tao's number data, too large for the repository. tests/data/README.md
 # fetches it.
 /tests/data/fetched/
+.claude/
