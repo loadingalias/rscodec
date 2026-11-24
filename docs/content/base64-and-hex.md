@@ -68,7 +68,7 @@ The harness `rscodec-ct` of the repository checks the compiled code of both clas
 the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C) and aarch64
 (Graviton4), and the build with `-C target-cpu=native` on aarch64.
 
-The results below cover revision `28bdb86`. The short AVX-512BW hex decoder changed after that run and needs new x86_64 timing measurements.
+The table gives the results at revision `28bdb86`.
 
 | Check | Result |
 | --- | --- |
@@ -80,6 +80,10 @@ The results below cover revision `28bdb86`. The short AVX-512BW hex decoder chan
 At 4096 decoded bytes, the harness generated and copied each input before timing. Each operation ran for 10,000,384 samples per build.
 The timer used one or two calls per sample, with no warm-up. The largest absolute t statistic was 3.15. The limit was 8.
 Each build also detected one extra timed call in a control with random inputs in both classes.
+
+At `f03179a`, the shipped x86_64 hex code passed all four checks after the short decoder changed.
+DudeCT tested both operations at 16, 32, 64, and 4096 decoded bytes, plus a refusal at 64 bytes.
+The largest absolute t was 1.69 for fixed versus random inputs and 2.97 for two random classes. The extra-call control exceeded 1,200.
 
 The result that the caller sees is public, so the time can show it: the lengths, the validity of a
 text, the kind and the offset of a refusal, and the padding of base64.
