@@ -114,6 +114,34 @@ fn short_inputs_round_trip_and_each_other_byte_refuses() {
     }
 }
 
+/// Without `std`, the crate detects no CPU, so a backend exists exactly for each kernel whose CPU
+/// features the build turns on. A backend of another kernel runs instructions that the CPU of the
+/// user can lack. `cargo xtask test` runs this build after the build with `std`.
+#[cfg(not(feature = "std"))]
+#[test]
+fn without_std_a_backend_exists_exactly_for_each_kernel_of_the_build() {
+    let avx512bw = cfg!(all(target_feature = "avx512f", target_feature = "avx512bw"));
+    // The name of each kernel, the fastest first, and whether the build has its CPU features.
+    let kernels = [
+        ("Avx512Bw", avx512bw),
+        ("Avx2", cfg!(target_feature = "avx2")),
+        ("Ssse3", cfg!(target_feature = "ssse3")),
+        ("Neon", cfg!(target_feature = "neon")),
+        ("Simd128", cfg!(target_feature = "simd128")),
+        ("Portable", true),
+    ];
+    let built: Vec<_> = kernels
+        .into_iter()
+        .filter_map(|(name, built)| built.then_some(name))
+        .collect();
+    let backends: Vec<_> = Kernel::ALL
+        .iter()
+        .filter(|&&kernel| Backend::new(kernel).is_some())
+        .map(|kernel| format!("{kernel:?}"))
+        .collect();
+    assert_eq!(backends, built);
+}
+
 /// Each backend and each timing class gives the result and the error of the portable backend: on
 /// random inputs of each length to 96 bytes, past the short path of 64 bytes, on each byte at each
 /// place of their texts, and on random inputs to 1 MiB.
