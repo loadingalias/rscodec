@@ -10,8 +10,7 @@
 //! measures with a fixed input of zeros, and `dudect samples aa` measures two classes of random
 //! inputs, which must not differ. A third and a fourth argument keep only the cases whose names
 //! start with it and the inputs of that number of bytes. A fifth sets the least calls of a sample:
-//! with more than one, an untimed call first puts the input in the cache, so the sample times only
-//! the core.
+//! with more than one, an untimed call first reads the input and writes the output.
 
 use core::hint::black_box;
 
@@ -92,29 +91,41 @@ impl Test {
 #[derive(Debug)]
 struct Measure {
     t: f64,
+    /// The test that gave the largest absolute t value.
+    test: &'static str,
     samples: usize,
     calls: usize,
     median: u64,
+    /// The mean ticks per call in each class, before any crop.
+    means: [f64; 2],
     /// The difference of the mean ticks of one call that gives the threshold.
     detectable: f64,
 }
 
 /// Runs DudeCT on each secret function.
 pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
-    let samples = match args.first() {
-        Some(arg) => arg
-            .parse()
-            .map_err(|_| Failure::Host(format!("not a number of samples: {arg}")))?,
-        None => SAMPLES,
+    let number = |index: usize, name: &str| {
+        args.get(index)
+            .map(|arg| {
+                arg.parse::<usize>()
+                    .map_err(|_| Failure::Host(format!("invalid {name}: {arg}")))
+            })
+            .transpose()
     };
+    let samples = number(0, "sample count")?.unwrap_or(SAMPLES);
+    let confirmation = samples
+        .checked_mul(CONFIRM)
+        .filter(|n| n.checked_add(BATCH - 1).is_some())
+        .ok_or_else(|| Failure::Host(format!("sample count too large: {samples}")))?;
     let fixed = match args.get(1).map(String::as_str) {
         Some("zero") => Some(Fill::Zero),
         Some("aa") => None,
-        _ => Some(Fill::Random),
+        Some("random") | None => Some(Fill::Random),
+        Some(mode) => return Err(Failure::Host(format!("unknown input class: {mode}"))),
     };
     let prefix = args.get(2).map_or("", String::as_str);
-    let only: Option<usize> = args.get(3).and_then(|bytes| bytes.parse().ok());
-    let calls_min: usize = args.get(4).and_then(|calls| calls.parse().ok()).unwrap_or(1);
+    let only = number(3, "length")?;
+    let calls_min = number(4, "call count")?.unwrap_or(1);
     let cases: Vec<Case> = Case::all()
         .into_iter()
         .filter(|case| case.class == Class::Secret && case.name.starts_with(prefix))
@@ -132,7 +143,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                 .filter(|&(bytes, _)| only.is_none_or(|only| only == bytes))
             {
                 let first = measure(case, dit, (bytes, outcome, fixed), (samples, calls_min), SEED)?;
-                let mut line = report(case, bytes, outcome, &first);
+                let mut line = report(&case.name, bytes, outcome, &first);
                 let pass = if first.t > THRESHOLD {
                     false
                 } else if first.t >= REVIEW * THRESHOLD {
@@ -141,10 +152,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                         case,
                         dit,
                         (bytes, outcome, fixed),
-                        (samples * CONFIRM, calls_min),
+                        (confirmation, calls_min),
                         timer::ticks(),
                     )?;
-                    line.push_str(&format!("\n  second: {}", report(case, bytes, outcome, &second)));
+                    line.push_str(&format!("\n  second: {}", report(&case.name, bytes, outcome, &second)));
                     second.t <= THRESHOLD
                 } else {
                     true
@@ -157,6 +168,11 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
         Ok(())
     })
     .map_err(|refusal| Failure::Host(refusal.to_string()))??;
+    if measured == 0 {
+        return Err(Failure::Host(format!(
+            "no measurement matches case {prefix:?} and length {only:?}"
+        )));
+    }
     let mode = fixed.map_or_else(
         || "no fixed input (A/A)".to_owned(),
         |fill| format!("a fixed input of {fill:?} data"),
@@ -171,10 +187,18 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     }
 }
 
-fn report(case: &Case, bytes: usize, outcome: Outcome, measure: &Measure) -> String {
+fn report(name: &str, bytes: usize, outcome: Outcome, measure: &Measure) -> String {
+    let [mean0, mean1] = measure.means;
     format!(
-        "dudect {} bytes={bytes} {outcome:?} samples={} calls={} median={} ticks |t|={:.2} detectable={:.3} ticks per call",
-        case.name, measure.samples, measure.calls, measure.median, measure.t, measure.detectable
+        "dudect {name} bytes={bytes} {outcome:?} samples={} calls={} median={} ticks |t|={:.2} test={} \
+         mean0={mean0:.3} mean1={mean1:.3} delta(0-1)={:+.3} detectable={:.3} ticks per call",
+        measure.samples,
+        measure.calls,
+        measure.median,
+        measure.t,
+        measure.test,
+        mean0 - mean1,
+        measure.detectable
     )
 }
 
@@ -282,14 +306,75 @@ fn measure(
         }
         taken += BATCH;
     }
-    let t = cropped.iter().chain([&all, &second]).map(Test::t).fold(0.0, f64::max);
+    summarize(&all, &cropped, &second, taken, calls, median)
+}
+
+fn summarize(
+    all: &Test,
+    cropped: &[Test],
+    second: &Test,
+    samples: usize,
+    calls: usize,
+    median: u64,
+) -> Result<Measure, Failure> {
+    if second.n.iter().any(|&n| n < ENOUGH) {
+        return Err(Failure::Host(format!(
+            "too few samples for the second-order test: {:?} per class",
+            second.n
+        )));
+    }
+    let mut t = all.t();
+    if t.is_nan() {
+        return Err(Failure::Host(
+            "the timer gave the same value for every sample".to_owned(),
+        ));
+    }
+    let mut test = "uncropped";
+    for (name, value) in [
+        ("cropped", cropped.iter().map(Test::t).fold(0.0, f64::max)),
+        ("second-order", second.t()),
+    ] {
+        if value > t {
+            (test, t) = (name, value);
+        }
+    }
     Ok(Measure {
         t,
-        samples: taken,
+        test,
+        samples,
         calls,
         median,
+        means: all.mean.map(|mean| mean / calls as f64),
         detectable: THRESHOLD * all.error() / calls as f64,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_timing_report_gives_the_observed_difference_when_the_second_order_test_wins() {
+        // Four calls per sample. The sample means differ by four ticks. The variances are 4 and 16.
+        let all = Test {
+            n: [20_000.0; 2],
+            mean: [200.0, 204.0],
+            m2: [79_996.0, 319_984.0],
+        };
+        let second = Test {
+            n: [10_000.0; 2],
+            mean: [4.0, 16.0],
+            m2: [0.0; 2],
+        };
+        let measurement = summarize(&all, &[], &second, 40_000, 4, 202).expect("both classes have enough samples");
+        let line = report("hex-encode-secret", 4096, Outcome::Valid, &measurement);
+        assert!(
+            line.ends_with(
+                "|t|=inf test=second-order mean0=50.000 mean1=51.000 delta(0-1)=-1.000 detectable=0.063 ticks per call"
+            ),
+            "{line}"
+        );
+    }
 }
 
 /// The timer of the CPU: the time-stamp counter of x86_64, and the virtual counter of aarch64.

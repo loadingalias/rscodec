@@ -73,7 +73,7 @@ the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C
 | Path count: the counters of the instructions and the branches of each call, on each kernel of the CPU, at each length up to 200 bytes and at 13 longer lengths, with random and fixed inputs | One count for each length and outcome |
 | Scan of the disassembly | No load or store at an address from the data, no write of `PSTATE.DIT` in the secret code, and each instruction that reads secret data on the DOIT or DIT list |
 | Painted stack: each secret call on a private stack | No run of 8 secret bytes or 16 secret characters stays in the stack |
-| DudeCT: a statistical test of a fixed input against random inputs of the same length | No difference up to 64 bytes. At 4096 bytes, see the limits |
+| DudeCT compares a fixed input with random inputs of the same length | The tests passed at 16, 32, and 64 bytes. The 4096-byte result is open. |
 
 The result that the caller sees is public, so the time can show it: the lengths, the validity of a
 text, the kind and the offset of a refusal, and the padding of base64.
@@ -85,10 +85,10 @@ Limits:
   instructions in the secret code.
 - WebAssembly has no timing claim. It has no list of instructions with data independent timing,
   and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
-- At 4096 bytes, DudeCT finds a difference between a fixed input and random inputs: up to 5% when
-  the input comes from outside the cache, on both CPUs, and about 0.05% for hex encode and base64
-  decode on Graviton4 when the input is in the cache. The path count and the scan find no path or
-  address that depends on the data. This result is open.
+- At 4096 bytes, both shipped builds exceeded the timing threshold on some operations.
+  After one warm-up call, all six x86_64 operations passed with eight timed calls per sample.
+  Graviton4 still exceeded the threshold for hex encode and standard base64 decode.
+  The size and cause of the difference remain open.
 - Intel guarantees the DOIT list only in DOIT mode (DOITM), which the operating system sets on a CPU
   that has it. The tests did not set it.
 

@@ -7,7 +7,7 @@ license.workspace = true
 # A tool of this repository, not a library.
 publish = false
 
-[dependencies]
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 rscodec = { path = "..", features = ["base64", "hex"] }
 
 [lints]

@@ -22,13 +22,33 @@
     reason = "the harness is a command-line tool, and standard output is its record"
 )]
 
-mod cases;
-mod dudect;
 mod lists;
-mod paths;
-mod random;
 mod scan;
-mod stack;
+
+cfg_select! {
+    any(target_arch = "x86_64", target_arch = "aarch64") => {
+        mod cases;
+        mod dudect;
+        mod paths;
+        mod random;
+        // The x86_64 stack switch passes its argument in the System V ABI.
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        mod stack;
+
+        fn run(command: &str, args: &[String]) -> Result<(), Failure> {
+            match command {
+                "paths" => paths::run(args),
+                "dudect" => dudect::run(args),
+                #[cfg(not(all(windows, target_arch = "x86_64")))]
+                "stack" => stack::run(args),
+                _ => scan_or_refuse(command, args),
+            }
+        }
+    }
+    _ => {
+        use scan_or_refuse as run;
+    }
+}
 
 use std::{env, process::ExitCode};
 
@@ -44,17 +64,21 @@ enum Failure {
     Host(String),
 }
 
-fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let rest = args.get(1..).unwrap_or_default();
-    let result = match args.first().map(String::as_str) {
-        Some("paths") => paths::run(rest),
-        Some("scan") => scan::run(rest),
-        Some("stack") => stack::run(rest),
-        Some("dudect") => dudect::run(rest),
+fn scan_or_refuse(command: &str, args: &[String]) -> Result<(), Failure> {
+    match command {
+        "scan" => scan::run(args),
+        "paths" | "stack" | "dudect" => Err(Failure::Host(format!(
+            "this {} build cannot run {command}",
+            env::consts::ARCH
+        ))),
         _ => Err(Failure::Host(USAGE.to_owned())),
-    };
-    match result {
+    }
+}
+
+fn main() -> ExitCode {
+    let mut args = env::args().skip(1);
+    let command = args.next().unwrap_or_default();
+    match run(&command, &args.collect::<Vec<_>>()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Check(reason)) => {
             println!("FAIL: {reason}");
