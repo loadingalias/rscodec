@@ -24,7 +24,8 @@ Usage: cargo xtask <command> [arguments]
 Commands
   fix [Cargo args]     Apply Clippy fixes, format, then fail on the lints that remain (local only)
   check [Cargo args]   Check formatting, lints, and rustdoc, and change no file (the CI gate)
-  test [Nextest args]  Run the tests; with no arguments, also run the doctests
+  test [Nextest args]  Run the tests; with no arguments, also run the tests of
+                       rscodec without `std`, then the doctests
 
 fix, check, and test select the whole workspace, unless their arguments select
 packages with -p or --package. With the whole workspace, fix and check also
@@ -242,7 +243,9 @@ impl Repo {
     }
 
     /// Runs the tests with Nextest, in the whole workspace unless the
-    /// arguments select packages. With no arguments, it then runs the
+    /// arguments select packages. With no arguments, it then runs the tests
+    /// of `NO_STD_PACKAGE` with no default feature: without `std`, the crate
+    /// detects no CPU, and each kernel comes from the build. Then it runs the
     /// doctests, which Nextest does not run.
     fn test(&self, args: &[String]) -> Result<(), Failure> {
         step(
@@ -252,6 +255,17 @@ impl Repo {
         if !args.is_empty() {
             return Ok(());
         }
+        step(
+            "nextest without std",
+            &mut self.cargo(&[
+                "nextest",
+                "run",
+                "--locked",
+                "--no-default-features",
+                "--package",
+                NO_STD_PACKAGE,
+            ]),
+        )?;
         step(
             "doctest",
             &mut self.cargo(&["test", "--locked", "--doc", "--workspace", "--quiet"]),

@@ -1,6 +1,6 @@
-# The CI gate on each push to main: `cargo xtask check`, then the tests and
-# the doctests, then the tests on wasm32-wasip1 in Wasmtime, without simd128
-# and with it.
+# The CI gate on each push to main: `cargo xtask check`, then the tests with
+# `std` and without it and the doctests, then the tests on wasm32-wasip1 in
+# Wasmtime, without simd128 and with it.
 #
 # Each version comes from a file that `machine update all` writes:
 # rust-toolchain.toml, .config/nextest.toml, and Cargo.lock. A pin change

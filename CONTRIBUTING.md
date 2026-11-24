@@ -18,7 +18,7 @@
 | --- | --- |
 | `cargo xtask fix` | Applies the Clippy fixes and formats the code. Then it fails on each lint that remains |
 | `cargo xtask check` | Checks the format, the lints, and rustdoc, and changes no file. This is the CI gate |
-| `cargo xtask test` | Runs the tests, then the doctests |
+| `cargo xtask test` | Runs the tests, then the tests of rscodec without `std`, then the doctests |
 | `cargo xtask test -E 'test(<name>)'` | Runs the tests that the Nextest filter selects |
 | `cargo xtask test --target wasm32-wasip1` | Runs the tests in Wasmtime |
 
