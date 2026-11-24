@@ -16,12 +16,11 @@ Each codec is a feature. Select only the codecs that you use:
 
 ```toml
 [dependencies]
-rscodec = { version = "=0.1.0-alpha.2", features = ["base64", "hex"] }
+rscodec = { git = "https://github.com/loadingalias/rscodec", features = ["base64", "hex"] }
 ```
 
-`0.1.0-alpha.2` is the first release with these codecs. An alpha release can change the API, so
-pin the exact version. The release needs a nightly toolchain, which the
-[README](../../README.md#toolchain) names.
+rscodec is in development, and each change can change the API. The crate needs Rust 1.101, which
+is a nightly toolchain today. The repository tests `nightly-2026-11-02`.
 
 The `std` feature is on by default. Without it (`default-features = false`), the crate needs only
 `core`, and it selects each kernel at compile time from `-C target-feature`.

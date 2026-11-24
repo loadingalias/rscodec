@@ -6,16 +6,15 @@ memory, and no code recurses, so a deep document does not grow the stack.
 
 The writer writes compact JSON into a slice that you lend. It allocates no memory either.
 
-The `json` feature is in development. `0.1.0-alpha.2` holds it, and it is not in the support scope
-of that release: a differential fuzz campaign of the reader has not run yet. An alpha release can
-change the API, so pin the exact version. The release needs a nightly toolchain, which the
-[README](../../README.md#toolchain) names.
+The `json` feature is in development: a differential fuzz campaign of the reader has not run yet.
+Each change can change the API. The crate needs Rust 1.101, which is a nightly toolchain today. The
+repository tests `nightly-2026-11-02`.
 
 ## Select the feature
 
 ```toml
 [dependencies]
-rscodec = { version = "=0.1.0-alpha.2", features = ["json"] }
+rscodec = { git = "https://github.com/loadingalias/rscodec", features = ["json"] }
 ```
 
 The `std` feature is on by default. Without it, the reader needs only `core`, and it selects its

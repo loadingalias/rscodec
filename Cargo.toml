@@ -5,6 +5,7 @@ description = "Codecs for Rust: base64, base64url, hex, and JSON (in development
 repository = "https://github.com/loadingalias/rscodec"
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 keywords = ["base64", "hex", "json", "simd", "no-std"]
 categories = ["encoding", "no-std", "no-std::no-alloc", "parser-implementations"]
 # The crate is at the workspace root: the package holds only its sources, its license, and its
@@ -88,11 +89,12 @@ harness = false
 resolver = "3"
 members = [".", "ct", "xtask"]
 
-# No `rust-version`: development requires the nightly pinned in
-# rust-toolchain.toml, which a release number cannot express.
+# `rust-version` is the release number of the nightly that rust-toolchain.toml pins. Cargo then
+# refuses an older toolchain with one message. Set it again when the pin moves.
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+rust-version = "1.101"
 
 [workspace.lints.cargo]
 unknown_lints = "deny"

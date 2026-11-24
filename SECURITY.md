@@ -17,8 +17,7 @@ Security fixes go into the latest release.
 
 ## Scope
 
-Report each of these defects in a codec of the support scope, which the
-[README](README.md#support) gives:
+Report each of these defects:
 
 - An input that causes a panic, undefined behavior, memory use without a limit, or a wrong result.
 - A SIMD kernel that gives a result or an error that the portable kernel does not give.
