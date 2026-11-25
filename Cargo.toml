@@ -68,7 +68,7 @@ serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
 # compile time, with no dispatch.
 simd-json = { version = "=0.19.0", default-features = false, features = ["serde_impl", "swar-number-parsing"] }
 # `avx512` takes effect only where `-C target-cpu` enables AVX-512.
-sonic-rs = { version = "=0.5.10", features = ["avx512"] }
+sonic-rs = { version = "=0.5.11", features = ["avx512"] }
 zmij = "=1.0.23"
 
 # simdutf, the C++ leader of base64 decode, through its binding crate. A build for MSVC cannot
