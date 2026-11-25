@@ -17,7 +17,7 @@ use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
     simd::{
-        byte_at, from_end, to_end,
+        byte_at, from_end, short_blocks, to_end,
         x86::{lane, load_masked, load16, load32, load64, store_masked, store16, store32, store64},
     },
 };
@@ -46,7 +46,7 @@ pub(super) mod ssse3 {
 
     use super::{
         Class, DECODE_ORDER, ENCODE_ORDER, HIGH_SEXTETS, HIGH_SHIFTS, LOW_SEXTETS, LOW_SHIFTS, PAIRS, Profile, Tables,
-        WORDS, byte_at, decode_steps, encode_steps, from_end, load16, store16, to_end,
+        WORDS, byte_at, decode_steps, encode_steps, from_end, load16, short_blocks, store16, to_end,
     };
 
     #[target_feature(enable = "ssse3")]
@@ -54,12 +54,14 @@ pub(super) mod ssse3 {
         let tables = &Tables::of(profile).nibbles;
         let shift = load16::<0, _>(&tables.shift);
         let order = load16::<0, _>(&ENCODE_ORDER);
-        let ends = (
-            |last: &[u8; 16], len| from_end(last, len, 0),
-            |first: &[u8; 16], len| to_end(first, len),
-        );
-        encode_steps(class, bytes, out, ends, |src, dst| {
-            let input = _mm_shuffle_epi8(load16::<0, _>(src), order);
+        let block = |src: &[u8; 16], skip: u8, dst: &mut [u8; 16]| {
+            // `pshufb` gives zero to a lane whose index has bit 7, so the saturating add of `0x70`
+            // sets bit 7 for each index past the vector, and keeps the low four bits of the others.
+            let index = _mm_adds_epu8(
+                _mm_add_epi8(order, _mm_set1_epi8(skip.cast_signed())),
+                _mm_set1_epi8(0x70),
+            );
+            let input = _mm_shuffle_epi8(load16::<0, _>(src), index);
             let high = _mm_mulhi_epu16(
                 _mm_and_si128(input, _mm_set1_epi32(HIGH_SEXTETS)),
                 _mm_set1_epi32(HIGH_SHIFTS),
@@ -75,7 +77,22 @@ pub(super) mod ssse3 {
                 _mm_and_si128(_mm_cmpgt_epi8(_mm_set1_epi8(26), sextets), _mm_set1_epi8(13)),
             );
             store16::<0, _>(dst, _mm_add_epi8(sextets, _mm_shuffle_epi8(shift, class)));
-        });
+        };
+        // A slice pattern gives the last 16 bytes with no test of their address for null.
+        match bytes.as_rchunks().1 {
+            [.., last] => encode_steps(class, bytes, last, out, |first, len| to_end(first, len), block),
+            [] => {
+                short_blocks::<16, 16>(
+                    class,
+                    bytes,
+                    out,
+                    12,
+                    0,
+                    |step| step / 3 * 4,
+                    |src, dst| block(src, 0, dst),
+                );
+            }
+        }
     }
 
     #[target_feature(enable = "ssse3")]
@@ -423,8 +440,11 @@ pub(super) mod avx512vbmi {
 #[target_feature(enable = "avx512bw")]
 fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
     let zero = _mm512_setzero_si512();
-    // Step `i` reads the bytes from `96 i` to `96 i + 112`.
-    let steps = bytes.len().saturating_sub(16) / 96;
+    // Step `i` reads the bytes from `96 i` to `96 i + 112`. `out` has 64 characters for each 48
+    // bytes, so a shift of its length counts the whole blocks, with no division (C109). The last
+    // whole block reads a full vector only if 16 bytes follow it.
+    let whole = out.len() >> 6;
+    let steps = whole.saturating_sub(usize::from((out.len() & 63) * 3 / 4 < 16)) >> 1;
     let windows = bytes
         .array_windows::<112>()
         .step_by(96)
@@ -434,7 +454,8 @@ fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m
         store64::<64, _>(text, block(load64::<48, _>(src)));
     }
     let (bytes, out) = (&bytes[96 * steps..], &mut out[128 * steps..]);
-    let (chunks, rest) = bytes.as_chunks::<48>();
+    let (whole_bytes, rest) = bytes.split_at(48 * (out.len() >> 6));
+    let chunks = whole_bytes.as_chunks::<48>().0;
     let (texts, tail) = out.split_at_mut(chunks.len() * 64);
     for ((chunk, text), at) in chunks.iter().zip(texts.as_chunks_mut::<64>().0).zip((0..).step_by(48)) {
         let src = bytes

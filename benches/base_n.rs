@@ -21,6 +21,8 @@
 mod aligned;
 mod common;
 
+use core::hint::black_box;
+
 use aligned::Aligned;
 use base64::Engine as _;
 use base64ct::Encoding as _;
@@ -118,16 +120,10 @@ fn encode_row(group: &mut Group<'_>, case: &mut Case, codec: &str, mut encode: i
         ..
     } = case;
     let (raw, text) = (&**raw, &**text);
-    group.row(
-        codec,
-        label,
-        &mut output[..text.len()],
-        |output| encode(raw, output),
-        |written, output| {
-            assert_eq!(&output[..written], text, "{codec} encodes {label}");
-            report_place(codec, label, raw, output);
-        },
-    );
+    let output = &mut output[..text.len()];
+    let written = encode(raw, output);
+    assert_eq!(&output[..written], text, "{codec} encodes {label}");
+    timed_row(group, codec, label, raw, output, encode);
 }
 
 /// A row that decodes `case.text` with `decode`, which returns the length of the bytes, or `None`
@@ -147,28 +143,46 @@ fn decode_row(
         ..
     } = case;
     let (raw, text) = (&**raw, &**text);
-    group.row(
-        codec,
-        label,
-        &mut output[..output_len],
-        |output| decode(text, output),
-        |written, output| {
-            let written = written.expect("valid text decodes");
-            assert_eq!(&output[..written], raw, "{codec} decodes {label}");
-            report_place(codec, label, text, output);
-        },
-    );
+    let output = &mut output[..output_len];
+    let written = decode(text, output).expect("valid text decodes");
+    assert_eq!(&output[..written], raw, "{codec} decodes {label}");
+    timed_row(group, codec, label, text, output, decode);
 }
 
-/// Prints the offsets of the input and the output of a row in their 4 KiB pages. A load or a store
-/// across a page or a cache line costs more, so the offsets can explain a slow row.
+/// Registers the timed loop of a row, after the check of its output. Each call passes `input`
+/// through `black_box`, so the compiler cannot move the work out of the loop, and it shows `output`
+/// to `black_box` after the call, so each store stays.
+///
+/// The row gives the harness no state, so the harness passes no buffer through `black_box`, and the
+/// address of the output stays in a register. With the output as the state, each call loaded that
+/// address again, and that load bounded each call of a few cycles on Graviton4 (C109).
 #[expect(
     clippy::print_stdout,
     reason = "a benchmark binary reports the place of the buffers of each row on standard output, beside Criterion"
 )]
-fn report_place(codec: &str, label: &str, input: &[u8], output: &[u8]) {
+fn timed_row<T>(
+    group: &mut Group<'_>,
+    codec: &str,
+    label: &str,
+    input: &[u8],
+    output: &mut [u8],
+    mut operation: impl FnMut(&[u8], &mut [u8]) -> T,
+) {
+    // The offsets of the input and the output in their 4 KiB pages. A load or a store across a
+    // page or a cache line costs more, so the offsets can explain a slow row.
     let page = |bytes: &[u8]| bytes.as_ptr().addr() % 4096;
-    println!("place {codec}/{label} input={} output={}", page(input), page(output));
+    let (input_page, output_page) = (page(input), page(output));
+    group.row(
+        codec,
+        label,
+        (),
+        |()| {
+            let result = operation(black_box(input), output);
+            black_box(output.as_ptr());
+            result
+        },
+        |_, ()| println!("place {codec}/{label} input={input_page} output={output_page}"),
+    );
 }
 
 /// The name of the row of `kernel`, for example `rscodec-avx2`.

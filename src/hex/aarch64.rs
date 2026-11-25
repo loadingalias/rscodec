@@ -12,6 +12,7 @@
 
 use core::arch::aarch64::*;
 
+use super::encode_steps;
 use crate::{
     ct::Class,
     simd::{
@@ -41,23 +42,13 @@ const FLAGS: [u8; 64] = {
 #[target_feature(enable = "neon")]
 pub(super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
     let digits = load16::<0, _>(&DIGITS);
-    if bytes.len() > SHORT_MAX {
-        encode_long(digits, bytes, out);
-    } else if bytes.len() >= 16 {
-        overlapping::<16, 32>(bytes, out, |src, dst| encode_block(digits, src, dst));
-    } else {
-        short_blocks::<16, 32>(
-            class,
-            bytes,
-            out,
-            16,
-            0,
-            |len| len * 2,
-            |src, dst| {
-                encode_block(digits, src, dst);
-            },
-        );
-    }
+    encode_steps(
+        class,
+        bytes,
+        out,
+        |src, dst| encode_block(digits, src, dst),
+        |bytes, out| encode_long(digits, bytes, out),
+    );
 }
 
 /// Encodes a long input in blocks of 64 bytes.

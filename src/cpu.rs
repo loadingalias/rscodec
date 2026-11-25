@@ -343,6 +343,14 @@ impl Kept {
         Self(AtomicU8::new(0))
     }
 
+    /// Whether the first call chose `index`: one load and one compare. A codec asks this first for
+    /// the fastest kernel of the target, and then it calls that kernel with no table.
+    #[cfg(any(feature = "base64", feature = "hex"))]
+    #[inline(always)]
+    pub(crate) fn holds(&self, index: usize) -> bool {
+        usize::from(self.0.load(Relaxed)) == index + 1
+    }
+
     /// The index that the first call chose with `choose`. Each racing first call chooses and
     /// stores the same index.
     #[inline]

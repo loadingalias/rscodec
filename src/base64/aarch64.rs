@@ -1,6 +1,7 @@
 //! The Neon kernels. An input of up to `SHORT_MAX` bytes runs inline in the caller, in blocks of 16
-//! characters. A longer input runs in a function of its own: whole blocks of 64 characters use the
-//! interleaved loads (`ld3`, `ld4`), and the rest uses blocks of 16 characters. The encoder looks
+//! characters. A longer input uses the interleaved loads (`ld3`, `ld4`) for whole blocks of 64
+//! characters, and blocks of 16 characters for the rest. The encoder runs inline at each length,
+//! and the decoder runs a longer input in a function of its own. The encoder looks
 //! up each sextet in the alphabet (`tbl`), and `zip1` and `zip2` put the characters in order. The
 //! decoder looks up the flag of each character in a table of the 80 bytes from `+` (`tbl` and
 //! `tbx`): the sextet with bit 7 set, or zero for a byte outside the alphabet. It ANDs the flags of
@@ -22,7 +23,7 @@ use crate::{
     simd::{
         SHORT_MAX,
         aarch64::{load_quads, load_triples, load16, store_triples, store16, table64},
-        byte_at, from_end, to_end,
+        byte_at, from_end, short_blocks, to_end,
     },
 };
 
@@ -62,8 +63,13 @@ fn flags(lookups: &Lookups, chars: uint8x16_t) -> uint8x16_t {
     )
 }
 
-/// Encodes `bytes` into the characters `out`, with no padding. A short input runs inline in the
-/// caller.
+/// Encodes `bytes` into the characters `out`, with no padding, inline in the caller at each length.
+///
+/// A call in the encoder would put the constants of a loop of the caller in memory: a call keeps
+/// only the low 64 bits of `v8` to `v15`. With a call for an input longer than `SHORT_MAX` or
+/// shorter than one vector, base64url of 16 bytes took 1.14 times as long as base64-simd on
+/// Graviton4, and inline 0.97. The code at each call site is about three times as large, and an
+/// encode of 4 KiB or more took 1.00 to 1.14 times as long (C109).
 #[inline(always)]
 #[target_feature(enable = "neon")]
 pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
@@ -76,7 +82,7 @@ pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mu
 
 /// Encodes a long input: two blocks of 48 bytes in each step, then one, with the interleaved
 /// loads, then the rest, at least 16 bytes, in blocks of 12 bytes.
-#[inline(never)]
+#[inline(always)]
 #[target_feature(enable = "neon")]
 fn encode_long(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
     let alphabet = table64::<0, _>(&Tables::of(profile).alphabet);
@@ -126,36 +132,53 @@ fn encode_48(alphabet: uint8x16x4_t, src: &[u8; 48], dst: &mut [u8; 64]) {
     store16::<48, _>(dst, groups_12);
 }
 
-/// Encodes in blocks of 12 bytes.
+/// Encodes in blocks of 12 bytes. An input shorter than one vector runs on arrays on the stack.
 #[inline(always)]
 #[target_feature(enable = "neon")]
 fn encode_12(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
+    let block = block_12(profile);
+    // A slice pattern gives the last 16 bytes with no test of their address for null.
+    match bytes.as_rchunks().1 {
+        [.., last] => encode_steps(class, bytes, last, out, |first, len| to_end(first, len), block),
+        [] => {
+            short_blocks::<16, 16>(
+                class,
+                bytes,
+                out,
+                12,
+                0,
+                |step| step / 3 * 4,
+                |src, dst| block(src, 0, dst),
+            );
+        }
+    }
+}
+
+/// The block of the encoder: the 16 characters of the 12 bytes from `skip` in `src`. One `tbl`
+/// takes the bytes in the order of each group, and gives zero to a lane past the end of `src`.
+#[inline(always)]
+#[target_feature(enable = "neon")]
+fn block_12(profile: Profile) -> impl Fn(&[u8; 16], u8, &mut [u8; 16]) {
     let alphabet = table64::<0, _>(&Tables::of(profile).alphabet);
     let order = load16::<0, _>(&ENCODE_ORDER);
     // In each 32-bit lane of `b1 b0 b2 b1`, the low 16 bits hold the first and the second sextet
-    // at bits 10 and 4, and the high 16 bits hold the third and the fourth at bits 6 and 0. The
-    // shifts move each sextet to the low bits of its byte.
-    let lanes = |mask: u32| vreinterpretq_u16_u32(vdupq_n_u32(mask));
-    let (first, second) = (lanes(0x0000_fc00), lanes(0x0000_03f0));
-    let (third, fourth) = (lanes(0x0fc0_0000), lanes(0x003f_0000));
-    let ends = (
-        |last: &[u8; 16], len| from_end(last, len, 0),
-        |first: &[u8; 16], len| to_end(first, len),
-    );
-    encode_steps(class, bytes, out, ends, |src, dst| {
-        let input = vreinterpretq_u16_u8(vqtbl1q_u8(load16::<0, _>(src), order));
+    // at bits 10 and 4, and the high 16 bits hold the third and the fourth at bits 6 and 0. `ushl`
+    // shifts each 16-bit lane by its own count, to the right for a negative count, and moves each
+    // sextet to the low bits of its byte.
+    let lanes = |pair: u32| vreinterpretq_u16_u32(vdupq_n_u32(pair));
+    let (high, low) = (lanes(0x0fc0_fc00), lanes(0x003f_03f0));
+    let counts = |pair: u32| vreinterpretq_s16_u32(vdupq_n_u32(pair));
+    // -10 and -6, and 4 and 8.
+    let (right, left) = (counts(0xfffa_fff6), counts(0x0008_0004));
+    move |src, skip, dst| {
+        let index = vaddq_u8(order, vdupq_n_u8(skip));
+        let input = vreinterpretq_u16_u8(vqtbl1q_u8(load16::<0, _>(src), index));
         let sextets = vorrq_u16(
-            vorrq_u16(
-                vshrq_n_u16::<10>(vandq_u16(input, first)),
-                vshlq_n_u16::<4>(vandq_u16(input, second)),
-            ),
-            vorrq_u16(
-                vshrq_n_u16::<6>(vandq_u16(input, third)),
-                vshlq_n_u16::<8>(vandq_u16(input, fourth)),
-            ),
+            vshlq_u16(vandq_u16(input, high), right),
+            vshlq_u16(vandq_u16(input, low), left),
         );
         store16::<0, _>(dst, vqtbl4q_u8(alphabet, vreinterpretq_u8_u16(sextets)));
-    });
+    }
 }
 
 /// Decodes the characters `text`, with no padding, into `out`, and gives whether each is in the

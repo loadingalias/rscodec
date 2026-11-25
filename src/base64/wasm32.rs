@@ -9,7 +9,7 @@ use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
     simd::{
-        byte_at, from_end, to_end,
+        byte_at, from_end, short_blocks, to_end,
         wasm32::{load16, store16},
     },
 };
@@ -23,12 +23,9 @@ const DECODE_ORDER: [u8; 16] = [2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, 0xff, 0x
 pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
     let shift = load16::<0, _>(&Tables::of(profile).nibbles.shift);
     let order = load16::<0, _>(&ENCODE_ORDER);
-    let ends = (
-        |last: &[u8; 16], len| from_end(last, len, 0),
-        |first: &[u8; 16], len| to_end(first, len),
-    );
-    encode_steps(class, bytes, out, ends, |src, dst| {
-        let input = i8x16_swizzle(load16::<0, _>(src), order);
+    let block = |src: &[u8; 16], skip: u8, dst: &mut [u8; 16]| {
+        // `swizzle` gives zero to a lane whose index is past the vector.
+        let input = i8x16_swizzle(load16::<0, _>(src), i8x16_add(order, u8x16_splat(skip)));
         // In each 32-bit lane, the low 16 bits hold the first and the second sextet at bits 10
         // and 4, and the high 16 bits hold the third and the fourth at bits 6 and 0.
         let first = u16x8_shr(v128_and(input, u32x4_splat(0x0000_fc00)), 10);
@@ -40,7 +37,22 @@ pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mu
             v128_and(i8x16_gt(i8x16_splat(26), sextets), u8x16_splat(13)),
         );
         store16::<0, _>(dst, i8x16_add(sextets, i8x16_swizzle(shift, class)));
-    });
+    };
+    // A slice pattern gives the last 16 bytes with no test of their address for null.
+    match bytes.as_rchunks().1 {
+        [.., last] => encode_steps(class, bytes, last, out, |first, len| to_end(first, len), block),
+        [] => {
+            short_blocks::<16, 16>(
+                class,
+                bytes,
+                out,
+                12,
+                0,
+                |step| step / 3 * 4,
+                |src, dst| block(src, 0, dst),
+            );
+        }
+    }
 }
 
 pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {

@@ -283,18 +283,23 @@ fn main() -> Result<(), rscodec::base64::Error> {
 - With `std`, the crate detects the CPU one time for each process. When `-C target-feature` turns
   on the features of the fastest kernel of a class, the choice is made at compile time.
 - Without `std`, a kernel is available only if `-C target-feature` turns on its features.
-- A short input runs inline in the caller, with no choice of kernel: on aarch64, up to 64 bytes on
-  the Neon kernel, and on x86_64, for hex, an encode of up to 32 bytes and a decode of up to 16
-  bytes of result on SSE2. When `-C target-feature` fixes a SIMD kernel of a class, that kernel
-  runs inline at each length. `encode_with` and `decode_with` always run the kernel of their
-  backend.
+- A short input runs inline in the caller, with no choice of kernel. On aarch64, the Neon kernel
+  runs inline up to 64 bytes, and the base64 encoder runs inline at each length. On x86_64, a hex
+  decode of up to 16 bytes of result runs inline on SSE2. A hex encode on x86_64 always calls the
+  chosen kernel. When `-C target-feature` fixes a SIMD kernel of a class, that kernel runs inline
+  at each length. `encode_with` and `decode_with` always run the kernel of their backend.
 - Each kernel runs whole blocks, then one last block that ends at the end of the input and writes
   some bytes of the block before it again. Thus a tail needs no copy. Only an input shorter than
   one vector runs on arrays on the stack, or on AVX-512 with masked loads and stores.
+- A hex encode of up to 64 bytes runs one block, or two, at each end of the input, with no loop.
 - The AVX-512 base64 kernels have an entry with no loop for up to 48 bytes.
-- The AVX-512BW hex kernel uses one vector to encode up to 32 bytes or decode up to 64 characters.
-  For 32 through 127 decoded bytes, it processes one block and a second overlapping block only if a tail remains.
-  For an encode of 64 KiB or more, it uses 32-byte vectors to keep the CPU clock higher.
+- The AVX-512BW hex kernel encodes fewer than 32 bytes in one masked vector, and 32 through 64
+  bytes with one 64-byte vector at each end. For an encode of 64 KiB or more, it uses 32-byte
+  vectors to keep the CPU clock higher.
+- The AVX-512BW hex kernel decodes fewer than 32 characters in one masked vector. The AVX2 and
+  AVX-512BW hex kernels decode 32 through 63 characters with one 32-byte vector at each end. For 32
+  through 127 decoded bytes, the AVX-512BW kernel processes one block, and a second overlapping
+  block only if a tail remains.
 - WebAssembly has no run-time detection, so `Simd128` exists only with `+simd128`.
 - On an Intel hybrid CPU (Alder Lake to Arrow Lake), the AVX-512 kernels do not run, also if CPUID
   reports AVX-512. Its efficient cores do not have AVX-512.

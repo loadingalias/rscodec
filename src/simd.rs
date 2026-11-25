@@ -101,6 +101,32 @@ pub(crate) fn overlapping<const IN: usize, const OUT: usize>(
     }
 }
 
+/// Runs `block` over the first `IN` bytes of `input`, and then, if more bytes follow, over the last
+/// `IN` bytes, which overlap the first block if `input` is shorter than `2 * IN` bytes. `input` has
+/// `IN` to `2 * IN` bytes, and `output` has `OUT` bytes, a multiple of `IN`, for each `IN` bytes of
+/// `input`. Thus the path
+/// has no loop and no count of blocks. Slice patterns give the chunks with no `Option`, and thus
+/// with no test of their address for null.
+#[cfg(feature = "hex")]
+#[inline(always)]
+pub(crate) fn ends<const IN: usize, const OUT: usize>(
+    input: &[u8],
+    output: &mut [u8],
+    mut block: impl FnMut(&[u8; IN], &mut [u8; OUT]),
+) {
+    if let ([first, ..], [dst, ..]) = (input.as_chunks().0, output.as_chunks_mut().0) {
+        block(first, dst);
+    }
+    const { assert!(OUT.is_multiple_of(IN)) };
+    // One subtraction gives the place of the last chunk of `input`, and one shift the place in
+    // `output`: `as_rchunks` computes each from the count and the rest of the chunks.
+    if let Some(at) = input.len().checked_sub(IN).filter(|&at| at > 0)
+        && let ([last, ..], [dst, ..]) = (input[at..].as_chunks().0, output[at * (OUT / IN)..].as_chunks_mut().0)
+    {
+        block(last, dst);
+    }
+}
+
 /// The bytes of `src`, at most 16, in the first bytes of the result, and `fill` in the other bytes.
 /// Two overlapping loads of 8, 4, or 1 bytes read each byte, and the OR joins them.
 #[cfg(not(target_arch = "aarch64"))]

@@ -4,6 +4,7 @@
 
 use core::arch::wasm32::*;
 
+use super::encode_steps;
 use crate::{
     ct::Class,
     simd::{
@@ -54,11 +55,7 @@ pub(super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
             u8x16_shuffle::<8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31>(hi, lo),
         );
     };
-    if bytes.len() >= 16 {
-        overlapping(bytes, out, block);
-    } else {
-        short_blocks(class, bytes, out, 16, 0, |len| len * 2, block);
-    }
+    encode_steps(class, bytes, out, block, |bytes, out| overlapping(bytes, out, block));
 }
 
 pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {

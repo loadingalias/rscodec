@@ -143,15 +143,31 @@ impl Profile {
     /// `usize`.
     #[must_use]
     pub const fn encoded_len(self, len: usize) -> Option<usize> {
+        match self.text_lens(len) {
+            Some((_, len)) => Some(len),
+            None => None,
+        }
+    }
+
+    /// The number of characters of the text of `len` bytes before the padding, and with it, or
+    /// `None` if a number overflows `usize`. It divides the length one time.
+    const fn text_lens(self, len: usize) -> Option<(usize, usize)> {
+        let rest = len % 3;
         let Some(full) = (len / 3).checked_mul(4) else {
             return None;
         };
-        let rest = match (self, len % 3) {
-            (_, 0) => 0,
-            (Self::Url, rest) => rest + 1,
-            (Self::Standard, _) => 4,
+        // A rest of 1 or 2 bytes gives 2 or 3 characters.
+        let Some(symbols) = full.checked_add(rest + rest.div_ceil(2)) else {
+            return None;
         };
-        full.checked_add(rest)
+        match self {
+            Self::Url => Some((symbols, symbols)),
+            Self::Standard if rest == 0 => Some((symbols, symbols)),
+            Self::Standard => match full.checked_add(4) {
+                Some(len) => Some((symbols, len)),
+                None => None,
+            },
+        }
     }
 
     /// The number of bytes that `text` decodes to. It reads only the length and the padding.
@@ -213,10 +229,10 @@ impl Profile {
         bytes: &[u8],
         out: &'o mut [u8],
     ) -> Result<&'o mut [u8], Error> {
-        // A slice has at most `isize::MAX` bytes, so the length cannot overflow.
-        let len = self.encoded_len(bytes.len()).unwrap_or(usize::MAX);
+        // A slice has at most `isize::MAX` bytes, so the lengths cannot overflow.
+        let (symbols, len) = self.text_lens(bytes.len()).unwrap_or((usize::MAX, usize::MAX));
         let out = out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))?;
-        let (text, padding) = out.split_at_mut(symbols_len(bytes.len()));
+        let (text, padding) = out.split_at_mut_checked(symbols).unwrap_or_default();
         // At most two bytes, with a store each: a fill of a length that the compiler does not know
         // is a call to `memset`.
         if let Some((last, rest)) = padding.split_last_mut() {
@@ -351,12 +367,6 @@ impl Profile {
     }
 }
 
-/// The number of characters before the padding in the text of `len` bytes. A slice has at most
-/// `isize::MAX` bytes, so the result cannot overflow.
-const fn symbols_len(len: usize) -> usize {
-    len / 3 * 4 + (len % 3 * 4).div_ceil(3)
-}
-
 /// The number of bytes of `len` characters with no padding.
 const fn bytes_len(len: usize) -> usize {
     len / 4 * 3 + (len % 4).saturating_sub(1)
@@ -468,21 +478,26 @@ impl Kernel {
         const PUBLIC: Option<usize> = Kernel::fixed(Timing::Public);
         const SECRET: Option<usize> = Kernel::fixed(Timing::Secret);
         static KEPT: [Kept; 2] = [Kept::new(), Kept::new()];
-        let (fixed, kept) = match class {
-            Timing::Public => (PUBLIC, &KEPT[0]),
-            Timing::Secret => (SECRET, &KEPT[1]),
+        let (fixed, kept, top) = match class {
+            Timing::Public => (PUBLIC, &KEPT[0], const { Kernel::fastest(Caps::ALL, Timing::Public) }),
+            Timing::Secret => (SECRET, &KEPT[1], const { Kernel::fastest(Caps::ALL, Timing::Secret) }),
         };
-        let index = fixed.unwrap_or_else(|| kept.index(|| Self::fastest(cpu::caps(), class)));
-        // The fastest kernel of the target first: one compare, and then the caller calls it with
-        // no table.
-        let top = match class {
-            Timing::Public => const { Self::fastest(Caps::ALL, Timing::Public) },
-            Timing::Secret => const { Self::fastest(Caps::ALL, Timing::Secret) },
+        let index = match fixed {
+            Some(index) => index,
+            // The fastest kernel of the target first: one load and one compare, and then the
+            // caller calls it with no table.
+            None if kept.holds(top) => return Self::ALL[top],
+            None => kept.index(|| Self::detected(class)),
         };
-        if index == top {
-            return Self::ALL[top];
-        }
         Self::ALL.get(index).copied().unwrap_or(Self::Portable)
+    }
+
+    /// The index of the fastest kernel of `class` that this CPU runs. Only the first call of a
+    /// class runs it. It stays out of line, so the detection takes no register of the caller.
+    #[cold]
+    #[inline(never)]
+    fn detected(class: Timing) -> usize {
+        Self::fastest(cpu::caps(), class)
     }
 }
 
@@ -603,13 +618,15 @@ mod kernel {
     }
 }
 
-/// Encodes `bytes` into the characters `out`, with no padding, with the `block` of a kernel of
-/// 16-byte vectors: each block takes 12 bytes at the start of 16 and gives 16 characters.
+/// Encodes `bytes`, at least 16, into the characters `out`, with no padding, with the `block` of a
+/// kernel of 16-byte vectors. `last` is the last 16 bytes. `block(src, skip, dst)` takes the 12
+/// bytes from `skip` in `src`, with zero after the end of `src`, and gives 16 characters.
 ///
-/// The steps read 16 bytes at each 12. The last one or two blocks take the last 16 bytes of the
-/// input, put in place by `from_end` (see [`crate::simd`]). The last block runs first, and
-/// `to_end` puts its characters at the end of `out`: the blocks before it then write the other
-/// lanes of that store again. An input of fewer than 16 bytes runs on arrays on the stack.
+/// Whole blocks of 12 bytes come first, and the last block takes the last 1 to 12 bytes from
+/// `last`. The last block runs first, and `to_end` puts its characters at the end of `out`: the
+/// blocks before it then write the other lanes of that store again. Each length comes from the
+/// length of `out` with shifts, and a loop on the place in the input runs the whole blocks, so the
+/// path has no division and no count of blocks.
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "aarch64",
@@ -627,41 +644,36 @@ mod kernel {
 fn encode_steps(
     class: impl Class,
     bytes: &[u8],
+    last: &[u8; 16],
     out: &mut [u8],
-    ends: (
-        impl Fn(&[u8; 16], usize) -> [u8; 16],
-        impl Fn(&[u8; 16], usize) -> [u8; 16],
-    ),
-    mut block: impl FnMut(&[u8; 16], &mut [u8; 16]),
+    to_end: impl Fn(&[u8; 16], usize) -> [u8; 16],
+    block: impl Fn(&[u8; 16], u8, &mut [u8; 16]),
 ) {
-    let (from_end, to_end) = ends;
-    let Some(last) = bytes.last_chunk::<16>() else {
-        short_blocks::<16, 16>(class, bytes, out, 12, 0, symbols_len, block);
-        return;
-    };
-    // Step `i` reads the bytes from `12 i` to `12 i + 16`, so the steps leave 4 to 15 bytes. A rest
-    // of more than 12 bytes needs one more whole block.
-    let steps = (bytes.len() - 4) / 12;
-    let rest = bytes.len() - 12 * steps;
-    let rest_last = if rest > 12 { rest - 12 } else { rest };
-    let (mut src, mut dst) = (from_end(last, rest_last), [0; 16]);
-    block(&src, &mut dst);
-    // `out` has at least 22 characters.
-    if let Some(end) = out.last_chunk_mut() {
-        *end = to_end(&dst, symbols_len(rest_last));
+    // The last block has the last 1 to 16 characters, after the whole blocks of 16, and 3 bytes
+    // for each 4 characters: 12 bytes for 16, and 1 or 2 bytes for 2 or 3.
+    let chars = 16 - (out.len().wrapping_neg() & 15);
+    let skip = 16 - 3 * chars / 4;
+    let mut dst = [0; 16];
+    block(last, u8::try_from(skip).unwrap_or_default(), &mut dst);
+    // `out` has at least 22 characters. A slice pattern gives the last chunk with no `Option`, and
+    // thus with no test of its address for null.
+    if let [.., end] = out.as_rchunks_mut().1 {
+        *end = to_end(&dst, chars);
     }
-    class.clear(&mut src);
     class.clear(&mut dst);
     let mut outs = out.as_chunks_mut().0.iter_mut();
-    for (src, dst) in bytes.array_windows().step_by(12).zip(outs.by_ref()).take(steps) {
-        block(src, dst);
-    }
-    if rest > 12
+    let mut rest = bytes;
+    while let Some(src) = rest.first_chunk()
         && let Some(dst) = outs.next()
     {
-        let mut src = from_end(last, rest);
-        block(&src, dst);
-        class.clear(&mut src);
+        block(src, 0, dst);
+        rest = rest.get(12..).unwrap_or_default();
+    }
+    // A rest of 13 to 15 bytes has one more whole block, in `last`.
+    if let Some(skip) = 16_usize.checked_sub(rest.len()).filter(|&skip| skip < 4)
+        && let Some(dst) = outs.next()
+    {
+        block(last, u8::try_from(skip).unwrap_or_default(), dst);
     }
 }
 

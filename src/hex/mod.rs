@@ -128,9 +128,7 @@ pub const fn decoded_len(text: &[u8]) -> Result<usize, Error> {
 /// Encodes `bytes` into the start of `out`, and gives the text, which is ASCII. It runs the fastest
 /// kernel of the CPU, for public bytes. Encode a secret with [`encode_secret`].
 ///
-/// On x86_64, an input of up to 32 bytes runs on SSE2, which each x86_64 CPU has, inline and with
-/// no choice of kernel. When `-C target-feature` fixes a SIMD kernel, that kernel runs inline at each
-/// length.
+/// When `-C target-feature` fixes a SIMD kernel, that kernel runs inline at each length.
 ///
 /// # Errors
 ///
@@ -139,7 +137,7 @@ pub const fn decoded_len(text: &[u8]) -> Result<usize, Error> {
 #[inline(always)]
 pub fn encode<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = text_of(bytes, out)?;
-    kernel::encode_chosen(Public, Timing::Public, bytes, out);
+    kernel::encode(Public, Backend(Kernel::chosen(Timing::Public)), bytes, out);
     Ok(out)
 }
 
@@ -154,7 +152,7 @@ pub fn encode<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error
 #[inline(always)]
 pub fn encode_secret<'o>(_: &Dit, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = text_of(bytes, out)?;
-    kernel::encode_chosen(Secret, Timing::Secret, bytes, out);
+    kernel::encode(Secret, Backend(Kernel::chosen(Timing::Secret)), bytes, out);
     Ok(out)
 }
 
@@ -363,21 +361,26 @@ impl Kernel {
         const PUBLIC: Option<usize> = Kernel::fixed(Timing::Public);
         const SECRET: Option<usize> = Kernel::fixed(Timing::Secret);
         static KEPT: [Kept; 2] = [Kept::new(), Kept::new()];
-        let (fixed, kept) = match class {
-            Timing::Public => (PUBLIC, &KEPT[0]),
-            Timing::Secret => (SECRET, &KEPT[1]),
+        let (fixed, kept, top) = match class {
+            Timing::Public => (PUBLIC, &KEPT[0], const { Kernel::fastest(Caps::ALL, Timing::Public) }),
+            Timing::Secret => (SECRET, &KEPT[1], const { Kernel::fastest(Caps::ALL, Timing::Secret) }),
         };
-        let index = fixed.unwrap_or_else(|| kept.index(|| Self::fastest(cpu::caps(), class)));
-        // The fastest kernel of the target first: one compare, and then the caller calls it with
-        // no table.
-        let top = match class {
-            Timing::Public => const { Self::fastest(Caps::ALL, Timing::Public) },
-            Timing::Secret => const { Self::fastest(Caps::ALL, Timing::Secret) },
+        let index = match fixed {
+            Some(index) => index,
+            // The fastest kernel of the target first: one load and one compare, and then the
+            // caller calls it with no table.
+            None if kept.holds(top) => return Self::ALL[top],
+            None => kept.index(|| Self::detected(class)),
         };
-        if index == top {
-            return Self::ALL[top];
-        }
         Self::ALL.get(index).copied().unwrap_or(Self::Portable)
+    }
+
+    /// The index of the fastest kernel of `class` that this CPU runs. Only the first call of a
+    /// class runs it. It stays out of line, so the detection takes no register of the caller.
+    #[cold]
+    #[inline(never)]
+    fn detected(class: Timing) -> usize {
+        Self::fastest(cpu::caps(), class)
     }
 }
 
@@ -428,12 +431,10 @@ mod kernel {
     use super::{Backend, Kernel, portable};
     use crate::{cpu::Timing, ct::Class};
 
-    /// The largest input of the SSE2 short path of x86_64 that encodes. A longer input runs the
-    /// chosen kernel, whose call costs less than the SSE2 work (C109).
-    #[cfg(target_arch = "x86_64")]
-    const ENCODE_INLINE_MAX: usize = 32;
-
-    /// The largest result of the SSE2 short path of x86_64 that decodes, as [`ENCODE_INLINE_MAX`].
+    /// The largest result of the SSE2 short path of x86_64 that decodes: a call costs more than its
+    /// work. An encode has no short path: the constants of an inline path load again after each
+    /// call of the kernel in a loop of the caller, and with no short path the encode of 32 bytes
+    /// took 0.73 times as long as faster-hex on the Xeon, against 0.90 (C109).
     #[cfg(target_arch = "x86_64")]
     const DECODE_INLINE_MAX: usize = 16;
 
@@ -451,19 +452,8 @@ mod kernel {
         }
     }
 
-    /// Encodes `bytes` into `out` in a function of `timing` with no backend argument: on x86_64, a
-    /// short input on the short path, and otherwise on the chosen kernel.
-    #[inline(always)]
-    pub(super) fn encode_chosen(class: impl Class, timing: Timing, bytes: &[u8], out: &mut [u8]) {
-        #[cfg(target_arch = "x86_64")]
-        if short(timing) && bytes.len() <= ENCODE_INLINE_MAX {
-            // SAFETY: each x86_64 target has SSE2.
-            return unsafe { x86::sse2::encode(class, bytes, out) };
-        }
-        encode(class, Backend(Kernel::chosen(timing)), bytes, out);
-    }
-
-    /// Decodes `text` into `out` as [`encode_chosen`] encodes.
+    /// Decodes `text` into `out` in a function of `timing` with no backend argument: on x86_64, a
+    /// short result on the short path, and otherwise on the chosen kernel.
     #[inline(always)]
     pub(super) fn decode_chosen(class: impl Class, timing: Timing, text: &[u8], out: &mut [u8]) -> bool {
         #[cfg(target_arch = "x86_64")]
@@ -550,6 +540,47 @@ mod kernel {
 }
 
 /// The kernel table of x86_64.
+/// Encodes `bytes` into `out` with the `block` of a kernel of 16-byte vectors. Up to 64 bytes, it
+/// runs straight-line size classes: one block at each end below 32 bytes, and two blocks at each end
+/// from 32 bytes, so no class counts blocks. An input shorter than one vector runs on arrays on the
+/// stack, and `long` encodes an input of more than 64 bytes.
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    all(target_arch = "wasm32", target_feature = "simd128")
+))]
+#[inline(always)]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(
+    target_arch = "aarch64",
+    expect(
+        clippy::missing_safety_doc,
+        reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
+    )
+)]
+fn encode_steps(
+    class: impl Class,
+    bytes: &[u8],
+    out: &mut [u8],
+    block: impl Fn(&[u8; 16], &mut [u8; 32]),
+    long: impl FnOnce(&[u8], &mut [u8]),
+) {
+    // The long input first: its test then costs a long input one compare.
+    if bytes.len() > 64 {
+        long(bytes, out);
+    } else if bytes.len() >= 32 {
+        crate::simd::ends::<32, 64>(bytes, out, |src, dst| {
+            for (src, dst) in src.as_chunks().0.iter().zip(dst.as_chunks_mut().0) {
+                block(src, dst);
+            }
+        });
+    } else if bytes.len() >= 16 {
+        crate::simd::ends(bytes, out, block);
+    } else {
+        crate::simd::short_blocks(class, bytes, out, 16, 0, |len| len * 2, block);
+    }
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::Kernel;

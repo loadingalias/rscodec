@@ -1,10 +1,11 @@
-//! The x86_64 kernels: SSSE3, AVX2, and AVX-512BW, and the short path on SSE2. In the kernels,
-//! `pshufb` maps each nibble to its digit. The decoders map each character to its nibble with
-//! saturating arithmetic, which gives 16 or more for a byte that is not a digit, and OR the nibbles
-//! of each block into one vector, which they test once after the last block. The AVX-512BW decoder
-//! compares into masks instead.
+//! The x86_64 kernels: SSSE3, AVX2, and AVX-512BW, and the short decode path on SSE2. In the
+//! kernels, `pshufb` maps each nibble to its digit. The decoders map each character to its nibble
+//! with saturating arithmetic, which gives 16 or more for a byte that is not a digit, and OR the
+//! nibbles of each block into one vector, which they test once after the last block. The
+//! AVX-512BW decoder compares into masks instead.
 //!
-//! Each kernel runs whole blocks, and a last block that ends at the end of the slices and writes
+//! An encode of up to 64 bytes runs one block, or two, at each end of the slices ([`ends`]). A
+//! longer input runs whole blocks, and a last block that ends at the end of the slices and writes
 //! some bytes again ([`overlapping`]). The AVX2 kernel gives an input shorter than one block to the
 //! SSSE3 kernel. An input shorter than one vector runs on arrays on the stack, or on AVX-512BW in
 //! one vector with masked loads and stores. Thus a call has no count of a tail, and no loop for an
@@ -17,10 +18,11 @@
 
 use core::arch::x86_64::*;
 
+use super::encode_steps;
 use crate::{
     ct::Class,
     simd::{
-        overlapping, short_blocks,
+        ends, overlapping, short_blocks,
         x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
     },
 };
@@ -45,9 +47,9 @@ fn store_low(dst: &mut [u8; 8], value: __m128i) {
     }
 }
 
-/// The short path: SSE2, which each x86_64 CPU has, for a short input. It runs inline in the
-/// caller, with no choice of kernel. SSE2 has no `pshufb` and no `pmaddubsw`, so compares give the
-/// digits, and shifts and `packuswb` join the nibbles.
+/// The short decode path: SSE2, which each x86_64 CPU has, for a short result. It runs inline in
+/// the caller, with no choice of kernel. SSE2 has no `pmaddubsw`, so shifts and `packuswb` join the
+/// nibbles.
 pub(super) mod sse2 {
     use super::*;
 
@@ -81,14 +83,6 @@ pub(super) mod sse2 {
         _mm_movemask_epi8(_mm_adds_epu8(nibbles, _mm_set1_epi8(0x70))) == 0
     }
 
-    /// The digit of each nibble of 16.
-    #[inline(always)]
-    #[target_feature(enable = "sse2")]
-    fn digits(nibbles: __m128i) -> __m128i {
-        let letter = _mm_and_si128(_mm_cmpgt_epi8(nibbles, _mm_set1_epi8(9)), _mm_set1_epi8(LETTER_STEP));
-        _mm_add_epi8(_mm_add_epi8(nibbles, _mm_set1_epi8(b'0'.cast_signed())), letter)
-    }
-
     /// The bytes of the nibbles of 32 characters: the first, the high nibble, of each pair is in the
     /// low byte of its 16-bit lane. The even and the odd lanes go to two vectors of 16 nibbles, and a
     /// shift of 16-bit lanes moves each high nibble, which is below 16, within its byte.
@@ -99,24 +93,6 @@ pub(super) mod sse2 {
         let hi = _mm_packus_epi16(_mm_and_si128(first, low), _mm_and_si128(second, low));
         let lo = _mm_packus_epi16(_mm_srli_epi16(first, 8), _mm_srli_epi16(second, 8));
         _mm_or_si128(_mm_slli_epi16(hi, 4), lo)
-    }
-
-    #[inline(always)]
-    #[target_feature(enable = "sse2")]
-    pub(in super::super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
-        let nibble = _mm_set1_epi8(0x0f);
-        let block = |src: &[u8; 16], dst: &mut [u8; 32]| {
-            let src = load16::<0, _>(src);
-            let hi = digits(_mm_and_si128(_mm_srli_epi16(src, 4), nibble));
-            let lo = digits(_mm_and_si128(src, nibble));
-            store16::<0, _>(dst, _mm_unpacklo_epi8(hi, lo));
-            store16::<16, _>(dst, _mm_unpackhi_epi8(hi, lo));
-        };
-        if bytes.len() >= 16 {
-            overlapping(bytes, out, block);
-        } else {
-            short_blocks(class, bytes, out, 16, 0, |len| len * 2, block);
-        }
     }
 
     #[inline(always)]
@@ -181,11 +157,7 @@ pub(super) mod ssse3 {
             store16::<0, _>(dst, _mm_unpacklo_epi8(hi, lo));
             store16::<16, _>(dst, _mm_unpackhi_epi8(hi, lo));
         };
-        if bytes.len() >= 16 {
-            overlapping(bytes, out, block);
-        } else {
-            short_blocks(class, bytes, out, 16, 0, |len| len * 2, block);
-        }
+        encode_steps(class, bytes, out, block, |bytes, out| overlapping(bytes, out, block));
     }
 
     // The AVX2 kernel takes its short inputs, inline.
@@ -245,6 +217,26 @@ pub(super) mod avx2 {
         _mm256_min_epu8(digit, letter)
     }
 
+    /// Decodes 32 to 63 characters with one 32-byte vector at each end, and gives whether each is a
+    /// digit. `vptest` gives the validity in the flags: the masked vector of the AVX-512BW kernel
+    /// moved its mask to a general register, and took 1.32 times as long as faster-hex at 32
+    /// characters (C109).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub(super) fn decode_32(text: &[u8], out: &mut [u8]) -> bool {
+        let pair = _mm256_set1_epi16(PAIR);
+        let mut values = _mm256_setzero_si256();
+        overlapping::<32, 16>(text, out, |src, dst| {
+            let nibbles = nibbles(load32::<0, _>(src));
+            values = _mm256_or_si256(values, nibbles);
+            let pairs = _mm256_maddubs_epi16(nibbles, pair);
+            let bytes = _mm_packus_epi16(_mm256_castsi256_si128(pairs), _mm256_extracti128_si256::<1>(pairs));
+            store16::<0, _>(dst, bytes);
+        });
+        // Each lane of the OR is at most 15, so it has no bit of `0xf0`.
+        _mm256_testz_si256(values, _mm256_set1_epi8(0xf0_u8.cast_signed())) == 1
+    }
+
     /// The 64-bit words 0, 2, 1, and 3, which move the 8-byte halves of the 128-bit lanes.
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -261,21 +253,29 @@ pub(super) mod avx2 {
         }
         let digits = _mm256_broadcastsi128_si256(load16::<0, _>(&DIGITS));
         let nibble = _mm256_set1_epi8(0x0f);
-        overlapping::<32, 64>(bytes, out, |src, dst| {
+        let block = |src: &[u8; 32], dst: &mut [u8; 64]| {
             // Each 128-bit lane gets the bytes of one half of the output.
             let src = swap_middle(load32::<0, _>(src));
             let hi = _mm256_shuffle_epi8(digits, _mm256_and_si256(_mm256_srli_epi16(src, 4), nibble));
             let lo = _mm256_shuffle_epi8(digits, _mm256_and_si256(src, nibble));
             store32::<0, _>(dst, _mm256_unpacklo_epi8(hi, lo));
             store32::<32, _>(dst, _mm256_unpackhi_epi8(hi, lo));
-        });
+        };
+        // Up to 64 bytes, one block at each end, with no loop.
+        if bytes.len() <= 64 {
+            ends(bytes, out, block);
+        } else {
+            overlapping(bytes, out, block);
+        }
     }
 
     #[inline]
     #[target_feature(enable = "avx2")]
     pub(in super::super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
-        if text.len() < 64 {
-            return super::ssse3::decode(class, text, out);
+        match text.len() {
+            0..32 => return super::ssse3::decode(class, text, out),
+            32..64 => return decode_32(text, out),
+            _ => {}
         }
         let mut values = _mm256_setzero_si256();
         let pair = _mm256_set1_epi16(PAIR);
@@ -290,9 +290,11 @@ pub(super) mod avx2 {
     }
 }
 
-/// The AVX-512BW kernels run one 64-byte vector with masked loads and stores below 32 bytes of
-/// input or result, half blocks of one 64-byte vector of text with no mask up to 64 bytes, and
-/// blocks of two vectors of text from 64 bytes. The encoder runs 32-byte vectors from `WIDE_MIN`.
+/// The AVX-512BW decoder runs one 64-byte vector with masked loads and stores below 16 bytes of
+/// result, the 32-byte vectors of the AVX2 kernel from 16 to 31 bytes, half blocks of one 64-byte
+/// vector of text with no mask up to 64 bytes, and blocks of two vectors of text from 64 bytes.
+/// The encoder runs one masked vector below 32 bytes, one vector at each end up to 64 bytes, blocks
+/// of 64 bytes from 65 bytes, and 32-byte vectors from `WIDE_MIN`.
 pub(super) mod avx512bw {
     use super::*;
 
@@ -358,17 +360,21 @@ pub(super) mod avx512bw {
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
         let digits = digits();
+        // Below 32 bytes, one masked vector. From 32 to 64 bytes, one vector at each end, with no
+        // loop. A path with 32-byte vectors took 1.04 to 1.14 times as long from 32 to 64 bytes,
+        // although it kept the clock of the CPU higher (C109). The function stays small, so that a
+        // build with the feature runs it inline.
         if bytes.len() < 32 {
             let src = _mm512_castsi512_si256(load_masked(bytes, _mm512_setzero_si512()));
             return store_masked(out, encode_half(digits, src));
         }
-        if bytes.len() < 64 {
-            return overlapping::<32, 64>(bytes, out, |src, dst| {
+        if bytes.len() <= 64 {
+            return ends::<32, 64>(bytes, out, |src, dst| {
                 store64::<0, _>(dst, encode_half(digits, load32::<0, _>(src)));
             });
         }
         if bytes.len() >= WIDE_MIN {
-            return super::avx2::encode(class, bytes, out);
+            return encode_wide(class, bytes, out);
         }
         let nibble = _mm512_set1_epi8(0x0f);
         // Each 128-bit lane gets 8 bytes of the first half and 8 bytes of the second half.
@@ -380,6 +386,15 @@ pub(super) mod avx512bw {
             store64::<0, _>(dst, _mm512_unpacklo_epi8(hi, lo));
             store64::<64, _>(dst, _mm512_unpackhi_epi8(hi, lo));
         });
+    }
+
+    /// Encodes an input of at least `WIDE_MIN` bytes on the AVX2 code, out of line: the call costs
+    /// little beside its work, and it keeps [`encode`] small enough to run inline in a build with
+    /// the feature.
+    #[inline(never)]
+    #[target_feature(enable = "avx512bw")]
+    fn encode_wide(class: impl Class, bytes: &[u8], out: &mut [u8]) {
+        super::avx2::encode(class, bytes, out);
     }
 
     /// Decodes one vector of text and gives whether each character is a digit.
@@ -415,6 +430,9 @@ pub(super) mod avx512bw {
     #[cfg_attr(target_feature = "avx512bw", inline)]
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode(text: &[u8], out: &mut [u8]) -> bool {
+        if (32..64).contains(&text.len()) {
+            return super::avx2::decode_32(text, out);
+        }
         if text.len() < 64 {
             // '0', which is zero, is in place of the characters after the end.
             let (bytes, valid) = decode_half(load_masked(text, _mm512_set1_epi8(b'0'.cast_signed())));
