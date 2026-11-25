@@ -1,7 +1,12 @@
 # Test data
 
-The conformance tests of the JSON reader read these files, so they need no network. Each file is
-an unchanged copy of its upstream file, under the license of its upstream.
+The conformance tests of the JSON reader read these files, so they need no network. Each file in
+`JSONTestSuite/` and `kuhn/` is an unchanged copy of its upstream file, under the license of its
+upstream.
+
+`fuzz/` holds the minimized corpus of the JSON fuzz target (`fuzz/README.md`). The kernel tests read
+each of its inputs. libFuzzer made the inputs from seeds of this repository and of JSONTestSuite, so
+the MIT license of `JSONTestSuite/LICENSE` applies to the inputs that come from JSONTestSuite.
 
 The number tests also read Nigel Tao's data, which `fetched/` holds and Git ignores. It is too large
 for the repository: 14 files, 275 MB, 5,299,993 lines. Fetch it before the tests:

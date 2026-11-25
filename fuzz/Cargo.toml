@@ -1,0 +1,36 @@
+# The fuzz targets of rscodec (C206): a workspace of its own, because libFuzzer and the sanitizers
+# need flags that the workspace of the crate does not take. README.md gives the commands.
+[package]
+name = "rscodec-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+rscodec = { path = "..", features = ["json"] }
+# The trusted reader of the design. Without `float_roundtrip`, serde_json reads some floats 1 ULP
+# away from the correctly rounded value.
+serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
+
+# build.rs builds simdjson, the second trusted reader, with its shim `oracle.cpp`.
+[build-dependencies]
+cc = "=1.11.1"
+
+[[bin]]
+name = "read"
+path = "fuzz_targets/read.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+
+# Integer overflow is a defect in every profile, also in the fuzz build.
+[profile.release]
+debug = 1
+overflow-checks = true

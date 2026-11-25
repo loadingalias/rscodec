@@ -6,8 +6,7 @@ memory, and no code recurses, so a deep document does not grow the stack.
 
 The writer writes compact JSON into a slice that you lend. It allocates no memory either.
 
-The `json` feature is in development: a differential fuzz campaign of the reader has not run yet.
-Each change can change the API. The crate needs Rust 1.101, which is a nightly toolchain today. The
+The `json` feature is in development. Each change can change the API. The crate needs Rust 1.101, which is a nightly toolchain today. The
 repository tests `nightly-2026-11-02`.
 
 ## Select the feature

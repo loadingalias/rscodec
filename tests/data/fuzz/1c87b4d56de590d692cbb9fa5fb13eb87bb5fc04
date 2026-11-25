@@ -1,0 +1,1 @@
+{"name":"rand","vers":"0.0.2","deps":[{"name":"dep-14-c59e4aceac42ea0c0473ecf10a419259ff0c6c4c8d42ce0","features":{"default":["std"],"std":["alloc"],"alloc":[],"feature-0":["dep:dep-14-core"]},"yanked":false,"links":null   \u001b[1m\u001b[94m|\u001b[0m\n\u001b[1m\u00:02:14Z"}

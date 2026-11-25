@@ -147,6 +147,18 @@ fn each_kernel_equals_the_reference_on_the_generated_corpora() {
     check_files(&files.iter().map(|file| file.as_path()).collect::<Vec<_>>());
 }
 
+/// The minimized corpus of the fuzz campaign (`fuzz/README.md`). The fuzz runs only the kernel
+/// that its CPU selects, so this test compares the other kernels with the reference on its inputs.
+#[test]
+fn each_kernel_equals_the_reference_on_the_fuzz_corpus() {
+    let files: Vec<_> = fs::read_dir("tests/data/fuzz")
+        .unwrap()
+        .map(|file| file.unwrap().path())
+        .collect();
+    assert!(!files.is_empty(), "tests/data/fuzz has no file");
+    check_files(&files.iter().map(|file| file.as_path()).collect::<Vec<_>>());
+}
+
 /// The three corpora that benches/data/README.md fetches. A missing file fails the test.
 #[test]
 fn each_kernel_equals_the_reference_on_the_fetched_corpora() {

@@ -1,0 +1,1 @@
+{"name":"a","vers":"0.0.0","deps":[],"cksum":"e87d769034fc31b2a6be2c9473d92daa477ca9393eb978b96ee5c4949156fac5","features":{"default":["std"],"std":["alloc"],"alloc":[]},"yanked":false,"links":null,"v":2,"features2":{"serde":["dep:serde","alloc"]},"rust_version":"1.60","pubtime":"2018-01-01T00:00:00Z"}

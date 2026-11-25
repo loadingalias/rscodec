@@ -15,4 +15,10 @@ AGENTS.md
 # Nigel Tao's number data, too large for the repository. tests/data/README.md
 # fetches it.
 /tests/data/fetched/
+# The fuzz runs: the working corpus, the crash files, the coverage, and simdjson, which
+# fuzz/README.md fetches.
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/simdjson/
 .claude/

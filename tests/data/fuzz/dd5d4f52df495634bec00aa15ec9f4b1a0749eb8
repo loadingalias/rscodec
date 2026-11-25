@@ -1,0 +1,1 @@
+{"issuer":"https://login.example.o1rg","authorization_endpoint":"https://login.example.org/connect/authorize","token_endpoint":"https://login.example.org/connect/token","token_endpoint_auth_methods_supported":[fals"client_secreet_basic","private[_key_jwt"],"to5ken_en

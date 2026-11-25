@@ -24,6 +24,9 @@
 
 Each command uses `--locked`, so no command changes `Cargo.lock`.
 
+The fuzz targets are in `fuzz/`, a workspace of its own. `fuzz/README.md` gives their commands. On
+a workstation, run a target for at most 10 minutes.
+
 ## Rules of a change
 
 - Each SIMD kernel gives the same output, error, and error offset as the portable kernel, for each

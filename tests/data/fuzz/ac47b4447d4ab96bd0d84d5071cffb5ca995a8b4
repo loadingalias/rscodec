@@ -1,0 +1,23 @@
+{
+ "keys": [
+  {
+   "kty": "EC",
+   "crv": "P-256",
+   "x": "ozuCLVHoO--obYVnwhjTOb7MO4RVY8tsKV9Op57K9zo",
+   "y": "tuofI85V-ds8fjCoCvKd9wwh7znTcY1BZ7iPpaRJ2zg",
+   "use": "enc",
+   "kid": "1"
+  },
+  {
+   "kty": "RSA",
+   "n": "qSO8zMVfj9dmK1LFh3ezuSv256",
+   "kid": "2011-04-29"
+  },
+  {
+   "kty": "OKP",
+   "crv": "Ed25519",
+   "x": "dUX4jn4LqI74y3OvfgVRZjsXwoCekM_74O23EWlnYhw",
+   "kid": "ed-1"
+  }
+ ]
+}

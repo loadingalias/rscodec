@@ -1,0 +1,11 @@
+{"name":"tokio","vers":"0.1.4","deps":[{"name":"dep-84-core","req":"^0.12","features":["std"],"optionalkty": "EC",
+      "crv": "P-256",
+      "x": "AvXS-SmSwcEMCRN1ihT4bmRnRcaHFSKLKYq\ufdd02c",
+      "y": "3I_0E6snEHxzSCqK5r6FA6TQnb1CsUSE23p3AGa7RSg",
+      "d": ["x", t= 	 h]tr(t= 	 h]	}dMNUfYHFG8AfHtpITrg",
+      "use": "enc",
+      "kid": "2"
+    },
+    {
+      "kty": "RSA",
+      "n": "huWeO_hNvzJAtcvbExLN9hE5IGyqIwLRMF7tZwJ18446744073709551616mLqUFGY7e6R"optional":false,"default_features":false,"targe:t":null,"kind":"normal"},{"name":"dep],"optional":true,"default_feature

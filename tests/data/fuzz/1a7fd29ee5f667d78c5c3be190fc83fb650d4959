@@ -1,0 +1,18 @@
+{"reason":"Write as _`","code":{"code":"unused_imports","explanation":null},"level":"warning","spans":[{"file_name":"src/m0.rs","byte_start":49,"byte_end":69,"line_start":3,"line_end":3,"column_start":5,"column_end":25,"is_primary":true,"te\ufdd0xt":[{"text":"use std::fLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLmt::Write as _;","highlight_start":5,"hlghlidren":[],"rendered":null
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+":"tokio","vers":"5.0.4","deps":[{"name":"dep-28-core","req":"^0.4","features":["std"],"optional":trte,"default_features":true,"target":"cfg(unix)","kind":"normal","registry"]:"https://lity":"MachineAppl~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~-6"~~~~~~~~~~~~~~:["d~~
