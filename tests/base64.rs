@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Rng, secret};
+use common::{Rng, proof, secret};
 use rscodec::base64::{Backend, Error, ErrorKind, Kernel, Profile};
 
 const PROFILES: [Profile; 2] = [Profile::Url, Profile::Standard];
@@ -34,10 +34,15 @@ enum Call {
     Secret,
 }
 
-/// Each backend that this CPU runs, then the functions of each timing class.
+/// Each backend that this CPU runs, then the functions of each timing class. A build that makes no
+/// proof has no call of the secret class.
 fn calls() -> Vec<Call> {
     let backends = Kernel::ALL.iter().filter_map(|&kernel| Backend::new(kernel));
-    backends.map(Call::With).chain([Call::Public, Call::Secret]).collect()
+    backends
+        .map(Call::With)
+        .chain([Call::Public])
+        .chain(proof().then_some(Call::Secret))
+        .collect()
 }
 
 /// The portable backend, the reference of each other call.
@@ -328,6 +333,10 @@ fn a_short_output_refuses_with_the_length() {
 /// output writes no byte.
 #[test]
 fn decode_secret_wipes_its_output_after_a_refusal() {
+    // A build that makes no proof has no secret call.
+    if !proof() {
+        return;
+    }
     secret(|dit| {
         const UNWRITTEN: u8 = 0x5a;
         let mut rng = Rng::new(0x0000_7769_7065);

@@ -20,8 +20,14 @@ impl Rng {
     }
 }
 
-/// Runs `scope` in a scope of `rscodec::with_dit`. Each host of the tests can tell whether its CPU
-/// has DIT: x86_64, WebAssembly, and aarch64 with `std` on Linux or macOS.
+/// Whether this build makes the proof `Dit`, which each secret function takes. A build that makes
+/// none has no secret call: on aarch64, a build with no `dit` target feature and no `std`. The test
+/// `with_dit_gives_the_proof_exactly_where_the_build_knows_dit` of the hex tests holds the rule.
+pub(crate) fn proof() -> bool {
+    rscodec::with_dit(|_| ()).is_ok()
+}
+
+/// Runs `scope` in a scope of `rscodec::with_dit`, in a build that makes the proof ([`proof`]).
 pub(crate) fn secret<T>(scope: impl FnOnce(&rscodec::Dit) -> T) -> T {
-    rscodec::with_dit(scope).expect("the host of the tests reports DIT")
+    rscodec::with_dit(scope).expect("this build makes the proof")
 }

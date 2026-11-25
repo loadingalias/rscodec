@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Rng, secret};
+use common::{Rng, proof, secret};
 use rscodec::hex::{self, Backend, Error, ErrorKind, Kernel};
 
 /// A call of the codec: on a backend, or a function of a timing class, with no backend argument.
@@ -15,10 +15,15 @@ enum Call {
     Secret,
 }
 
-/// Each backend that this CPU runs, then the functions of each timing class.
+/// Each backend that this CPU runs, then the functions of each timing class. A build that makes no
+/// proof has no call of the secret class.
 fn calls() -> Vec<Call> {
     let backends = Kernel::ALL.iter().filter_map(|&kernel| Backend::new(kernel));
-    backends.map(Call::With).chain([Call::Public, Call::Secret]).collect()
+    backends
+        .map(Call::With)
+        .chain([Call::Public])
+        .chain(proof().then_some(Call::Secret))
+        .collect()
 }
 
 /// Encodes `bytes` into `out` with `call`, and gives the length of the text.
@@ -193,6 +198,10 @@ fn a_short_output_refuses_with_the_length() {
 /// zero, and it wrote no other byte. A refusal for the length or the output writes no byte.
 #[test]
 fn decode_secret_wipes_its_output_after_a_refusal() {
+    // A build that makes no proof has no secret call.
+    if !proof() {
+        return;
+    }
     secret(|dit| {
         const UNWRITTEN: u8 = 0x5a;
         let mut rng = Rng::new(0x0000_7769_7065);
@@ -224,11 +233,34 @@ fn decode_secret_wipes_its_output_after_a_refusal() {
     });
 }
 
+/// `with_dit` gives the proof and runs its scope exactly in a build that knows whether the CPU has
+/// DIT: each build for another architecture, and on aarch64 a build with the `dit` target feature
+/// or with the detection of `std` (Linux, Android, and the Apple systems). Another build gets
+/// `DitUnknown`, and its scope does not run.
+#[test]
+fn with_dit_gives_the_proof_exactly_where_the_build_knows_dit() {
+    let known = cfg!(any(
+        not(target_arch = "aarch64"),
+        target_feature = "dit",
+        all(
+            feature = "std",
+            any(target_os = "linux", target_os = "android", target_vendor = "apple")
+        )
+    ));
+    let mut ran = false;
+    assert_eq!(rscodec::with_dit(|_| ran = true).is_ok(), known);
+    assert_eq!(ran, known);
+}
+
 /// On aarch64 with DIT, the scope of `with_dit` holds `PSTATE.DIT` set for each secret call in it,
 /// and after the scope, also after a panic in it, `PSTATE.DIT` is as it was before: set or clear.
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn the_dit_scope_holds_pstate_dit_and_restores_it() {
+    // A build that makes no proof has no scope.
+    if !proof() {
+        return;
+    }
     // A CPU without DIT has no state to keep.
     let Some(before) = dit::get() else { return };
     for held in [false, true] {
