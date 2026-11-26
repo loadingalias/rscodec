@@ -30,14 +30,19 @@ Commands
 fix, check, and test select the whole workspace, unless their arguments select
 packages with -p or --package. With the whole workspace, fix and check also
 lint rscodec with no default feature: its library with each codec on
-wasm32v1-none, a target with no `std`, and all of its targets, the tests too,
-on the host. They also lint its library with each codec alone, on
-wasm32v1-none and with `std` on the host. rustdoc documents each codec.
+wasm32v1-none, a target with no `std`, without and with simd128, and all of its
+targets, the tests too, on the host. They also lint its library with each codec
+alone, on wasm32v1-none without and with simd128, and with `std` on the host.
+rustdoc documents each codec.
 ";
 
 /// A target with no `std`, which rust-toolchain.toml names. A build for it
 /// fails at each use of `std`, also at a use that is outside its `cfg`.
 const NO_STD_TARGET: &str = "wasm32v1-none";
+
+/// The Cargo configuration that builds `NO_STD_TARGET` with simd128, whose
+/// kernels the build selects: the lint of the plain build does not see them.
+const SIMD128: &str = r#"target.wasm32v1-none.rustflags=["-C", "target-feature=+simd128"]"#;
 
 /// The package whose library builds without `std`.
 const NO_STD_PACKAGE: &str = "rscodec";
@@ -162,10 +167,11 @@ impl Repo {
     }
 
     /// Lints `NO_STD_PACKAGE` with no default feature: its library on
-    /// `NO_STD_TARGET`, and all of its targets on the host, so that a test that
-    /// uses `std` outside the `std` feature also fails. Then it lints the
-    /// library with each leaf alone, on `NO_STD_TARGET` and with `std` on the
-    /// host, so that a build that selects one codec also builds. It runs only
+    /// `NO_STD_TARGET` without and with simd128, and all of its targets on the
+    /// host, so that a test that uses `std` outside the `std` feature also
+    /// fails. Then it lints the library with each leaf alone, on
+    /// `NO_STD_TARGET` without and with simd128, and with `std` on the host, so
+    /// that a build that selects one codec also builds. It runs only
     /// when `scope` is the whole workspace, and it says when it does not run.
     /// It takes no argument of the caller: a feature or target argument applies
     /// to the other steps.
@@ -191,6 +197,24 @@ impl Repo {
             ]),
         )?;
         step(
+            "clippy without std, simd128",
+            &mut self.cargo(&[
+                "clippy",
+                "--locked",
+                "--quiet",
+                "--lib",
+                "--no-default-features",
+                "--features",
+                LEAVES,
+                "--target",
+                NO_STD_TARGET,
+                "--package",
+                NO_STD_PACKAGE,
+                "--config",
+                SIMD128,
+            ]),
+        )?;
+        step(
             "clippy tests without std",
             &mut self.cargo(&[
                 "clippy",
@@ -204,9 +228,15 @@ impl Repo {
         )?;
         for leaf in LEAVES.split(',') {
             let with_std = format!("std,{leaf}");
-            for (features, target) in [(leaf, &["--target", NO_STD_TARGET][..]), (&with_std, &[])] {
+            let wasm = ["--target", NO_STD_TARGET];
+            let simd128 = ["--target", NO_STD_TARGET, "--config", SIMD128];
+            for (features, label, target) in [
+                (leaf, "", &wasm[..]),
+                (leaf, ", simd128", &simd128[..]),
+                (&with_std, "", &[][..]),
+            ] {
                 step(
-                    &format!("clippy {features} alone"),
+                    &format!("clippy {features} alone{label}"),
                     self.cargo(&[
                         "clippy",
                         "--locked",
