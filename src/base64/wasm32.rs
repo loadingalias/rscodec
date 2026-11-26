@@ -8,10 +8,8 @@ use core::arch::wasm32::*;
 use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
-    simd::{
-        byte_at, from_end, short_blocks, to_end,
-        wasm32::{load16, store16},
-    },
+    simd::{byte_at, from_end, short_blocks, to_end},
+    vector::wasm32::{load16, store16},
 };
 
 /// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.
@@ -40,7 +38,7 @@ pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mu
     };
     // A slice pattern gives the last 16 bytes with no test of their address for null.
     match bytes.as_rchunks().1 {
-        [.., last] => encode_steps(class, bytes, last, out, |first, len| to_end(first, len), block),
+        [.., last] => encode_steps(class, bytes, last, out, to_end, block),
         [] => {
             short_blocks::<16, 16>(
                 class,

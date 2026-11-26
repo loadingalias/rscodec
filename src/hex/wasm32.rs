@@ -7,10 +7,8 @@ use core::arch::wasm32::*;
 use super::encode_steps;
 use crate::{
     ct::Class,
-    simd::{
-        overlapping, short_blocks,
-        wasm32::{load16, store16},
-    },
+    simd::{overlapping, short_blocks},
+    vector::wasm32::{load16, store16},
 };
 
 const DIGITS: [u8; 16] = *b"0123456789abcdef";

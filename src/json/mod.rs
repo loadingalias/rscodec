@@ -108,7 +108,7 @@ pub const I64_BYTES_MAX: usize = 20;
 /// The most bytes that [`Place::u64`] writes: `18446744073709551615`.
 pub const U64_BYTES_MAX: usize = 20;
 
-use crate::cpu::{self, Caps, Kept, caps_static};
+use crate::cpu::{Caps, Timing};
 use block::{Block, Carry};
 
 /// The rules that a document must meet.
@@ -248,12 +248,17 @@ impl Kernel {
         Self::Swar,
     ];
 
-    /// The CPU features that the kernel needs: the features of its `#[target_feature]` functions.
-    /// The detection reports a feature only with each feature that it implies.
-    const fn needs(self) -> Caps {
+    /// The CPU features that the kernel needs, the features of its `#[target_feature]` functions,
+    /// and its timing class, which is public. The detection reports a feature only with each
+    /// feature that it implies.
+    const fn needs(self) -> (Caps, Timing) {
+        #[cfg(target_arch = "aarch64")]
+        use crate::cpu::aarch64::{AES, NEON};
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        use crate::cpu::wasm32::SIMD128;
         #[cfg(target_arch = "x86_64")]
         use crate::cpu::x86::{AVX2, AVX512BW, AVX512VBMI2, AVX512VL, BMI1, BMI2, PCLMULQDQ};
-        match self {
+        let features = match self {
             Self::Swar => Caps::NONE,
             #[cfg(target_arch = "x86_64")]
             Self::Avx512 => AVX512BW
@@ -265,34 +270,16 @@ impl Kernel {
             #[cfg(target_arch = "x86_64")]
             Self::Avx2 => AVX2.union(PCLMULQDQ).union(BMI1).union(BMI2),
             #[cfg(target_arch = "aarch64")]
-            Self::NeonPmull => cpu::aarch64::NEON.union(cpu::aarch64::AES),
+            Self::NeonPmull => NEON.union(AES),
             #[cfg(target_arch = "aarch64")]
-            Self::Neon => cpu::aarch64::NEON,
+            Self::Neon => NEON,
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            Self::Simd128 => cpu::wasm32::SIMD128,
-        }
+            Self::Simd128 => SIMD128,
+        };
+        (features, Timing::Public)
     }
 
-    /// The index in [`Kernel::ALL`] of the fastest kernel that a CPU with `caps` runs. The last
-    /// kernel, the reference, runs on each CPU.
-    const fn fastest(caps: Caps) -> usize {
-        let mut index = 0;
-        while index + 1 < Self::ALL.len() && !caps.has(Self::ALL[index].needs()) {
-            index += 1;
-        }
-        index
-    }
-
-    /// The index of the kernel that the build fixes: if the build has no run-time detection, or if
-    /// `caps_static()` holds the features of the fastest kernel.
-    const fn fixed() -> Option<usize> {
-        let index = Self::fastest(caps_static());
-        if !cpu::DETECTS || index == Self::fastest(Caps::ALL) {
-            Some(index)
-        } else {
-            None
-        }
-    }
+    crate::cpu::choice!(Swar);
 
     /// The function of the kernel.
     ///
@@ -329,9 +316,6 @@ impl Backend {
     /// chooses it, and each later call reads the choice.
     #[inline(always)]
     fn chosen() -> Self {
-        const FIXED: Option<usize> = Kernel::fixed();
-        static KEPT: Kept = Kept::new();
-        let index = FIXED.unwrap_or_else(|| KEPT.index(|| Kernel::fastest(cpu::caps())));
-        Self(Kernel::ALL.get(index).copied().unwrap_or(Kernel::Swar))
+        Self(Kernel::chosen(Timing::Public))
     }
 }

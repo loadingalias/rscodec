@@ -16,10 +16,8 @@ use core::arch::x86_64::*;
 use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
-    simd::{
-        byte_at, from_end, short_blocks, to_end,
-        x86::{lane, load_masked, load16, load32, load64, store_masked, store16, store32, store64},
-    },
+    simd::{byte_at, from_end, short_blocks, to_end},
+    vector::x86::{lane, load_masked, load16, load32, load64, store_masked, store16, store32, store64},
 };
 
 /// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.

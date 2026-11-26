@@ -7,19 +7,25 @@ use super::{
     block::{self, Block, Carry, Classes},
     simd,
 };
+use crate::vector::wasm32::load16;
 
 /// The simd128 kernel.
 #[inline(never)]
 pub(super) fn simd128(input: &[u8], start: usize, carry: Carry) -> Block {
     let (bytes, before) = (&input[start..], block::before(input, start));
     let quarters = match bytes.first_chunk() {
-        Some(bytes) => load::quarters(bytes),
+        Some(bytes) => [
+            load16::<0, 64>(bytes),
+            load16::<16, 64>(bytes),
+            load16::<32, 64>(bytes),
+            load16::<48, 64>(bytes),
+        ],
         None => {
             let words = block::tail(bytes);
             core::array::from_fn(|index| u64x2(words[2 * index], words[2 * index + 1]))
         }
     };
-    let (whitespace, structural) = (load::table(&simd::WHITESPACE), load::table(&simd::STRUCTURAL));
+    let (whitespace, structural) = (load16::<0, 16>(&simd::WHITESPACE), load16::<0, 16>(&simd::STRUCTURAL));
     let nibble = u8x16_splat(0x0f);
     let control = bits(quarters.map(|quarter| u8x16_lt(quarter, u8x16_splat(0x20))));
     let curly = bits(quarters.map(|quarter| {
@@ -53,7 +59,7 @@ fn utf8_error(quarters: [v128; 4], before: u32) -> bool {
     if u8x16_bitmask(v128_or(v128_or(a, b), v128_or(c, d))) == 0 {
         return block::ends_incomplete(before);
     }
-    let tables = [block::FIRST_HIGH, block::FIRST_LOW, block::SECOND_HIGH].map(|table| load::table(&table));
+    let tables = [block::FIRST_HIGH, block::FIRST_LOW, block::SECOND_HIGH].map(|table| load16::<0, 16>(&table));
     let previous = u32x4(0, 0, 0, before);
     let error = v128_or(
         v128_or(check(a, previous, tables), check(b, a, tables)),
@@ -91,7 +97,7 @@ pub(super) const BITS: u32 = 1;
 /// byte under 0x20, the first byte in the low bits.
 #[inline(always)]
 pub(super) fn escapes(block: &[u8; 16]) -> u64 {
-    scan(load::table(block))
+    scan(load16::<0, 16>(block))
 }
 
 /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
@@ -106,27 +112,4 @@ fn scan(bytes: v128) -> u64 {
     let backslash = u8x16_eq(bytes, u8x16_splat(b'\\'));
     let control = u8x16_lt(bytes, u8x16_splat(0x20));
     u64::from(u8x16_bitmask(v128_or(v128_or(quote, backslash), control)))
-}
-
-/// The loads of the kernel.
-#[expect(unsafe_code, reason = "each load reads only the bytes of the array that it takes")]
-mod load {
-    use core::arch::wasm32::{v128, v128_load};
-
-    /// The 16 bytes of `table`.
-    #[inline]
-    pub(super) fn table(table: &[u8; 16]) -> v128 {
-        // SAFETY: the load reads the 16 bytes of `table`, and it needs no alignment.
-        unsafe { v128_load(table.as_ptr().cast()) }
-    }
-
-    /// The four quarters of `bytes`.
-    #[inline]
-    pub(super) fn quarters(bytes: &[u8; 64]) -> [v128; 4] {
-        [0, 16, 32, 48].map(|at| {
-            // SAFETY: the load reads the 16 bytes at `at`, which are in `bytes`, and it needs no
-            // alignment.
-            unsafe { v128_load(bytes.as_ptr().add(at).cast()) }
-        })
-    }
 }

@@ -34,6 +34,15 @@ mod ct;
     )
 ))]
 mod simd;
+#[cfg(all(
+    any(feature = "base64", feature = "hex", feature = "json"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )
+))]
+mod vector;
 
 #[cfg(any(feature = "base64", feature = "hex"))]
 pub use cpu::{Dit, DitUnknown, with_dit};

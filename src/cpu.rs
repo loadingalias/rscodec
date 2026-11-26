@@ -309,8 +309,7 @@ const fn runnable(detected: Caps) -> Caps {
 }
 
 /// The timing class of a kernel, and of a function of a codec (selected on 2026-11-18,
-/// [CODEC Base-N]). Only the base-N codecs have a secret class.
-#[cfg(any(feature = "base64", feature = "hex"))]
+/// [CODEC Base-N]). Only the base-N codecs have a secret class: each kernel of JSON is public.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Timing {
     /// For public data, for example a digest or a signature. A function of the class runs the
@@ -321,10 +320,13 @@ pub(crate) enum Timing {
     /// For secret data, for example a key or a bearer token. A kernel of the class uses only the
     /// instructions that Intel lists with DOIT and Arm lists with data independent timing (DIT). A
     /// function of the class runs only these kernels, with `PSTATE.DIT` set on aarch64.
+    #[cfg_attr(
+        not(any(feature = "base64", feature = "hex")),
+        expect(dead_code, reason = "a build with only the JSON codec has no secret class")
+    )]
     Secret,
 }
 
-#[cfg(any(feature = "base64", feature = "hex"))]
 impl Timing {
     /// Whether a function of this class can run a kernel of class `kernel`.
     #[inline(always)]
@@ -345,7 +347,6 @@ impl Kept {
 
     /// Whether the first call chose `index`: one load and one compare. A codec asks this first for
     /// the fastest kernel of the target, and then it calls that kernel with no table.
-    #[cfg(any(feature = "base64", feature = "hex"))]
     #[inline(always)]
     pub(crate) fn holds(&self, index: usize) -> bool {
         usize::from(self.0.load(Relaxed)) == index + 1
@@ -366,6 +367,76 @@ impl Kept {
         index
     }
 }
+
+/// The choice of the kernel of each timing class, as the items `fastest`, `fixed`, `chosen`, and
+/// `detected` of the `Kernel` of a codec. The codec gives `ALL`, its kernels from the fastest to
+/// `$reference`, which runs on each CPU, and `needs`, the features and the class of a kernel. A
+/// constant cannot call a method of a trait, so a macro gives each codec the one rule.
+macro_rules! choice {
+    ($reference:ident) => {
+        /// The index in `ALL` of the fastest kernel that a CPU with `caps` runs in a function of
+        /// `class`. The last kernel, the reference, runs on each CPU and in each class.
+        const fn fastest(caps: $crate::cpu::Caps, class: $crate::cpu::Timing) -> usize {
+            let mut index = 0;
+            while index + 1 < Self::ALL.len() {
+                let (features, timing) = Self::ALL[index].needs();
+                if caps.has(features) && class.runs(timing) {
+                    break;
+                }
+                index += 1;
+            }
+            index
+        }
+
+        /// The index of the kernel of `class` that the build fixes: if the build has no run-time
+        /// detection, or if `caps_static()` holds the features of the fastest kernel of the class.
+        const fn fixed(class: $crate::cpu::Timing) -> Option<usize> {
+            let index = Self::fastest($crate::cpu::caps_static(), class);
+            if !$crate::cpu::DETECTS || index == Self::fastest($crate::cpu::Caps::ALL, class) {
+                Some(index)
+            } else {
+                None
+            }
+        }
+
+        /// The kernel of the functions of `class` with no backend argument. If the build does not
+        /// fix it, the first call chooses it, and each later call reads the choice.
+        #[inline(always)]
+        fn chosen(class: $crate::cpu::Timing) -> Self {
+            use $crate::cpu::{Caps, Kept, Timing};
+            static KEPT: [Kept; 2] = [Kept::new(), Kept::new()];
+            let (fixed, kept, top) = match class {
+                Timing::Public => (
+                    const { Self::fixed(Timing::Public) },
+                    &KEPT[0],
+                    const { Self::fastest(Caps::ALL, Timing::Public) },
+                ),
+                Timing::Secret => (
+                    const { Self::fixed(Timing::Secret) },
+                    &KEPT[1],
+                    const { Self::fastest(Caps::ALL, Timing::Secret) },
+                ),
+            };
+            let index = match fixed {
+                Some(index) => index,
+                // The fastest kernel of the target first: one load and one compare, and then the
+                // caller calls it with no table.
+                None if kept.holds(top) => return Self::ALL[top],
+                None => kept.index(|| Self::detected(class)),
+            };
+            Self::ALL.get(index).copied().unwrap_or(Self::$reference)
+        }
+
+        /// The index of the fastest kernel of `class` that this CPU runs. Only the first call of a
+        /// class runs it. It stays out of line, so the detection takes no register of the caller.
+        #[cold]
+        #[inline(never)]
+        fn detected(class: $crate::cpu::Timing) -> usize {
+            Self::fastest($crate::cpu::caps(), class)
+        }
+    };
+}
+pub(crate) use choice;
 
 /// The proof that `PSTATE.DIT` (data independent timing) is set on this thread, where the CPU has
 /// DIT. Only [`with_dit`] makes one, and it lends it only for its scope.

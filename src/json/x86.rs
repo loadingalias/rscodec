@@ -12,6 +12,7 @@ use super::{
     block::{self, Block, Carry, Classes},
     simd,
 };
+use crate::vector::x86::{load_masked, load16, load32};
 
 /// The AVX2 kernel.
 #[inline(never)]
@@ -19,13 +20,13 @@ use super::{
 pub(super) fn avx2(input: &[u8], start: usize, carry: Carry) -> Block {
     let (bytes, before) = (&input[start..], block::before(input, start));
     let halves = match bytes.first_chunk() {
-        Some(bytes) => load::halves(bytes),
+        Some(bytes) => [load32::<0, 64>(bytes), load32::<32, 64>(bytes)],
         None => {
             let words = block::tail(bytes).map(u64::cast_signed);
             [0, 4].map(|at| _mm256_set_epi64x(words[at + 3], words[at + 2], words[at + 1], words[at]))
         }
     };
-    let table = |table: &[u8; 16]| _mm256_broadcastsi128_si256(load::table(table));
+    let table = |table: &[u8; 16]| _mm256_broadcastsi128_si256(load16::<0, 16>(table));
     let (whitespace, structural) = (table(&simd::WHITESPACE), table(&simd::STRUCTURAL));
     let set = |byte: u8| _mm256_set1_epi8(byte.cast_signed());
     let control = bits(halves, |half| {
@@ -57,8 +58,9 @@ pub(super) fn avx2(input: &[u8], start: usize, carry: Carry) -> Block {
 #[target_feature(enable = "avx512bw,avx512vl,avx512vbmi2,pclmulqdq,bmi1,bmi2")]
 pub(super) fn avx512(input: &[u8], start: usize, carry: Carry) -> Block {
     let (bytes, before) = (&input[start..], block::before(input, start));
-    let input = load::masked(bytes);
-    let table = |table: &[u8; 16]| _mm512_broadcast_i32x4(load::table(table));
+    // The first 64 bytes, with spaces after them when `bytes` has fewer.
+    let input = load_masked(bytes, _mm512_set1_epi8(b' '.cast_signed()));
+    let table = |table: &[u8; 16]| _mm512_broadcast_i32x4(load16::<0, 16>(table));
     let set = |byte: u8| _mm512_set1_epi8(byte.cast_signed());
     let control = _mm512_cmplt_epu8_mask(input, set(0x20));
     let (quote, backslash) = (
@@ -111,7 +113,7 @@ fn utf8_error_avx2(halves: [__m256i; 2], before: u32) -> bool {
         return block::ends_incomplete(before);
     }
     let tables = [block::FIRST_HIGH, block::FIRST_LOW, block::SECOND_HIGH]
-        .map(|table| _mm256_broadcastsi128_si256(load::table(&table)));
+        .map(|table| _mm256_broadcastsi128_si256(load16::<0, 16>(&table)));
     let previous = _mm256_set_epi32(before.cast_signed(), 0, 0, 0, 0, 0, 0, 0);
     let error = _mm256_or_si256(check_avx2(low, previous, tables), check_avx2(high, low, tables));
     _mm256_testz_si256(error, error) == 0
@@ -154,7 +156,7 @@ fn utf8_error_avx512(input: __m512i, before: u32) -> bool {
         return block::ends_incomplete(before);
     }
     let [first_high, first_low, second_high] = [block::FIRST_HIGH, block::FIRST_LOW, block::SECOND_HIGH]
-        .map(|table| _mm512_broadcast_i32x4(load::table(&table)));
+        .map(|table| _mm512_broadcast_i32x4(load16::<0, 16>(&table)));
     let previous = _mm512_set_epi32(before.cast_signed(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     // The 16 bytes before each 16-byte lane of `input`.
     let before = _mm512_alignr_epi64::<6>(input, previous);
@@ -196,7 +198,7 @@ pub(super) mod escape {
     #[inline(always)]
     pub(in super::super) fn escapes(block: &[u8; 16]) -> u64 {
         // SAFETY: each x86_64 CPU has SSE2, the feature of `scan`.
-        unsafe { scan(super::load::table(block)) }
+        unsafe { scan(crate::vector::x86::load16::<0, 16>(block)) }
     }
 
     /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
@@ -218,16 +220,13 @@ pub(super) mod escape {
 }
 
 /// The digits of the printers, with SSE2, which each x86_64 CPU has, so the build fixes the kernel.
-#[expect(
-    unsafe_code,
-    reason = "each x86_64 CPU has SSE2, and each store writes only the bytes of the array that it takes"
-)]
+#[expect(unsafe_code, reason = "each x86_64 CPU has SSE2")]
 pub(super) mod digits {
     use core::arch::x86_64::{
         __m128i, _mm_add_epi64, _mm_cmpgt_epi8, _mm_cvtsi128_si64, _mm_movemask_epi8, _mm_mul_epu32, _mm_mulhi_epu16,
         _mm_mullo_epi16, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8, _mm_set1_epi16, _mm_set1_epi64x,
         _mm_setzero_si128, _mm_shuffle_epi32, _mm_slli_epi16, _mm_slli_epi32, _mm_srli_epi16, _mm_srli_epi64,
-        _mm_storeu_si128, _mm_sub_epi16, _mm_unpackhi_epi64,
+        _mm_sub_epi16, _mm_unpackhi_epi64,
     };
 
     use super::super::float::insert;
@@ -312,8 +311,7 @@ pub(super) mod digits {
     #[target_feature(enable = "sse2")]
     fn store(dest: &mut [u8], at: usize, bytes: __m128i) {
         if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<16>) {
-            // SAFETY: the store writes the 16 bytes of `dest`, and it needs no alignment.
-            unsafe { _mm_storeu_si128(dest.as_mut_ptr().cast(), bytes) }
+            crate::vector::x86::store16::<0, 16>(dest, bytes);
         }
     }
 
@@ -339,45 +337,5 @@ pub(super) mod digits {
         // `t | (x − 10t) << 8` is `(x << 8) − t × (10 × 2^8 − 1)` for the tens `t` of `x`.
         let tens = _mm_mulhi_epu16(pairs, _mm_set1_epi16(6_554));
         _mm_sub_epi16(_mm_slli_epi16::<8>(pairs), _mm_mullo_epi16(tens, _mm_set1_epi16(2_559)))
-    }
-}
-
-/// The loads of the kernels.
-#[expect(unsafe_code, reason = "each load reads only the bytes of the array that it takes")]
-mod load {
-    use core::arch::x86_64::{
-        __m128i, __m256i, __m512i, _mm_loadu_si128, _mm256_loadu_si256, _mm512_mask_loadu_epi8, _mm512_set1_epi8,
-    };
-
-    /// The 16 bytes of `table`.
-    #[inline(always)]
-    pub(super) fn table(table: &[u8; 16]) -> __m128i {
-        // SAFETY: the load reads the 16 bytes of `table`, and it needs no alignment. Each x86_64 CPU
-        // has SSE2.
-        unsafe { _mm_loadu_si128(table.as_ptr().cast()) }
-    }
-
-    /// The two halves of `bytes`.
-    #[inline]
-    #[target_feature(enable = "avx2,bmi1,bmi2,pclmulqdq")]
-    pub(super) fn halves(bytes: &[u8; 64]) -> [__m256i; 2] {
-        let [low, high] = [0, 32].map(|at| {
-            // SAFETY: the load reads the 32 bytes at `at`, which are in `bytes`, and it needs no
-            // alignment.
-            unsafe { _mm256_loadu_si256(bytes.as_ptr().add(at).cast()) }
-        });
-        [low, high]
-    }
-
-    /// The first 64 bytes of `bytes`, with spaces after them when `bytes` has fewer.
-    #[inline]
-    #[target_feature(enable = "avx512bw,avx512vl,avx512vbmi2,pclmulqdq,bmi1,bmi2")]
-    pub(super) fn masked(bytes: &[u8]) -> __m512i {
-        // The first `len` lanes, at most 64: `64 - len` is at most 64, and a shift of 64 gives 0.
-        let len = u32::try_from(bytes.len().min(64)).unwrap_or(64);
-        let lanes = u64::MAX.unbounded_shr(64 - len);
-        // SAFETY: the mask holds only the lanes of bytes of `bytes`, and a lane outside the mask
-        // reads no memory. The load needs no alignment.
-        unsafe { _mm512_mask_loadu_epi8(_mm512_set1_epi8(b' '.cast_signed()), lanes, bytes.as_ptr().cast()) }
     }
 }

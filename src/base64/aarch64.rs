@@ -20,11 +20,8 @@ use core::arch::aarch64::*;
 use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
-    simd::{
-        SHORT_MAX,
-        aarch64::{load_quads, load_triples, load16, store_triples, store16, table64},
-        byte_at, from_end, short_blocks, to_end,
-    },
+    simd::{SHORT_MAX, byte_at, from_end, short_blocks, to_end},
+    vector::aarch64::{load_quads, load_triples, load16, store_triples, store16, table64},
 };
 
 /// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.

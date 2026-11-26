@@ -15,11 +15,8 @@ use core::arch::aarch64::*;
 use super::encode_steps;
 use crate::{
     ct::Class,
-    simd::{
-        SHORT_MAX,
-        aarch64::{load16, store16, table64},
-        overlapping, short_blocks,
-    },
+    simd::{SHORT_MAX, overlapping, short_blocks},
+    vector::aarch64::{load16, store16, table64},
 };
 
 /// The digit of each nibble.

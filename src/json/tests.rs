@@ -16,7 +16,7 @@ use super::{
 pub(super) fn kernels() -> Vec<Backend> {
     let kernels: Vec<_> = Kernel::ALL
         .iter()
-        .filter(|kernel| crate::cpu::caps().has(kernel.needs()))
+        .filter(|kernel| crate::cpu::caps().has(kernel.needs().0))
         .map(|&kernel| Backend(kernel))
         .collect();
     assert_eq!(kernels.first(), Some(&Backend::chosen()));
@@ -368,10 +368,11 @@ fn each_byte_in_each_lane_gives_the_tokens_of_its_class() {
 #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
 fn the_selection_gives_a_kernel_only_with_each_of_its_features() {
-    use crate::cpu::{Caps, close_implications};
+    use crate::cpu::{Caps, Timing, close_implications};
     // The kernel of a CPU that has each feature but `missing`, after the detection removes each
     // feature whose implied features are not all present.
-    let without = |missing: Caps| Kernel::ALL[Kernel::fastest(close_implications(Caps::ALL.difference(missing)))];
+    let without =
+        |missing: Caps| Kernel::ALL[Kernel::fastest(close_implications(Caps::ALL.difference(missing)), Timing::Public)];
     assert_eq!(without(Caps::NONE), Kernel::ALL[0]);
     #[cfg(target_arch = "x86_64")]
     {

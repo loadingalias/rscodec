@@ -329,16 +329,6 @@ impl Place<'_> {
         Some(at)
     }
 
-    /// Writes the value that `write` writes from the index that it takes, and the index after it,
-    /// or `None` if the slice ends. A string, a number, and an integer do not take this path: the
-    /// compiler does not inline a closure that several call sites share, and their paths inline.
-    #[inline(always)]
-    fn scalar(mut self, write: impl FnOnce(&mut [u8], usize) -> Option<usize>) -> Result<(), Error> {
-        let end = self.begin().and_then(|at| write(self.out, at));
-        *self.len = end.ok_or_else(|| Error::new(ErrorKind::Full, *self.len))?;
-        Ok(())
-    }
-
     /// Writes the JSON string of the base64url text of `bytes`. It tests the room for the whole
     /// value before `encode` writes a character into the slice that it takes, whose length is the
     /// length of the text.
@@ -367,12 +357,15 @@ impl Place<'_> {
         Ok(())
     }
 
+    /// Writes `text`, a literal of JSON.
     #[inline(always)]
-    fn literal(self, text: &'static [u8]) -> Result<(), Error> {
-        self.scalar(|out, at| {
-            out.get_mut(at..at + text.len())?.copy_from_slice(text);
+    fn literal(mut self, text: &'static [u8]) -> Result<(), Error> {
+        let end = self.begin().and_then(|at| {
+            self.out.get_mut(at..at + text.len())?.copy_from_slice(text);
             Some(at + text.len())
-        })
+        });
+        *self.len = end.ok_or_else(|| Error::new(ErrorKind::Full, *self.len))?;
+        Ok(())
     }
 
     #[inline(always)]

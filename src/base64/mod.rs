@@ -40,7 +40,7 @@ use core::fmt;
 
 use crate::{
     Dit,
-    cpu::{self, Caps, Kept, Timing, caps_static},
+    cpu::{self, Caps, Timing},
     ct::{self, Class, Public, Secret},
 };
 
@@ -141,6 +141,7 @@ impl core::error::Error for Error {}
 impl Profile {
     /// The number of characters of the text of `len` bytes, or `None` if the number overflows
     /// `usize`.
+    #[inline]
     #[must_use]
     pub const fn encoded_len(self, len: usize) -> Option<usize> {
         match self.text_lens(len) {
@@ -175,6 +176,7 @@ impl Profile {
     /// # Errors
     ///
     /// Returns [`ErrorKind::Length`] if no text of the profile has the length of `text`.
+    #[inline]
     pub const fn decoded_len(self, text: &[u8]) -> Result<usize, Error> {
         match self.symbols(text) {
             Ok(symbols) => Ok(bytes_len(symbols.len())),
@@ -446,59 +448,7 @@ impl Kernel {
         }
     }
 
-    /// The index in [`Kernel::ALL`] of the fastest kernel of `class` that a CPU with `caps` runs.
-    /// The last kernel, the portable kernel, runs on each CPU and in each class.
-    const fn fastest(caps: Caps, class: Timing) -> usize {
-        let mut index = 0;
-        while index + 1 < Self::ALL.len() {
-            let (features, timing) = Self::ALL[index].needs();
-            if caps.has(features) && class.runs(timing) {
-                break;
-            }
-            index += 1;
-        }
-        index
-    }
-
-    /// The index of the kernel of `class` that the build fixes: if the build has no run-time
-    /// detection, or if `caps_static()` holds the features of the fastest kernel of the class.
-    const fn fixed(class: Timing) -> Option<usize> {
-        let index = Self::fastest(caps_static(), class);
-        if !cpu::DETECTS || index == Self::fastest(Caps::ALL, class) {
-            Some(index)
-        } else {
-            None
-        }
-    }
-
-    /// The kernel of the functions of `class` with no backend argument. If the build does not fix
-    /// it, the first call chooses it, and each later call reads the choice.
-    #[inline(always)]
-    fn chosen(class: Timing) -> Self {
-        const PUBLIC: Option<usize> = Kernel::fixed(Timing::Public);
-        const SECRET: Option<usize> = Kernel::fixed(Timing::Secret);
-        static KEPT: [Kept; 2] = [Kept::new(), Kept::new()];
-        let (fixed, kept, top) = match class {
-            Timing::Public => (PUBLIC, &KEPT[0], const { Kernel::fastest(Caps::ALL, Timing::Public) }),
-            Timing::Secret => (SECRET, &KEPT[1], const { Kernel::fastest(Caps::ALL, Timing::Secret) }),
-        };
-        let index = match fixed {
-            Some(index) => index,
-            // The fastest kernel of the target first: one load and one compare, and then the
-            // caller calls it with no table.
-            None if kept.holds(top) => return Self::ALL[top],
-            None => kept.index(|| Self::detected(class)),
-        };
-        Self::ALL.get(index).copied().unwrap_or(Self::Portable)
-    }
-
-    /// The index of the fastest kernel of `class` that this CPU runs. Only the first call of a
-    /// class runs it. It stays out of line, so the detection takes no register of the caller.
-    #[cold]
-    #[inline(never)]
-    fn detected(class: Timing) -> usize {
-        Self::fastest(cpu::caps(), class)
-    }
+    crate::cpu::choice!(Portable);
 }
 
 /// A kernel that this CPU runs. [`Profile::encode_with`] and [`Profile::decode_with`] run it, for

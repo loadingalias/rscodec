@@ -28,13 +28,15 @@ fn pmull_prefix_xor(bits: u64) -> u64 {
 #[cfg(target_feature = "neon")]
 #[expect(
     unsafe_code,
-    reason = "the build has Neon, and the load reads only the bytes of the array that it takes"
+    reason = "the build has Neon, the feature of each function that it calls"
 )]
 pub(super) mod escape {
     use core::arch::aarch64::{
-        uint8x16_t, vceqq_u8, vcltq_u8, vcombine_u64, vcreate_u64, vdupq_n_u8, vget_lane_u64, vld1q_u8, vorrq_u8,
+        uint8x16_t, vceqq_u8, vcltq_u8, vcombine_u64, vcreate_u64, vdupq_n_u8, vget_lane_u64, vorrq_u8,
         vreinterpret_u64_u8, vreinterpretq_u8_u64, vreinterpretq_u16_u8, vshrn_n_u16,
     };
+
+    use crate::vector::aarch64::load16;
 
     /// The bits of a mask for each byte of [`escapes`].
     pub(in super::super) const BITS: u32 = 4;
@@ -43,8 +45,8 @@ pub(super) mod escape {
     /// or a byte under 0x20, the first byte in the low bits.
     #[inline(always)]
     pub(in super::super) fn escapes(block: &[u8; 16]) -> u64 {
-        // SAFETY: the build has Neon, the feature of `load` and `scan`.
-        unsafe { scan(load(block)) }
+        // SAFETY: the build has Neon, the feature of `load16` and `scan`.
+        unsafe { scan(load16::<0, 16>(block)) }
     }
 
     /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
@@ -52,13 +54,6 @@ pub(super) mod escape {
     pub(in super::super) fn escapes_of_words(low: u64, high: u64) -> u64 {
         // SAFETY: the build has Neon, the feature of `scan`.
         unsafe { scan(vreinterpretq_u8_u64(vcombine_u64(vcreate_u64(low), vcreate_u64(high)))) }
-    }
-
-    #[inline(always)]
-    #[target_feature(enable = "neon")]
-    fn load(block: &[u8; 16]) -> uint8x16_t {
-        // SAFETY: the load reads the 16 bytes of `block`, and it needs no alignment.
-        unsafe { vld1q_u8(block.as_ptr()) }
     }
 
     #[inline(always)]
@@ -78,17 +73,18 @@ pub(super) mod escape {
 #[cfg(target_feature = "neon")]
 #[expect(
     unsafe_code,
-    reason = "the build has Neon, and each load and store touches only the bytes of the array that it takes"
+    reason = "the build has Neon, the feature of each function that it calls"
 )]
 pub(super) mod digits {
     use core::arch::aarch64::{
-        uint8x16_t, vcreate_u32, vdupq_n_u8, vget_lane_u64, vgetq_lane_u64, vld1q_u8, vmla_n_u32, vmlaq_n_u16,
-        vmlaq_n_u32, vorrq_u8, vqdmulh_n_s32, vqdmulhq_n_s16, vqdmulhq_n_s32, vqtbl1q_u8, vreinterpret_s32_u32,
+        uint8x16_t, vcreate_u32, vdupq_n_u8, vget_lane_u64, vgetq_lane_u64, vmla_n_u32, vmlaq_n_u16, vmlaq_n_u32,
+        vorrq_u8, vqdmulh_n_s32, vqdmulhq_n_s16, vqdmulhq_n_s32, vqtbl1q_u8, vreinterpret_s32_u32,
         vreinterpret_u16_u32, vreinterpret_u32_s32, vreinterpret_u64_u8, vreinterpretq_s16_u16, vreinterpretq_s32_u32,
         vreinterpretq_u8_u16, vreinterpretq_u16_s16, vreinterpretq_u16_u8, vreinterpretq_u16_u32,
-        vreinterpretq_u32_s32, vreinterpretq_u64_u8, vrev64q_u8, vshll_n_u16, vshr_n_u32, vshrn_n_u16, vst1q_u8,
-        vtstq_u8,
+        vreinterpretq_u32_s32, vreinterpretq_u64_u8, vrev64q_u8, vshll_n_u16, vshr_n_u32, vshrn_n_u16, vtstq_u8,
     };
+
+    use crate::vector::aarch64::{load16, store16};
 
     /// For each `whole` from 1 to 16, at index `whole − 1`, the bytes of the lookup of [`mantissa`]:
     /// each digit before the point, a 0 for the point, and each other digit one place higher.
@@ -127,11 +123,11 @@ pub(super) mod digits {
     /// point in, and two stores write them, so no digit goes through a general register.
     #[inline(always)]
     pub(in super::super) fn mantissa(digits: u64, extra: u8, whole: usize, dest: &mut [u8]) -> usize {
-        // SAFETY: the build has Neon, the feature of `text`, `load`, `store`, and `vqtbl1q_u8`.
+        // SAFETY: the build has Neon, the feature of `text`, `load16`, `store`, and `vqtbl1q_u8`.
         let count = unsafe {
             let (text, count) = text(digits, extra);
             store(dest, 1, text);
-            store(dest, 0, vqtbl1q_u8(text, load(&POINTS[whole - 1])));
+            store(dest, 0, vqtbl1q_u8(text, load16::<0, 16>(&POINTS[whole - 1])));
             count
         };
         // The lookup writes 0 in the place of the point, and it cannot reach the 17th byte, which
@@ -172,21 +168,13 @@ pub(super) mod digits {
         (vorrq_u8(values, vdupq_n_u8(b'0')), count)
     }
 
-    #[inline(always)]
-    #[target_feature(enable = "neon")]
-    fn load(bytes: &[u8; 16]) -> uint8x16_t {
-        // SAFETY: the load reads the 16 bytes of `bytes`, and it needs no alignment.
-        unsafe { vld1q_u8(bytes.as_ptr()) }
-    }
-
     /// Stores `bytes` into `dest` from `at`. The offsets of the callers leave 16 bytes, so the
     /// store always runs.
     #[inline(always)]
     #[target_feature(enable = "neon")]
     fn store(dest: &mut [u8], at: usize, bytes: uint8x16_t) {
         if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<16>) {
-            // SAFETY: the store writes the 16 bytes of `dest`, and it needs no alignment.
-            unsafe { vst1q_u8(dest.as_mut_ptr(), bytes) }
+            store16::<0, 16>(dest, bytes);
         }
     }
 
@@ -226,6 +214,7 @@ macro_rules! kernel {
                 block::{self, Block, Carry, Classes},
                 simd,
             };
+            use crate::vector::aarch64::{load16, table64};
 
             /// The kernel.
             #[inline(never)]
@@ -239,7 +228,10 @@ macro_rules! kernel {
             #[target_feature(enable = $features)]
             fn classify(bytes: &[u8], before: u32) -> Classes {
                 let quarters = match bytes.first_chunk() {
-                    Some(bytes) => load::quarters(bytes),
+                    Some(bytes) => {
+                        let uint8x16x4_t(a, b, c, d) = table64::<0, 64>(bytes);
+                        [a, b, c, d]
+                    }
                     None => {
                         let words = block::tail(bytes);
                         core::array::from_fn(|index| {
@@ -248,7 +240,7 @@ macro_rules! kernel {
                         })
                     }
                 };
-                let (whitespace, structural) = (load::table(&simd::WHITESPACE), load::table(&simd::STRUCTURAL));
+                let (whitespace, structural) = (load16::<0, 16>(&simd::WHITESPACE), load16::<0, 16>(&simd::STRUCTURAL));
                 let nibble = vdupq_n_u8(0x0f);
                 let control = bits(quarters.map(|quarter| vcltq_u8(quarter, vdupq_n_u8(0x20))));
                 let curly = bits(quarters.map(|quarter| {
@@ -273,7 +265,7 @@ macro_rules! kernel {
             #[target_feature(enable = $features)]
             fn bits(lanes: [uint8x16_t; 4]) -> u64 {
                 const WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
-                let weights = load::table(&WEIGHTS);
+                let weights = load16::<0, 16>(&WEIGHTS);
                 let [a, b, c, d] = lanes.map(|lane| vandq_u8(lane, weights));
                 let sums = vpaddq_u8(vpaddq_u8(a, b), vpaddq_u8(c, d));
                 vgetq_lane_u64::<0>(vreinterpretq_u64_u8(vpaddq_u8(sums, sums)))
@@ -287,7 +279,8 @@ macro_rules! kernel {
                 if vmaxvq_u8(vorrq_u8(vorrq_u8(a, b), vorrq_u8(c, d))) < 0x80 {
                     return block::ends_incomplete(before);
                 }
-                let tables = [block::FIRST_HIGH, block::FIRST_LOW, block::SECOND_HIGH].map(|table| load::table(&table));
+                let tables =
+                    [block::FIRST_HIGH, block::FIRST_LOW, block::SECOND_HIGH].map(|table| load16::<0, 16>(&table));
                 let previous = vreinterpretq_u8_u32(vsetq_lane_u32::<3>(before, vdupq_n_u32(0)));
                 let error = vorrq_u8(
                     vorrq_u8(check(a, previous, tables), check(b, a, tables)),
@@ -320,29 +313,6 @@ macro_rules! kernel {
                 // Bit 7 is set where `second` is at least 0xe0 or `first` is at least 0xf0.
                 let continues = vorrq_u8(vqsubq_u8(second, vdupq_n_u8(0x60)), vqsubq_u8(first, vdupq_n_u8(0x70)));
                 veorq_u8(vandq_u8(continues, vdupq_n_u8(0x80)), pair)
-            }
-
-            /// The loads of the kernel.
-            #[expect(unsafe_code, reason = "each load reads only the bytes of the array that it takes")]
-            mod load {
-                use core::arch::aarch64::{uint8x16_t, uint8x16x4_t, vld1q_u8, vld1q_u8_x4};
-
-                /// The 16 bytes of `table`.
-                #[inline]
-                #[target_feature(enable = $features)]
-                pub(super) fn table(table: &[u8; 16]) -> uint8x16_t {
-                    // SAFETY: the load reads the 16 bytes of `table`, and it needs no alignment.
-                    unsafe { vld1q_u8(table.as_ptr()) }
-                }
-
-                /// The four quarters of `bytes`.
-                #[inline]
-                #[target_feature(enable = $features)]
-                pub(super) fn quarters(bytes: &[u8; 64]) -> [uint8x16_t; 4] {
-                    // SAFETY: the load reads the 64 bytes of `bytes`, and it needs no alignment.
-                    let uint8x16x4_t(a, b, c, d) = unsafe { vld1q_u8_x4(bytes.as_ptr()) };
-                    [a, b, c, d]
-                }
             }
         }
     };

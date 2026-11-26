@@ -21,10 +21,8 @@ use core::arch::x86_64::*;
 use super::encode_steps;
 use crate::{
     ct::Class,
-    simd::{
-        ends, overlapping, short_blocks,
-        x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
-    },
+    simd::{ends, overlapping, short_blocks},
+    vector::x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
 };
 
 /// The digit of each nibble.
