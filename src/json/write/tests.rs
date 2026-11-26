@@ -206,6 +206,101 @@ fn a_write_past_the_end_of_the_slice_refuses_and_keeps_the_written_length() {
     }
 }
 
+/// Writes the options of a WebAuthn registration at `place`: a public member, then the member
+/// `challenge` that `challenge` writes.
+#[cfg(feature = "base64")]
+fn options(place: Place<'_>, challenge: impl FnOnce(Place<'_>) -> Result<(), Error>) -> Result<(), Error> {
+    place.object(|options| {
+        options.member("type").str("public-key")?;
+        challenge(options.member("challenge"))
+    })
+}
+
+/// The text of [`options`] with the challenge `bytes`, from data-encoding, an independent
+/// implementation of base64url.
+#[cfg(feature = "base64")]
+fn options_text(bytes: &[u8]) -> Vec<u8> {
+    let challenge = data_encoding::BASE64URL_NOPAD.encode(bytes);
+    format!(r#"{{"type":"public-key","challenge":"{challenge}"}}"#).into_bytes()
+}
+
+/// Each base64url member, public and secret, writes the text of RFC 4648 into a slice of exactly
+/// its length, at each length of up to 96 bytes and at random lengths to 1 MiB.
+#[cfg(feature = "base64")]
+#[test]
+fn each_base64url_member_writes_the_text_of_rfc_4648_in_each_timing_class() {
+    // xorshift64*: a fixed seed gives the same values on each run.
+    let mut state = 0x5eed_0220_u64;
+    let mut bits = core::iter::repeat_with(|| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    });
+    let long = (&mut bits)
+        .take(16)
+        .map(|bits| 97 + usize::try_from(bits % ((1 << 20) - 96)).unwrap());
+    let lengths: Vec<usize> = (0..=96).chain(long).chain([1 << 20]).collect();
+    for len in lengths {
+        let bytes: Vec<u8> = (&mut bits).take(len).map(|bits| bits.to_be_bytes()[0]).collect();
+        let expected = options_text(&bytes);
+        let public = written(expected.len(), |place| {
+            options(place, |challenge| challenge.base64url(&bytes))
+        });
+        assert_eq!(public.as_ref(), Ok(&expected), "the public member at {len} bytes");
+        // A build that makes no proof has no secret call: `with_dit` refuses and runs no scope.
+        if let Ok(secret) = crate::with_dit(|dit| {
+            written(expected.len(), |place| {
+                options(place, |challenge| challenge.base64url_secret(dit, &bytes))
+            })
+        }) {
+            assert_eq!(secret, Ok(expected), "the secret member at {len} bytes");
+        }
+    }
+}
+
+/// A secret challenge that does not fit refuses at the written length before it, and no byte of
+/// the slice depends on it, also when only its closing quote does not fit. The two challenges
+/// are complements, so their texts differ in each character.
+#[cfg(feature = "base64")]
+#[test]
+fn a_secret_base64url_that_does_not_fit_refuses_and_writes_no_character_of_the_secret() {
+    let challenges = [[0x9f; 32], [0x60; 32]];
+    let full = options_text(&challenges[0]);
+    let without = br#"{"type":"public-key"}"#;
+    // A build that makes no proof has no secret call: `with_dit` refuses and runs no scope.
+    let Ok(()) = crate::with_dit(|dit| {
+        for len in 0..full.len() {
+            let slices = challenges.map(|challenge| {
+                let mut out = vec![0; len];
+                let mut refusal = None;
+                let result = write(&mut out, |place| {
+                    options(place, |place| {
+                        refusal = place.base64url_secret(dit, &challenge).err();
+                        Ok(())
+                    })
+                });
+                if len < without.len() {
+                    assert_eq!(result, Err(Error::new(ErrorKind::Full, 0)));
+                    assert_eq!(refusal, None);
+                } else {
+                    assert_eq!(result, Ok(without.len()));
+                    assert_eq!(&out[..without.len()], without);
+                    // The written length after the public member, before its `}`.
+                    assert_eq!(refusal, Some(Error::new(ErrorKind::Full, without.len() - 1)));
+                }
+                out
+            });
+            assert_eq!(
+                slices[0], slices[1],
+                "a slice of {len} bytes holds a character of the secret"
+            );
+        }
+    }) else {
+        return;
+    };
+}
+
 #[test]
 fn each_integer_writes_the_digits_of_core_fmt() {
     let powers = (0..20).map(|power| 10_u64.pow(power));

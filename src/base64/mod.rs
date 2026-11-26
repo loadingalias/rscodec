@@ -268,11 +268,11 @@ impl Profile {
     /// ```
     /// use rscodec::base64::{Error, ErrorKind, Profile};
     ///
-    /// // A WebAuthn challenge: 32 bytes in base64url without padding.
+    /// // A SHA-256 digest: 32 bytes in base64url without padding.
     /// let token = b"NI2kalLUY_EBIuNcW6yDtzD4K6bGemOZJL9NWqY_heQ";
     /// let mut buffer = [0; 32];
-    /// let challenge = Profile::Url.decode(token, &mut buffer)?;
-    /// assert_eq!(challenge[..4], [0x34, 0x8d, 0xa4, 0x6a]);
+    /// let digest = Profile::Url.decode(token, &mut buffer)?;
+    /// assert_eq!(digest[..4], [0x34, 0x8d, 0xa4, 0x6a]);
     ///
     /// // `/` is a character of base64, not of base64url, so the text refuses at the `/`.
     /// let standard = b"NI2kalLUY/EBIuNcW6yDtzD4K6bGemOZJL9NWqY/heQ";

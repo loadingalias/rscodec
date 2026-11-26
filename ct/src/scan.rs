@@ -39,7 +39,7 @@ use crate::{Failure, lists};
 const ENTRY: &str = "rscodec_ct::cases::entry::";
 
 /// The entries of the harness.
-const ENTRIES: usize = 18;
+const ENTRIES: usize = 19;
 
 /// The code that the scan does not follow: the panics of `core`, which a length check reaches and
 /// which do not return. Each is reported.

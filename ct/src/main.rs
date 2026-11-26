@@ -1,4 +1,5 @@
-//! The timing evidence of the base-N codecs of rscodec (C103). Run it as
+//! The timing evidence of the base-N codecs of rscodec (C103), and of the secret base64url member
+//! of its JSON writer (C220). Run it as
 //! `cargo run --release -p rscodec-ct -- <command>`.
 //!
 //! - `paths [case]`: each call runs under the CPU counters of instructions and branches. Each length

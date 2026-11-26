@@ -7,7 +7,7 @@ use core::hint::black_box;
 
 use crate::{
     Failure,
-    cases::{Case, Fill},
+    cases::{Case, Fill, Outcome},
     random::Random,
 };
 
@@ -62,8 +62,16 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                         }
                     }
                     let Some(first) = inputs.first() else { continue };
-                    // The first call of a function chooses its kernel.
-                    black_box(case.call(dit, first, &mut out));
+                    // The first call of a function chooses its kernel. A valid call fills its output, so
+                    // the count is of the whole work, and not of a refusal for the length of the output.
+                    let written = black_box(case.call(dit, first, &mut out));
+                    if outcome == Outcome::Valid && written != out.len() {
+                        return Err(Failure::Check(format!(
+                            "{} bytes={bytes}: a valid call gives {written}, not the {} bytes of its output",
+                            case.name,
+                            out.len()
+                        )));
+                    }
                     let count = |input: &[u8], out: &mut [u8], repeats| {
                         least(&counters, repeats, || case.call(dit, input, out))
                     };

@@ -1,5 +1,5 @@
-//! The calls under test and their inputs: each base-N function of each class, and each kernel of
-//! the CPU through the `_with` functions.
+//! The calls under test and their inputs: each base-N function of each class, each kernel of the
+//! CPU through the `_with` functions, and the secret base64url member of the JSON writer.
 
 use rscodec::{
     Dit,
@@ -125,6 +125,8 @@ pub(crate) enum Class {
 #[derive(Clone, Copy, Debug)]
 enum Call {
     Plain(entry::Plain),
+    /// A member of the JSON writer, which writes the text in [`entry::JSON_FRAME`].
+    Json(entry::Plain),
     Hex(entry::HexWith, hex::Backend),
     Base64(entry::Base64With, base64::Backend),
 }
@@ -140,8 +142,8 @@ pub(crate) struct Case {
 }
 
 impl Case {
-    /// Each case of this CPU: the secret and the public function of each codec and direction, and
-    /// the `_with` function on each kernel that the CPU runs.
+    /// Each case of this CPU: the secret and the public function of each codec and direction, the
+    /// `_with` function on each kernel that the CPU runs, and the secret member of the JSON writer.
     pub(crate) fn all() -> Vec<Self> {
         let mut cases = Vec::new();
         for codec in [
@@ -183,6 +185,13 @@ impl Case {
                 }
             }
         }
+        cases.push(Self {
+            name: "json-url-secret".to_owned(),
+            class: Class::Secret,
+            codec: Codec::Base64(Profile::Url),
+            direction: Direction::Encode,
+            call: Call::Json(entry::json_url_secret),
+        });
         cases
     }
 
@@ -197,8 +206,13 @@ impl Case {
 
     /// The length of the output for `bytes` bytes of data.
     pub(crate) fn out_len(&self, bytes: usize) -> Result<usize, Failure> {
+        let frame = if matches!(self.call, Call::Json(_)) {
+            entry::JSON_FRAME.len()
+        } else {
+            0
+        };
         match self.direction {
-            Direction::Encode => Ok(self.codec.text(&vec![0; bytes])?.len()),
+            Direction::Encode => Ok(self.codec.text(&vec![0; bytes])?.len() + frame),
             Direction::Decode => Ok(bytes),
         }
     }
@@ -284,7 +298,7 @@ impl Case {
     #[inline(always)]
     pub(crate) fn call(&self, dit: &Dit, input: &[u8], out: &mut [u8]) -> usize {
         match self.call {
-            Call::Plain(entry) => entry(dit, input, out),
+            Call::Plain(entry) | Call::Json(entry) => entry(dit, input, out),
             Call::Hex(entry, backend) => entry(backend, input, out),
             Call::Base64(entry, backend) => entry(backend, input, out),
         }
@@ -298,10 +312,16 @@ mod entry {
     use rscodec::{
         Dit,
         base64::{self, Profile},
-        hex,
+        hex, json,
     };
 
     use super::{Codec, Direction};
+
+    /// The text of [`json_url_secret`] with no data. The secret is the second item of an array, so
+    /// the `,`, the container, and the test of the room run around it, as in a member of an object.
+    /// A key adds only the public escape scan: it runs before the member reads the secret, and the
+    /// scan cannot tell its text from the data across its call.
+    pub(super) const JSON_FRAME: &str = r#"[null,""]"#;
 
     pub(super) type Plain = fn(&Dit, &[u8], &mut [u8]) -> usize;
     pub(super) type HexWith = fn(hex::Backend, &[u8], &mut [u8]) -> usize;
@@ -372,6 +392,18 @@ mod entry {
     #[inline(never)]
     fn standard_decode_secret(dit: &Dit, input: &[u8], out: &mut [u8]) -> usize {
         length(Profile::Standard.decode_secret(dit, input, out))
+    }
+
+    /// `Place::base64url_secret` of the JSON writer, in the text of [`JSON_FRAME`].
+    #[inline(never)]
+    pub(super) fn json_url_secret(dit: &Dit, input: &[u8], out: &mut [u8]) -> usize {
+        let text = json::write(out, |place| {
+            place.array(|items| {
+                items.item().null()?;
+                items.item().base64url_secret(dit, input)
+            })
+        });
+        core::hint::black_box(text).unwrap_or(usize::MAX)
     }
 
     #[inline(never)]

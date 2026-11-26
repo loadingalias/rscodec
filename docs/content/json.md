@@ -280,19 +280,25 @@ enough.
 each place gets at most one value:
 
 - `str`, `i64`, `u64`, `f64`, `bool`, and `null` write a scalar.
-- `base64url` writes bytes as a base64url string with no padding. It needs the `base64` feature
+- `base64url` writes bytes as a base64url string with no padding. `base64url_secret` writes the
+  same text for secret bytes ([Write a secret](#write-a-secret)). Both need the `base64` feature
   too.
 - `object` and `array` take a closure. `Object::member(key)` gives the place of the value of a
   member, and `Array::item()` gives the place of the next item.
 
 The writer writes each `,`, `:`, quote, and escape. A place that your code drops writes nothing, so
-the text is always valid JSON. This closure writes the options of a WebAuthn registration ceremony:
+the text is always valid JSON. This closure writes the options of a WebAuthn registration ceremony.
+The challenge is a secret during the ceremony, so the secret encoder writes it in the scope of
+`with_dit`:
 
 ```rust
-use rscodec::json::{self, ErrorKind};
+use rscodec::{
+    Dit,
+    json::{self, ErrorKind},
+};
 
 let (user_id, challenge) = (b"user-4711", [0x9f; 16]);
-let options = |out: &mut [u8]| {
+let options = |dit: &Dit, out: &mut [u8]| {
     json::write(out, |options| {
         options.object(|options| {
             options.member("rp").object(|rp| {
@@ -304,7 +310,7 @@ let options = |out: &mut [u8]| {
                 user.member("name").str("alice@example.com")?;
                 user.member("displayName").str("Alice \"Al\" Smith")
             })?;
-            options.member("challenge").base64url(&challenge)?;
+            options.member("challenge").base64url_secret(dit, &challenge)?;
             options.member("pubKeyCredParams").array(|params| {
                 // ES256 and RS256.
                 for alg in [-7, -257] {
@@ -321,7 +327,7 @@ let options = |out: &mut [u8]| {
     })
 };
 let mut out = [0; 512];
-let len = options(&mut out)?;
+let len = rscodec::with_dit(|dit| options(dit, &mut out))??;
 assert_eq!(
     &out[..len],
     concat!(
@@ -336,10 +342,13 @@ assert_eq!(
 
 // A slice that is too short refuses, and the text that fits stays valid. Here the object does
 // not fit, so nothing is written.
-let error = options(&mut out[..len - 1]).unwrap_err();
+let error = rscodec::with_dit(|dit| options(dit, &mut out[..len - 1]))?.unwrap_err();
 assert_eq!((error.kind(), error.offset()), (ErrorKind::Full, 0));
-# Ok::<(), json::Error>(())
+# Ok::<(), Box<dyn core::error::Error>>(())
 ```
+
+The outer `?` after `with_dit` is `DitUnknown`. On aarch64, a build without `std` and without
+`-C target-feature=+dit` gets it, because it cannot hold `PSTATE.DIT`.
 
 The forms of the values:
 
@@ -356,6 +365,31 @@ Each call writes all of its bytes or none. After an error, the written length is
 the call, also when an `object` or `array` closure fails. To write JSON Lines, write each record with
 its own `json::write` call, and put a `\n` after it.
 
+## Write a secret
+
+`Place::base64url_secret(dit, bytes)` writes the text of `base64url(bytes)` with
+`base64::Profile::Url.encode_secret`, the secret class of base64url. It runs only the kernels of
+that class ([Select the timing class](base64-and-hex.md#select-the-timing-class)). It takes the proof
+`&Dit` of a `with_dit` scope, as the example above shows. The key, the structure, and each length
+stay public.
+
+- If the value does not fit, the call refuses with `ErrorKind::Full` and writes no character of
+  the secret.
+- After a success, your slice holds the text. Clear the slice when you no longer need the text. A
+  container that fails after the call rolls back the written length, and the text stays in the
+  slice.
+- The writer reads no byte of the slice back.
+
+Each other method of the writer, and the reader, is in the public class. Their time depends on the
+bytes that they write or read: the structure, the lengths, the escapes, and the numbers. They make
+no timing claim for a secret.
+
+To read a secret, for example the challenge in the `clientDataJSON` of a WebAuthn ceremony, read
+the string with `Value::str` and `Str::decode`. Then decode its text with
+`base64::Profile::Url.decode_secret`, and compare the result with the stored value in constant time.
+The time of the read depends on the document. The peer sent the document, so this time shows the
+peer nothing new.
+
 ## Size the slice
 
 The writer needs no more than the length of the text. Add the parts:
@@ -364,7 +398,7 @@ The writer needs no more than the length of the text. Add the parts:
 | --- | --- |
 | A string or a key | `json::string_len(text)`, quotes and escapes included |
 | A key | 1 more, for the `:` |
-| `base64url(bytes)` | `base64::Profile::Url.encoded_len(bytes.len())` and 2 quotes |
+| `base64url(bytes)`, `base64url_secret(dit, bytes)` | `base64::Profile::Url.encoded_len(bytes.len())` and 2 quotes |
 | `i64`, `u64` | at most `json::I64_BYTES_MAX` or `json::U64_BYTES_MAX` (20) |
 | `f64` | at most `json::F64_BYTES_MAX` (24) |
 | `true`, `false`, `null` | 4, 5, 4 |

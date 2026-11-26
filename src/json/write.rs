@@ -9,13 +9,18 @@ mod tests;
 /// text. The bytes of `out` after that length are unspecified.
 ///
 /// The text is compact RFC 8259 JSON. The writer writes each `,`, `:`, quote, and escape, and it
-/// allocates no memory. This closure writes the options of a WebAuthn registration ceremony:
+/// allocates no memory. This closure writes the options of a WebAuthn registration ceremony. The
+/// challenge is a secret during the ceremony, so the secret encoder writes it in the scope of
+/// [`with_dit`](crate::with_dit):
 ///
 /// ```
-/// use rscodec::json::{self, ErrorKind};
+/// use rscodec::{
+///     Dit,
+///     json::{self, ErrorKind},
+/// };
 ///
 /// let (user_id, challenge) = (b"user-4711", [0x9f; 16]);
-/// let options = |out: &mut [u8]| {
+/// let options = |dit: &Dit, out: &mut [u8]| {
 ///     json::write(out, |options| {
 ///         options.object(|options| {
 ///             options.member("rp").object(|rp| {
@@ -27,7 +32,7 @@ mod tests;
 ///                 user.member("name").str("alice@example.com")?;
 ///                 user.member("displayName").str("Alice \"Al\" Smith")
 ///             })?;
-///             options.member("challenge").base64url(&challenge)?;
+///             options.member("challenge").base64url_secret(dit, &challenge)?;
 ///             options.member("pubKeyCredParams").array(|params| {
 ///                 // ES256 and RS256.
 ///                 for alg in [-7, -257] {
@@ -44,7 +49,7 @@ mod tests;
 ///     })
 /// };
 /// let mut out = [0; 512];
-/// let len = options(&mut out)?;
+/// let len = rscodec::with_dit(|dit| options(dit, &mut out))??;
 /// assert_eq!(
 ///     &out[..len],
 ///     concat!(
@@ -59,9 +64,9 @@ mod tests;
 ///
 /// // A slice that is too short refuses, and the text that fits stays valid. Here the object does
 /// // not fit, so nothing is written.
-/// let error = options(&mut out[..len - 1]).unwrap_err();
+/// let error = rscodec::with_dit(|dit| options(dit, &mut out[..len - 1]))?.unwrap_err();
 /// assert_eq!((error.kind(), error.offset()), (ErrorKind::Full, 0));
-/// # Ok::<(), json::Error>(())
+/// # Ok::<(), Box<dyn core::error::Error>>(())
 /// ```
 ///
 /// # Errors
@@ -222,7 +227,8 @@ impl Place<'_> {
     }
 
     /// Writes the bytes in base64url without padding (RFC 4648 section 5), as a JSON string. The
-    /// alphabet needs no escape, so the writer encodes into the slice with no other pass.
+    /// alphabet needs no escape, so the writer encodes into the slice with no other pass. For a
+    /// secret, for example a challenge, use [`Place::base64url_secret`].
     ///
     /// # Errors
     ///
@@ -230,14 +236,27 @@ impl Place<'_> {
     #[cfg(feature = "base64")]
     #[inline]
     pub fn base64url(self, bytes: &[u8]) -> Result<(), Error> {
-        self.scalar(|out, at| {
-            *out.get_mut(at)? = b'"';
-            let len = crate::base64::Profile::Url
-                .encode(bytes, out.get_mut(at + 1..)?)
-                .ok()?
-                .len();
-            *out.get_mut(at + 1 + len)? = b'"';
-            Some(at + 2 + len)
+        self.base64url_by(bytes, |bytes, text| crate::base64::Profile::Url.encode(bytes, text))
+    }
+
+    /// Writes the text of [`Place::base64url`] for secret bytes, for example the challenge of a
+    /// WebAuthn ceremony. It encodes with
+    /// [`Profile::encode_secret`](crate::base64::Profile::encode_secret), in the scope of
+    /// [`with_dit`](crate::with_dit) that the proof [`Dit`](crate::Dit) shows. The key, the
+    /// structure, and each length are public.
+    ///
+    /// The member writes no character of the secret if the value does not fit. After a success,
+    /// the slice holds the text, also when a container around it fails later and rolls back its
+    /// length. The caller owns the slice, so the caller clears it.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Full`] if the slice ends.
+    #[cfg(feature = "base64")]
+    #[inline]
+    pub fn base64url_secret(self, dit: &crate::Dit, bytes: &[u8]) -> Result<(), Error> {
+        self.base64url_by(bytes, |bytes, text| {
+            crate::base64::Profile::Url.encode_secret(dit, bytes, text)
         })
     }
 
@@ -317,6 +336,34 @@ impl Place<'_> {
     fn scalar(mut self, write: impl FnOnce(&mut [u8], usize) -> Option<usize>) -> Result<(), Error> {
         let end = self.begin().and_then(|at| write(self.out, at));
         *self.len = end.ok_or_else(|| Error::new(ErrorKind::Full, *self.len))?;
+        Ok(())
+    }
+
+    /// Writes the JSON string of the base64url text of `bytes`. It tests the room for the whole
+    /// value before `encode` writes a character into the slice that it takes, whose length is the
+    /// length of the text.
+    #[cfg(feature = "base64")]
+    #[inline(always)]
+    fn base64url_by(
+        mut self,
+        bytes: &[u8],
+        encode: impl for<'t> FnOnce(&[u8], &'t mut [u8]) -> Result<&'t mut [u8], crate::base64::Error>,
+    ) -> Result<(), Error> {
+        let full = Error::new(ErrorKind::Full, *self.len);
+        let at = self.begin().ok_or(full)?;
+        // The `,`, the key, and `at` fit in the slice, so `at + 2` does not overflow.
+        let end = crate::base64::Profile::Url
+            .encoded_len(bytes.len())
+            .and_then(|len| len.checked_add(at + 2))
+            .ok_or(full)?;
+        let Some([open, text @ .., close]) = self.out.get_mut(at..end) else {
+            return Err(full);
+        };
+        *open = b'"';
+        // `text` has the length of the text, so the encoder does not refuse.
+        encode(bytes, text).map_err(|_| full)?;
+        *close = b'"';
+        *self.len = end;
         Ok(())
     }
 

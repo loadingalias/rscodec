@@ -31,8 +31,8 @@ Each operation has a function for public data and a function for secret data:
 
 | Data | Examples | base64 | hex |
 | --- | --- | --- | --- |
-| Public | A digest, a signature, a public key, a challenge | `Profile::encode`, `Profile::decode` | `hex::encode`, `hex::decode` |
-| Secret | A private key, a bearer token, a session secret | `Profile::encode_secret`, `Profile::decode_secret` | `hex::encode_secret`, `hex::decode_secret` |
+| Public | A digest, a signature, a public key | `Profile::encode`, `Profile::decode` | `hex::encode`, `hex::decode` |
+| Secret | A private key, a bearer token, a session secret, a WebAuthn challenge during its ceremony | `Profile::encode_secret`, `Profile::decode_secret` | `hex::encode_secret`, `hex::decode_secret` |
 
 Both classes give the same result and the same error for each input. They differ in four ways:
 
@@ -118,23 +118,23 @@ and it exits with 0 when it finds nothing and with 1 when it finds something:
 RUSTFLAGS="-C target-cpu=native" cargo run --release -p rscodec-ct -- scan
 ```
 
-The last line of its output gives the number of findings, for example `scan: 18 entries, 0
+The last line of its output gives the number of findings, for example `scan: 19 entries, 0
 findings`. The path count, `cargo run --release -p rscodec-ct -- paths`, needs the counters of
 Linux.
 
 ## Decode a base64url token into a stack buffer
 
-A WebAuthn challenge is public, so `decode` reads it:
+A SHA-256 digest is public, so `decode` reads it:
 
 ```rust
 use rscodec::base64::{Error, ErrorKind, Profile};
 
 fn main() -> Result<(), Error> {
-    // A WebAuthn challenge: 32 bytes in base64url without padding.
+    // A SHA-256 digest: 32 bytes in base64url without padding.
     let token = b"NI2kalLUY_EBIuNcW6yDtzD4K6bGemOZJL9NWqY_heQ";
     let mut buffer = [0; 32];
-    let challenge = Profile::Url.decode(token, &mut buffer)?;
-    assert_eq!(challenge[..4], [0x34, 0x8d, 0xa4, 0x6a]);
+    let digest = Profile::Url.decode(token, &mut buffer)?;
+    assert_eq!(digest[..4], [0x34, 0x8d, 0xa4, 0x6a]);
 
     // `/` is a character of base64, not of base64url, so the text refuses at the `/`.
     let standard = b"NI2kalLUY/EBIuNcW6yDtzD4K6bGemOZJL9NWqY/heQ";
