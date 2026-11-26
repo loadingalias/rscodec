@@ -380,6 +380,9 @@ stay public.
   slice.
 - The writer reads no byte of the slice back.
 
+The harness of the repository checks the compiled code of the member, as it checks the secret
+functions of base64 ([Timing evidence](base64-and-hex.md#timing-evidence)).
+
 Each other method of the writer, and the reader, is in the public class. Their time depends on the
 bytes that they write or read: the structure, the lengths, the escapes, and the numbers. They make
 no timing claim for a secret.

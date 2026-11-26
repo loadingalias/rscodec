@@ -65,16 +65,19 @@ speculation barrier, which costs most for one short input. If you are not sure t
 
 ## Timing evidence
 
-The harness `rscodec-ct` of the repository checks the compiled code of both classes. It checks
+The harness `rscodec-ct` of the repository checks the compiled code of both classes, and of
+`json::Place::base64url_secret`, which writes a secret as a base64url string of JSON. It checks
 the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C) and aarch64
 (Graviton4), and the build with `-C target-cpu=native` on aarch64.
 
-The table gives the results at revision `28bdb86`.
+The path count, the scan, and the painted stack give their results at revision `26a6423`. DudeCT
+gives its results at revision `28bdb86`, for the six secret operations of base64 and hex. It did
+not run on `base64url_secret`.
 
 | Check | Result |
 | --- | --- |
 | Path count: the counters of the instructions and the branches of each call, on each kernel of the CPU, at each length up to 200 bytes and at 13 longer lengths, with random and fixed inputs | One count for each length and outcome |
-| Scan of the disassembly | No load or store at an address from the data, no write of `PSTATE.DIT` in the secret code, and each instruction that reads secret data on the DOIT or DIT list |
+| Scan of the disassembly: each function that a secret call can reach, also through a slot of the global offset table (GOT) | No load or store at an address from the data, no write of `PSTATE.DIT` in the secret code, each instruction that reads secret data on the DOIT or DIT list, and no call out of the binary other than `memset` |
 | Painted stack: each secret call on a private stack | No run of 8 secret bytes or 16 secret characters stays in the stack |
 | DudeCT compares a fixed input with random inputs of the same length | All six secret operations passed at 16, 32, 64, and 4096 decoded bytes in the three builds above. |
 
@@ -94,11 +97,6 @@ Limits:
 - A build whose target features add instructions off the DOIT list has no timing claim. With
   `-C target-cpu=native` on a CPU with AVX-512 VBMI or AVX512-FP16, LLVM puts VBMI and FP16
   instructions in the secret code.
-- On x86_64, the scan did not read each kernel of the secret functions. The harness calls some
-  kernels through the global offset table (GOT), and the scan does not follow such a call. Thus it
-  did not read the AVX-512BW kernels of base64 and of hex decode, or the portable kernels of hex. On
-  a CPU with AVX-512BW, the secret functions of base64 and the hex decoder run these AVX-512BW
-  kernels. The path count, the painted stack, and DudeCT ran them.
 - WebAssembly has no timing claim. It has no list of instructions with data independent timing,
   and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
 - Earlier 4096-byte measurements exceeded the threshold on both shipped builds. Those runs copied a saved input for one class and generated inputs for the other.
