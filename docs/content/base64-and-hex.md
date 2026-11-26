@@ -94,6 +94,11 @@ Limits:
 - A build whose target features add instructions off the DOIT list has no timing claim. With
   `-C target-cpu=native` on a CPU with AVX-512 VBMI or AVX512-FP16, LLVM puts VBMI and FP16
   instructions in the secret code.
+- On x86_64, the scan did not read each kernel of the secret functions. The harness calls some
+  kernels through the global offset table (GOT), and the scan does not follow such a call. Thus it
+  did not read the AVX-512BW kernels of base64 and of hex decode, or the portable kernels of hex. On
+  a CPU with AVX-512BW, the secret functions of base64 and the hex decoder run these AVX-512BW
+  kernels. The path count, the painted stack, and DudeCT ran them.
 - WebAssembly has no timing claim. It has no list of instructions with data independent timing,
   and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
 - Earlier 4096-byte measurements exceeded the threshold on both shipped builds. Those runs copied a saved input for one class and generated inputs for the other.
