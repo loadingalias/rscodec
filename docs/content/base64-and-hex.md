@@ -98,6 +98,10 @@ Limits:
   and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
 - Earlier 4096-byte measurements exceeded the threshold on both shipped builds. Those runs copied a saved input for one class and generated inputs for the other.
   The calibrated measurements with matched input preparation did not reproduce the earlier difference. Its cause remains open.
+- On Graviton4 with `-C target-cpu=native`, DudeCT of the secret standard base64 encoder at 4096 bytes does not pass in each run.
+  At revisions `7594f69` and `6b47839`, 15 runs compared a fixed input with random inputs. The absolute t was 6.5 or more in 3 of them.
+  One second measurement with 40 million samples gave 17.04. Two random classes gave at most 2.93 in 4 runs.
+  The largest difference of the mean times was 0.017% of one call. The path count and the scan of the same code passed. The cause is open.
 - Intel guarantees the DOIT list only in DOIT mode (DOITM), which the operating system sets on a CPU
   that has it. The tests did not set it.
 
