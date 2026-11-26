@@ -28,6 +28,8 @@
 //! assert_eq!(Profile::Url.encode(&[0xfb, 0xff, 0xbf], &mut text)?, b"-_-_");
 //! // A key is secret.
 //! let mut key = [0; 3];
+//! # // A build that makes no proof has no secret call: `with_dit` gives `DitUnknown`.
+//! # if rscodec::with_dit(|_| ()).is_err() { return Ok(()); }
 //! rscodec::with_dit(|dit| Profile::Url.decode_secret(dit, b"-_-_", &mut key).map(|key| key.len()))??;
 //! assert_eq!(key, [0xfb, 0xff, 0xbf]);
 //! # Ok::<(), Box<dyn core::error::Error>>(())

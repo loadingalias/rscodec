@@ -25,6 +25,8 @@
 //! assert_eq!(hex::encode(&[0xc0, 0xde], &mut text)?, b"c0de");
 //! // A key is secret.
 //! let mut key = [0; 2];
+//! # // A build that makes no proof has no secret call: `with_dit` gives `DitUnknown`.
+//! # if rscodec::with_dit(|_| ()).is_err() { return Ok(()); }
 //! rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))??;
 //! assert_eq!(key, [0xc0, 0xde]);
 //! # Ok::<(), Box<dyn core::error::Error>>(())

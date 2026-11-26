@@ -70,7 +70,7 @@ The harness `rscodec-ct` of the repository checks the compiled code of both clas
 the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C) and aarch64
 (Graviton4), and the build with `-C target-cpu=native` on aarch64.
 
-The path count, the scan, and the painted stack give their results at revision `26a6423`. DudeCT
+The path count, the scan, and the painted stack give their results at revision `1b483bc`. DudeCT
 gives its results at revision `28bdb86`, for the six secret operations of base64 and hex. It did
 not run on `base64url_secret`.
 

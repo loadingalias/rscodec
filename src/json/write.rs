@@ -49,6 +49,8 @@ mod tests;
 ///     })
 /// };
 /// let mut out = [0; 512];
+/// # // A build that makes no proof has no secret call: `with_dit` gives `DitUnknown`.
+/// # if rscodec::with_dit(|_| ()).is_err() { return Ok(()); }
 /// let len = rscodec::with_dit(|dit| options(dit, &mut out))??;
 /// assert_eq!(
 ///     &out[..len],

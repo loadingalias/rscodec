@@ -114,7 +114,9 @@ fn error(kind: ErrorKind, offset: usize) -> Result<(), Error> {
 /// The serde_json tree of the tokens of `input`. A number is the serde_json value of its text.
 pub(in crate::json) fn tree(input: &[u8], profile: Profile) -> Result<serde_json::Value, Error> {
     use serde_json::{Map, Value};
-    let tokens = tokens(input, &WIDE, profile, 1 << 16)?;
+    // Each container and each key takes one slot and at least one byte, so a slot for each byte
+    // is enough. A scratch of 1 MiB for each short string cost new pages on Windows at each call.
+    let tokens = tokens(input, &WIDE, profile, input.len().min(1 << 16) + 1)?;
     let mut open: Vec<(Value, Option<String>)> = Vec::new();
     let mut key = None;
     let mut root = None;
