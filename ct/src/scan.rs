@@ -2,7 +2,8 @@
 //! jump to the code that the entry runs. In that code it finds:
 //!
 //! - a load from a constant table with an index register: the form of a lookup table;
-//! - an indirect jump or call, whose target the scan cannot follow;
+//! - an indirect jump or call whose target comes from the data, and in the code of a secret entry,
+//!   an indirect call that the scan cannot follow;
 //! - a call out of the binary, as to `memcpy@plt`;
 //! - a load or store whose address comes from the data;
 //! - in the code of a secret entry, an instruction with a data operand that is not on the DOIT list
@@ -14,6 +15,10 @@
 //! and the slots of the stack, over the control flow of each function, to a fixed point. A call
 //! ends what the scan knows of the registers: each function of the closure has its own scan.
 //!
+//! On x86_64, a call to a function of another crate can load its target from a slot of the global
+//! offset table (GOT). The relocation of the slot in `objdump -R` gives the function, so the scan
+//! follows the call as a direct call.
+//!
 //! A compare with the padding `=` gives public flags: the padding gives the length of the bytes,
 //! which is public.
 //!
@@ -24,7 +29,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -114,7 +119,11 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    let functions = parse(isa, &String::from_utf8_lossy(&output.stdout));
+    let slots = match isa {
+        Isa::X86 => got(&binary)?,
+        Isa::A64 => BTreeMap::new(),
+    };
+    let functions = parse(isa, &String::from_utf8_lossy(&output.stdout), &slots);
     let entries: Vec<&String> = functions.keys().filter(|name| name.starts_with(ENTRY)).collect();
     if entries.len() != ENTRIES {
         return Err(Failure::Host(format!(
@@ -189,8 +198,45 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     }
 }
 
-/// The functions of a listing of `objdump -d`, by name.
-fn parse(isa: Isa, listing: &str) -> BTreeMap<String, Vec<Instruction>> {
+/// The function address in each slot of the GOT of `binary`, from its relocations of the form
+/// `R_X86_64_RELATIVE`. A binary with no dynamic relocations, which `objdump -R` refuses, has none.
+fn got(binary: &Path) -> Result<BTreeMap<u64, u64>, Failure> {
+    let output = Command::new("objdump")
+        .arg("-R")
+        .arg(binary)
+        .output()
+        .map_err(|error| Failure::Host(format!("objdump -R: {error}")))?;
+    // A slot of a binary with no dynamic relocations stays unknown, so each call through it in the
+    // secret code is a finding.
+    let listing = String::from_utf8_lossy(&output.stdout);
+    Ok(listing
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let slot = u64::from_str_radix(words.next()?, 16).ok()?;
+            let addend = (words.next()? == "R_X86_64_RELATIVE")
+                .then(|| words.next()?.strip_prefix("*ABS*+0x"))
+                .flatten()?;
+            Some((slot, u64::from_str_radix(addend, 16).ok()?))
+        })
+        .collect())
+}
+
+/// The address and the name of the function that a line of `objdump -d` starts, as
+/// `000000000006be00 <name>:`.
+fn header(line: &str) -> Option<(u64, &str)> {
+    let (address, name) = line.strip_suffix(">:")?.split_once(" <")?;
+    Some((u64::from_str_radix(address, 16).ok()?, name))
+}
+
+/// The functions of a listing of `objdump -d`, by name. A call or jump through a slot of `slots`
+/// becomes a direct call or jump to the function that the slot holds.
+fn parse(isa: Isa, listing: &str, slots: &BTreeMap<u64, u64>) -> BTreeMap<String, Vec<Instruction>> {
+    let starts: BTreeMap<u64, String> = listing
+        .lines()
+        .filter_map(header)
+        .map(|(address, name)| (address, symbol(name)))
+        .collect();
     // `#` starts a comment of x86 and an immediate of A64, whose comments start with `//` (GNU) or
     // `;` (LLVM).
     let comment: &[&str] = match isa {
@@ -200,10 +246,7 @@ fn parse(isa: Isa, listing: &str) -> BTreeMap<String, Vec<Instruction>> {
     let mut functions = BTreeMap::new();
     let mut current: Option<(String, Vec<Instruction>)> = None;
     for line in listing.lines() {
-        if let Some(header) = line.strip_suffix(">:")
-            && let Some((address, name)) = header.split_once(" <")
-            && address.chars().all(|c| c.is_ascii_hexdigit())
-        {
+        if let Some((_, name)) = header(line) {
             if let Some((name, code)) = current.take() {
                 functions.insert(name, code);
             }
@@ -216,11 +259,17 @@ fn parse(isa: Isa, listing: &str) -> BTreeMap<String, Vec<Instruction>> {
         let Ok(address) = u64::from_str_radix(address.trim_start_matches("0x"), 16) else {
             continue;
         };
-        // A call through the GOT names its import in the comment, as `# 4ff0 <memcpy@GLIBC_2.14>`.
-        let import = text
-            .split_once('#')
-            .and_then(|(_, comment)| comment.find('<').map(|at| comment.get(at..).unwrap_or_default().trim()))
+        // A call through the GOT names its slot in the comment, as `# 4ff0 <memcpy@GLIBC_2.14>`
+        // (GNU) or `# 0xd14b0 <...>` (LLVM), and the name of an import there.
+        let slot_comment = text.split_once('#').map(|(_, comment)| comment.trim());
+        let import = slot_comment
+            .and_then(|comment| comment.find('<').map(|at| comment.get(at..).unwrap_or_default().trim()))
             .filter(|name| name.contains('@'));
+        let held = slot_comment
+            .and_then(|comment| comment.split_whitespace().next())
+            .and_then(|slot| u64::from_str_radix(slot.trim_start_matches("0x"), 16).ok())
+            .and_then(|slot| slots.get(&slot))
+            .and_then(|target| Some((*target, starts.get(target)?)));
         let text = comment
             .iter()
             .fold(text, |text, comment| text.split(comment).next().unwrap_or_default())
@@ -234,10 +283,10 @@ fn parse(isa: Isa, listing: &str) -> BTreeMap<String, Vec<Instruction>> {
             Some((stem, _)) if isa == Isa::A64 && stem != "b" => stem,
             _ => mnemonic,
         };
-        let operands = match import {
-            Some(import) if isa == Isa::X86 && (mnemonic == "call" || mnemonic == "jmp") => {
-                format!("{} {import}", operands.trim())
-            }
+        let through_got = isa == Isa::X86 && (mnemonic == "call" || mnemonic == "jmp") && operands.contains("[rip");
+        let operands = match (import, held) {
+            (Some(import), _) if through_got => format!("{} {import}", operands.trim()),
+            (None, Some((target, name))) if through_got => format!("{target:x} <{name}>"),
             _ => operands.trim().to_owned(),
         };
         if let Some((_, code)) = &mut current {
@@ -717,6 +766,10 @@ fn step(
         if target_data {
             findings.insert(format!(
                 "{name}: an indirect {mnemonic} to a target from the data ({operands})"
+            ));
+        } else if secret && (mnemonic == "call" || mnemonic.starts_with("blr")) {
+            findings.insert(format!(
+                "{name}: an indirect {mnemonic} that the scan cannot follow ({operands})"
             ));
         } else {
             findings.insert(format!(

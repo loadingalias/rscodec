@@ -546,11 +546,13 @@ mod kernel {
     #[cfg(target_arch = "x86_64")]
     use super::x86;
     use super::{Backend, Kernel, Profile, portable};
+    #[cfg(target_arch = "x86_64")]
+    use crate::cpu::Timing;
     use crate::ct::Class;
 
     /// Encodes `bytes` into the characters `out`, with no padding.
     #[inline(always)]
-    pub(super) fn encode(class: impl Class, backend: Backend, profile: Profile, bytes: &[u8], out: &mut [u8]) {
+    pub(super) fn encode<C: Class>(class: C, backend: Backend, profile: Profile, bytes: &[u8], out: &mut [u8]) {
         match backend.0 {
             Kernel::Portable => portable::encode(class, profile, bytes, out),
             #[cfg(target_arch = "x86_64")]
@@ -561,20 +563,24 @@ mod kernel {
             Kernel::Avx2 => unsafe { x86::avx2::encode(class, profile, bytes, out) },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Bw if bytes.len() <= x86::ONE_MAX => unsafe {
-                x86::avx512bw::encode_one(profile, bytes, out)
-            },
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Bw => unsafe { x86::avx512bw::encode(profile, bytes, out) },
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Vbmi if bytes.len() <= x86::ONE_MAX => unsafe {
+            Kernel::Avx512Vbmi if C::TIMING.runs(Timing::Public) && bytes.len() <= x86::ONE_MAX => unsafe {
                 x86::avx512vbmi::encode_one(profile, bytes, out)
             },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Vbmi => unsafe { x86::avx512vbmi::encode(profile, bytes, out) },
+            Kernel::Avx512Vbmi if C::TIMING.runs(Timing::Public) => unsafe {
+                x86::avx512vbmi::encode(profile, bytes, out)
+            },
+            // The copy of the secret class has no path to the VBMI kernel, of the public class. VBMI
+            // needs the features of AVX-512BW, so its backend runs the AVX-512BW kernel there.
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of either kernel exists only on a CPU that has AVX-512BW.
+            Kernel::Avx512Bw | Kernel::Avx512Vbmi if bytes.len() <= x86::ONE_MAX => unsafe {
+                x86::avx512bw::encode_one(profile, bytes, out)
+            },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of either kernel exists only on a CPU that has AVX-512BW.
+            Kernel::Avx512Bw | Kernel::Avx512Vbmi => unsafe { x86::avx512bw::encode(profile, bytes, out) },
             #[cfg(target_arch = "aarch64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Neon => unsafe { aarch64::encode(class, profile, bytes, out) },
@@ -586,7 +592,7 @@ mod kernel {
     /// Decodes the characters `text`, with no padding, into `out`, and gives whether each is in the
     /// alphabet.
     #[inline(always)]
-    pub(super) fn decode(class: impl Class, backend: Backend, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
+    pub(super) fn decode<C: Class>(class: C, backend: Backend, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         match backend.0 {
             Kernel::Portable => portable::decode(class, profile, text, out),
             #[cfg(target_arch = "x86_64")]
@@ -597,18 +603,23 @@ mod kernel {
             Kernel::Avx2 => unsafe { x86::avx2::decode(class, profile, text, out) },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Bw if out.len() <= x86::ONE_MAX => unsafe { x86::avx512bw::decode_one(profile, text, out) },
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Bw => unsafe { x86::avx512bw::decode(profile, text, out) },
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Vbmi if out.len() <= x86::ONE_MAX => unsafe {
+            Kernel::Avx512Vbmi if C::TIMING.runs(Timing::Public) && out.len() <= x86::ONE_MAX => unsafe {
                 x86::avx512vbmi::decode_one(profile, text, out)
             },
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
-            Kernel::Avx512Vbmi => unsafe { x86::avx512vbmi::decode(profile, text, out) },
+            Kernel::Avx512Vbmi if C::TIMING.runs(Timing::Public) => unsafe {
+                x86::avx512vbmi::decode(profile, text, out)
+            },
+            // As in `encode`: the copy of the secret class has no path to the VBMI kernel.
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of either kernel exists only on a CPU that has AVX-512BW.
+            Kernel::Avx512Bw | Kernel::Avx512Vbmi if out.len() <= x86::ONE_MAX => unsafe {
+                x86::avx512bw::decode_one(profile, text, out)
+            },
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: a `Backend` of either kernel exists only on a CPU that has AVX-512BW.
+            Kernel::Avx512Bw | Kernel::Avx512Vbmi => unsafe { x86::avx512bw::decode(profile, text, out) },
             #[cfg(target_arch = "aarch64")]
             // SAFETY: a `Backend` of this kernel exists only on a CPU that has its features.
             Kernel::Neon => unsafe { aarch64::decode(class, profile, text, out) },

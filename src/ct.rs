@@ -4,6 +4,9 @@
 //! Each arithmetic function takes and gives values in -256..=255, so no operation overflows. The
 //! wrapping operations add no overflow check, which is a branch on the data.
 
+#[cfg(all(feature = "base64", target_arch = "x86_64"))]
+use crate::cpu::Timing;
+
 /// `plus` if `lo <= c <= hi`, and zero if not. `(lo - 1 - c) & (c - hi - 1)` is negative only in the
 /// range, so its shift right by 8 is -1 in the range and 0 outside it.
 #[inline(always)]
@@ -54,6 +57,11 @@ pub(crate) fn first_negative(values: impl Iterator<Item = i16>) -> usize {
 /// A timing class as a type: [`Public`] or [`Secret`]. A kernel that takes one compiles a copy for
 /// each class. Thus the copy of the public class has no store of the secret class.
 pub(crate) trait Class: Copy {
+    /// The class, for a choice that the compiler makes for each copy: the dispatch of base64 on
+    /// x86_64, whose copy of the secret class has no path to a kernel of the public class.
+    #[cfg(all(feature = "base64", target_arch = "x86_64"))]
+    const TIMING: Timing;
+
     /// In the secret class, writes zero to `array`, a temporary copy of input or result bytes,
     /// before its function returns. In the public class, it does nothing.
     #[cfg_attr(
@@ -81,6 +89,9 @@ pub(crate) struct Public;
 pub(crate) struct Secret;
 
 impl Class for Public {
+    #[cfg(all(feature = "base64", target_arch = "x86_64"))]
+    const TIMING: Timing = Timing::Public;
+
     #[inline(always)]
     fn clear<const N: usize>(self, _: &mut [u8; N]) {}
 
@@ -89,6 +100,9 @@ impl Class for Public {
 }
 
 impl Class for Secret {
+    #[cfg(all(feature = "base64", target_arch = "x86_64"))]
+    const TIMING: Timing = Timing::Secret;
+
     #[inline(always)]
     fn clear<const N: usize>(self, array: &mut [u8; N]) {
         zero::array(array);

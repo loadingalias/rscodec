@@ -110,9 +110,9 @@ pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mu
     }
     if !rest.is_empty() {
         let mut block = [0; 3];
-        block[..rest.len()].copy_from_slice(rest);
+        put(&mut block, rest);
         let mut chars = alphabet.encode_block(block);
-        tail.copy_from_slice(&chars[..tail.len()]);
+        put(tail, &chars);
         class.clear(&mut block);
         class.clear(&mut chars);
     }
@@ -134,14 +134,27 @@ pub(super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut
     if !rest.is_empty() {
         // 'A', which is zero, in place of the characters that are not there.
         let mut block = [b'A'; 4];
-        block[..rest.len()].copy_from_slice(rest);
+        put(&mut block, rest);
         let (mut bytes, block_values) = alphabet.decode_block(block);
         values |= block_values;
-        tail.copy_from_slice(&bytes[..tail.len()]);
+        put(tail, &bytes);
         // The byte after the result holds the trailing bits, and the `A` after the text adds none.
         trailing = bytes.get(tail.len()).copied().unwrap_or(0);
         class.clear(&mut block);
         class.clear(&mut bytes);
     }
     (values >= 0) & (trailing == 0)
+}
+
+/// Copies the first bytes of `from` into `into`, as many as the shorter of the two has, at most 3:
+/// the tail of a block. Each byte takes its own store, and the branches test only the length. A
+/// copy of a length that the compiler does not know is a call to `memcpy` on x86_64, whose code
+/// the scan of the secret class cannot read.
+#[inline(always)]
+fn put(into: &mut [u8], from: &[u8]) {
+    for at in 0..3 {
+        if let (Some(into), Some(&from)) = (into.get_mut(at), from.get(at)) {
+            *into = from;
+        }
+    }
 }
