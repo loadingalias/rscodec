@@ -126,6 +126,36 @@ pub(super) fn unexpected(input: &[u8], at: usize) -> Error {
     Error::new(if invalid { ErrorKind::Utf8 } else { ErrorKind::Syntax }, at)
 }
 
+/// Gives the refusal `$error` of the input from the function of the reader `$reader`, after
+/// [`Reader::fail`].
+macro_rules! refuse {
+    ($reader:ident, $error:expr) => {
+        return Err($reader.fail($error))
+    };
+}
+
+/// The value of `$result`, or its refusal of the input, as [`refuse!`] gives it.
+macro_rules! input {
+    ($reader:ident, $result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(error) => refuse!($reader, error),
+        }
+    };
+}
+
+/// The offset of the next token of the cursor of `$reader`, which the cursor keeps. The input must
+/// not end there.
+macro_rules! peek {
+    ($reader:ident) => {
+        match $reader.cursor.peek() {
+            Ok(Some(at)) => at,
+            Ok(None) => refuse!($reader, Error::new(ErrorKind::End, $reader.cursor.input().len())),
+            Err(invalid) => refuse!($reader, Error::new(ErrorKind::Utf8, invalid.offset)),
+        }
+    };
+}
+
 impl<'a, 's> Reader<'a, 's> {
     #[inline(always)]
     pub(super) fn new(
@@ -167,10 +197,11 @@ impl<'a, 's> Reader<'a, 's> {
         Value(self)
     }
 
-    /// Reads the document from its start and gives each token to `emit`.
+    /// Reads the document from its start and gives each token to `emit`, with the push loop that
+    /// has no number run.
     #[inline(always)]
     pub(super) fn visit(&mut self, emit: impl FnMut(Token<'a>) -> Result<(), Error>) -> Result<(), Error> {
-        self.run(emit)
+        self.run::<false>(emit)
     }
 
     /// Reads each token to the end of the document. It takes one item at a time, as the walk does:
@@ -184,81 +215,81 @@ impl<'a, 's> Reader<'a, 's> {
 
     /// The push loop: it reads the document from its start and gives each token to `emit`. The
     /// place in the code holds the state of the grammar, so the loop keeps no [`State`] (C223). Each
-    /// refusal of the input passes [`Reader::fail`], and an error of `emit` passes as it is.
+    /// refusal of the input passes [`Reader::fail`], and an error of `emit` passes as it is. With
+    /// `NUMBER_RUN`, a number of an array starts the number run.
     #[inline(always)]
-    fn run(&mut self, mut emit: impl FnMut(Token<'a>) -> Result<(), Error>) -> Result<(), Error> {
+    fn run<const NUMBER_RUN: bool>(
+        &mut self,
+        mut emit: impl FnMut(Token<'a>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let input = self.cursor.input();
-        macro_rules! refuse {
-            ($error:expr) => {
-                return Err(self.fail($error))
-            };
-        }
-        macro_rules! input {
-            ($result:expr) => {
-                match $result {
-                    Ok(value) => value,
-                    Err(error) => refuse!(error),
-                }
-            };
-        }
-        // The offset of the next token, which the cursor keeps. The input must not end there.
-        macro_rules! peek {
-            () => {
-                match self.cursor.peek() {
-                    Ok(Some(at)) => at,
-                    Ok(None) => refuse!(Error::new(ErrorKind::End, input.len())),
-                    Err(invalid) => refuse!(Error::new(ErrorKind::Utf8, invalid.offset)),
-                }
-            };
-        }
         'value: loop {
             // One match on the byte, and one call of `emit` for each kind of token, so the match
             // of `emit` on the token goes at each call. The count of the element comes after the
             // check of the byte, as in `Reader::take`.
-            let at = peek!();
+            let at = peek!(self);
             match input[at] {
                 b'"' => {
-                    input!(self.element(at));
-                    emit(Token::Str(input!(self.string(at))))?;
+                    input!(self, self.element(at));
+                    emit(Token::Str(input!(self, self.string(at))))?;
+                }
+                b'-' | b'0'..=b'9' if NUMBER_RUN => {
+                    // One call of `emit` gives each number, also each number of the number run,
+                    // so the loop holds one copy of the work of the consumer for a number.
+                    let mut at = at;
+                    loop {
+                        input!(self, self.element(at));
+                        let number = input!(self, self.number(at));
+                        let end = at + number.as_str().len();
+                        emit(Token::Number(number))?;
+                        if self.frame.container != Container::Array {
+                            break;
+                        }
+                        match self.number_run(end, &mut emit)? {
+                            Run::Number(next) => at = next,
+                            Run::After => break,
+                            Run::Value => continue 'value,
+                        }
+                    }
                 }
                 b'-' | b'0'..=b'9' => {
-                    input!(self.element(at));
-                    emit(Token::Number(input!(self.number(at))))?;
+                    input!(self, self.element(at));
+                    emit(Token::Number(input!(self, self.number(at))))?;
                 }
                 b't' | b'f' => {
-                    input!(self.element(at));
-                    emit(Token::Bool(input!(self.literal(at))))?;
+                    input!(self, self.element(at));
+                    emit(Token::Bool(input!(self, self.literal(at))))?;
                 }
                 b'n' => {
-                    input!(self.element(at));
-                    input!(self.literal(at));
+                    input!(self, self.element(at));
+                    input!(self, self.literal(at));
                     emit(Token::Null)?;
                 }
                 b'[' => {
-                    input!(self.element(at));
-                    input!(self.open(at, Container::Array));
+                    input!(self, self.element(at));
+                    input!(self, self.open(at, Container::Array));
                     emit(Token::ArrayStart)?;
-                    let first = peek!();
+                    let first = peek!(self);
                     if input[first] != b']' {
                         continue 'value;
                     }
-                    emit(input!(self.close()))?;
+                    emit(input!(self, self.close()))?;
                 }
                 b'{' => {
-                    input!(self.element(at));
-                    input!(self.open(at, Container::Object));
+                    input!(self, self.element(at));
+                    input!(self, self.open(at, Container::Object));
                     emit(Token::ObjectStart)?;
-                    let first = peek!();
+                    let first = peek!(self);
                     match input[first] {
-                        b'}' => emit(input!(self.close()))?,
+                        b'}' => emit(input!(self, self.close()))?,
                         b'"' => {
-                            emit(Token::Key(input!(self.key(first))))?;
+                            emit(Token::Key(input!(self, self.key(first))))?;
                             continue 'value;
                         }
-                        _ => refuse!(unexpected(input, first)),
+                        _ => refuse!(self, unexpected(input, first)),
                     }
                 }
-                _ => refuse!(unexpected(input, at)),
+                _ => refuse!(self, unexpected(input, at)),
             }
             // After a value.
             loop {
@@ -268,8 +299,8 @@ impl<'a, 's> Reader<'a, 's> {
                         self.state = State::Done;
                         return Ok(());
                     }
-                    Ok(None) => refuse!(Error::new(ErrorKind::End, input.len())),
-                    Err(invalid) => refuse!(Error::new(ErrorKind::Utf8, invalid.offset)),
+                    Ok(None) => refuse!(self, Error::new(ErrorKind::End, input.len())),
+                    Err(invalid) => refuse!(self, Error::new(ErrorKind::Utf8, invalid.offset)),
                 };
                 match (self.frame.container, input[at]) {
                     (Container::Array, b',') => {
@@ -278,15 +309,15 @@ impl<'a, 's> Reader<'a, 's> {
                     }
                     (Container::Object, b',') => {
                         self.cursor.take();
-                        let at = peek!();
+                        let at = peek!(self);
                         if input[at] != b'"' {
-                            refuse!(unexpected(input, at));
+                            refuse!(self, unexpected(input, at));
                         }
-                        emit(Token::Key(input!(self.key(at))))?;
+                        emit(Token::Key(input!(self, self.key(at))))?;
                         continue 'value;
                     }
-                    (Container::Array, b']') | (Container::Object, b'}') => emit(input!(self.close()))?,
-                    _ => refuse!(unexpected(input, at)),
+                    (Container::Array, b']') | (Container::Object, b'}') => emit(input!(self, self.close()))?,
+                    _ => refuse!(self, unexpected(input, at)),
                 }
             }
         }
@@ -310,6 +341,68 @@ impl<'a, 's> Reader<'a, 's> {
         match result {
             Ok(value) => Ok(value),
             Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    /// The number run (C224) after the number of an array that ends at `end`: the push loop reads
+    /// each next `,`, `[`, and `]` with no cursor, and it gives the offset of the next number, which
+    /// the loop reads. At each other byte, the cursor resumes at that byte. Each helper takes at most
+    /// one token of the cursor for each token that the run passed, so the cursor drops only tokens
+    /// before the run, and the resume drops the rest.
+    #[inline(always)]
+    fn number_run(
+        &mut self,
+        mut end: usize,
+        emit: &mut impl FnMut(Token<'a>) -> Result<(), Error>,
+    ) -> Result<Run, Error> {
+        let input = self.cursor.input();
+        loop {
+            // After a value, at `end`. A `]` can close the last array of the run.
+            if self.frame.container != Container::Array {
+                self.cursor.resume(end);
+                return Ok(Run::After);
+            }
+            let mut value = match input.get(end) {
+                Some(b',') => end + 1,
+                Some(b']') => {
+                    emit(input!(self, self.close()))?;
+                    end += 1;
+                    continue;
+                }
+                _ => {
+                    self.cursor.resume(end);
+                    return Ok(Run::After);
+                }
+            };
+            // At a value of an array, after a `,` or a `[`.
+            let mut opened = false;
+            loop {
+                match input.get(value) {
+                    Some(b'-' | b'0'..=b'9') => return Ok(Run::Number(value)),
+                    Some(b'[') => {
+                        input!(self, self.element(value));
+                        input!(self, self.open(value, Container::Array));
+                        emit(Token::ArrayStart)?;
+                        value += 1;
+                        opened = true;
+                    }
+                    // An empty array: the `]` after a value closes it, at one place.
+                    Some(b']') if opened => {
+                        end = value;
+                        break;
+                    }
+                    _ => {
+                        // The cursor reads the rest from `value`. After a `[`, a `]` can come
+                        // after whitespace.
+                        self.cursor.resume(value);
+                        if opened && input[peek!(self)] == b']' {
+                            emit(input!(self, self.close()))?;
+                            return Ok(Run::After);
+                        }
+                        return Ok(Run::Value);
+                    }
+                }
+            }
         }
     }
 
@@ -593,6 +686,53 @@ impl<'a, 's> Reader<'a, 's> {
             Some(_) => Err(unexpected(input, end)),
         }
     }
+}
+
+/// The documents that the number run reads: at least this many bytes. A shorter document has too
+/// few numbers for the run to pay.
+const NUMBER_RUN_BYTES_MIN: usize = 4096;
+
+/// Whether the push loop takes the number run for `input`: a document of at least
+/// [`NUMBER_RUN_BYTES_MIN`] bytes whose 64 bytes at its middle are each a byte of a number, `,`,
+/// `[`, or `]`, as in an array of numbers with no whitespace. The test reads at most 64 bytes, and
+/// it changes the speed of the read, not its result.
+#[inline(always)]
+pub(super) fn numbers_dense(input: &[u8]) -> bool {
+    input.len() >= NUMBER_RUN_BYTES_MIN
+        && input[input.len() / 2..][..64].iter().all(|byte| {
+            matches!(
+                byte,
+                b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E' | b',' | b'[' | b']'
+            )
+        })
+}
+
+/// [`Reader::visit`] of a document of numbers ([`numbers_dense`]), with the push loop that has the
+/// number run (C224). It does not inline, so the code of each loop is its own: in one function with
+/// the loop with no run, the loop with the run changed the code of the other loop, and in the loop
+/// itself the run made each document that does not run it 2 to 9% slower on the Xeon. It makes its
+/// own reader, which then stays in registers: a reader that it took by value stayed in memory.
+#[inline(never)]
+pub(super) fn visit_numbers<'a>(
+    input: &'a [u8],
+    backend: Backend,
+    limits: Limits,
+    profile: Profile,
+    scratch: &mut [Slot],
+    emit: impl FnMut(Token<'a>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    Reader::new(input, backend, limits, profile, scratch).run::<true>(emit)
+}
+
+/// Where the push loop goes on after a step of the number run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Run {
+    /// The number at this offset, which the run reached with no cursor.
+    Number(usize),
+    /// After a value. The cursor resumed after it.
+    After,
+    /// At a value of an array, after a `,` or a `[`. The cursor resumed at it.
+    Value,
 }
 
 /// The error of the literal at `at` whose bytes are not `true`, `false`, or `null`: the first byte

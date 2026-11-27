@@ -210,6 +210,10 @@ fn read_with<'a, T>(
 /// each place that gives a token, and the compiler does not inline a large closure with more than
 /// one caller. The state of the loop stays in registers only when the closure inlines.
 ///
+/// A document of at least 4 KiB with an array of numbers at its middle takes a second loop, which
+/// reads each array of numbers with no cursor. Both loops give the same tokens and errors, and the
+/// closure compiles into each of them.
+///
 /// # Errors
 ///
 /// The first error of `each`, or the first refusal of the input. [`ErrorKind::Limit`] with
@@ -239,6 +243,9 @@ fn visit_with<'a>(
     let input_bytes_max = limits.input_bytes_max as usize;
     if input.len() > input_bytes_max {
         return Err(Error::new(ErrorKind::Limit(Limit::InputBytes), input_bytes_max));
+    }
+    if reader::numbers_dense(input) {
+        return reader::visit_numbers(input, backend, *limits, profile, scratch, each);
     }
     Reader::new(input, backend, *limits, profile, scratch).visit(each)
 }

@@ -1164,6 +1164,75 @@ fn the_walk_skips_the_rest_of_what_the_loop_left() {
     assert_eq!(walk(duplicate), Err(Error::new(ErrorKind::Duplicate, offset)));
 }
 
+/// The number run reads an array of numbers itself, and the cursor resumes at the first other
+/// byte (C224). Each document here takes the push loop with the run: it holds an array of 1,500
+/// numbers at its middle. With the end of a run at each offset of a block of 64 bytes, each document
+/// gives the tree of serde_json: a run that ends at whitespace, at a `[ ]`, in an object, and in
+/// nested arrays. A run that ends at a byte that is not UTF-8, at a `]` after a `,`, or at the end of
+/// the input gives that error at its offset.
+#[test]
+fn a_number_run_that_ends_at_each_offset_of_a_block_gives_the_tree_of_serde_json() {
+    // 48 numbers, about 3 blocks, and the array of numbers that sends each document to the run.
+    let run = (0..48_i32)
+        .map(|index| (index * 37 - 500).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let dense = (0..1500_i32)
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    fn takes_the_run(document: &[u8]) -> &[u8] {
+        assert!(super::numbers_dense(document), "the document takes the number run");
+        document
+    }
+    for padding in 0..64 {
+        let pad = " ".repeat(padding);
+        for document in [
+            format!("{pad}[[{run}] ,{{\"k\":[1, 2]}},[1,[ ]],[[3],[-0.5,1e2]],[{run}],[{dense}]]"),
+            format!("{pad}{{\"a\":[{run}],\"b\":[4,[ 5 ]],\"c\":[{dense}]}}"),
+        ] {
+            let expected: serde_json::Value = serde_json::from_str(&document).unwrap();
+            for profile in PROFILES {
+                assert_eq!(
+                    tree(takes_the_run(document.as_bytes()), profile).as_ref(),
+                    Ok(&expected),
+                    "{padding}"
+                );
+            }
+        }
+        let utf8 = [
+            pad.as_bytes(),
+            b"[[",
+            run.as_bytes(),
+            b",\xff],[",
+            dense.as_bytes(),
+            b"]]",
+        ]
+        .concat();
+        let utf8_at = pad.len() + 2 + run.len() + 1;
+        let comma = format!("{pad}[[{run},],[{dense}]]");
+        let comma_at = pad.len() + 2 + run.len() + 1;
+        let end = format!("{pad}[[{dense}],[{run}");
+        for profile in PROFILES {
+            assert_eq!(
+                check(takes_the_run(&utf8), &WIDE, profile, 16),
+                error(ErrorKind::Utf8, utf8_at),
+                "{padding}"
+            );
+            assert_eq!(
+                check(takes_the_run(comma.as_bytes()), &WIDE, profile, 16),
+                error(ErrorKind::Syntax, comma_at),
+                "{padding}"
+            );
+            assert_eq!(
+                check(takes_the_run(end.as_bytes()), &WIDE, profile, 16),
+                error(ErrorKind::End, end.len()),
+                "{padding}"
+            );
+        }
+    }
+}
+
 /// The classes of `benches/data/json`, one document for each line of a `.jsonl` file.
 fn generated_documents() -> Vec<(String, Vec<u8>)> {
     let mut documents = Vec::new();

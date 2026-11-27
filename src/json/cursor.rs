@@ -99,6 +99,22 @@ impl<'a> Cursor<'a> {
         Ok(at)
     }
 
+    /// Resumes the cursor at `at`, after the number run of the reader read each byte from the last
+    /// token that the cursor gave up to `at` (C224). The run reads only bytes of numbers, `,`, `[`,
+    /// and `]`, so each of them is ASCII and outside a string.
+    ///
+    /// If the block of the cursor holds `at`, its classes stay valid, and the cursor drops its
+    /// tokens before `at`. Else [`resume_block`] classifies the block of `at`.
+    #[inline(always)]
+    pub(super) fn resume(&mut self, at: usize) {
+        let offset = at.wrapping_sub(self.start);
+        if offset < 64 {
+            self.tokens &= u64::MAX << offset;
+        } else {
+            *self = resume_block(*self, at);
+        }
+    }
+
     /// Classifies the next block, or gives `false` at the end of the input.
     #[inline(always)]
     #[expect(
@@ -136,6 +152,42 @@ impl<'a> Cursor<'a> {
         }
         Ok(true)
     }
+}
+
+/// [`Cursor::resume`] at `at` in a later block than the block of `cursor`: the cursor at the block
+/// of `at`, after the carry of the run. The run skipped each block before it, and each of their
+/// bytes is ASCII, so their UTF-8 needs no check. It does not inline, and it takes the cursor by
+/// value, so the reader of the caller stays in registers.
+#[inline(never)]
+#[expect(
+    unsafe_code,
+    reason = "the function of the kernel of a `Backend` runs on each CPU that has the backend"
+)]
+fn resume_block(mut cursor: Cursor<'_>, at: usize) -> Cursor<'_> {
+    let start = at & !63;
+    cursor.tokens = 0;
+    if start >= cursor.input.len() {
+        // The next block starts at or past the end, so `advance` gives the end.
+        cursor.start = start.wrapping_sub(64);
+        return cursor;
+    }
+    // The run read the byte before `start`: `at` is in a later block than the cursor, so `start`
+    // is at least 64.
+    let carry = Carry::after_run(cursor.input[start - 1]);
+    // SAFETY: `classify` is the function of the kernel of a `Backend`, and a `Backend` exists only on
+    // a CPU that has the features of its kernel.
+    let block = unsafe { (cursor.classify)(cursor.input, start, carry) };
+    cursor.carry = block.carry;
+    cursor.start = start;
+    cursor.tokens = block.tokens & u64::MAX << (at - start);
+    if block.carry.utf8_error() {
+        let invalid = invalid(cursor.input, start);
+        cursor.invalid = invalid.offset;
+        // The tokens before the error, as in `advance`.
+        let valid = u32::try_from(invalid.offset.saturating_sub(start)).unwrap_or(u32::MAX);
+        cursor.tokens &= !u64::MAX.unbounded_shl(valid);
+    }
+    cursor
 }
 
 /// The first byte of `input` that is not UTF-8. The check of the block at `start`, or the check of

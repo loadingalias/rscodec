@@ -47,6 +47,14 @@ impl Carry {
     /// the mask of [`Carry::in_string`].
     const IN_STRING: u64 = 1 << 63;
 
+    /// The carry before a block whose byte before is `previous`, which the number run read
+    /// ([`Cursor::resume`](super::cursor::Cursor::resume)): outside a string, after no `\` that
+    /// starts an escape, and in a scalar unless `previous` is structural.
+    #[inline(always)]
+    pub(super) const fn after_run(previous: u8) -> Self {
+        Self(!matches!(previous, b',' | b'[' | b']') as u64 * Self::SCALAR)
+    }
+
     /// 1 if the first byte of the next block follows a `\` that starts an escape, else 0.
     #[inline(always)]
     pub(super) const fn escaped(self) -> u64 {
