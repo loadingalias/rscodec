@@ -225,13 +225,13 @@ fn read(criterion: &mut Criterion) {
             "rscodec",
             (vec![Slot::EMPTY; SLOTS], vec![0; LIMITS.string_bytes_max as usize]),
             |(scratch, buf), doc| {
-                json::read(
+                json::visit(
                     doc,
                     &LIMITS,
                     Profile::Rfc8259,
                     scratch,
                     #[inline(always)]
-                    |reader| walk(reader, buf),
+                    |token| take(token, buf),
                 )
                 .is_ok()
             },
@@ -240,21 +240,19 @@ fn read(criterion: &mut Criterion) {
     }
 }
 
-/// Reads each token of the document, decodes each string with an escape into `buf`, and reads each
-/// number, as each tree of the other rows does.
+/// The work for one token of the document: it decodes each string with an escape into `buf`, and
+/// reads each number, as each tree of the other rows does.
 #[inline(always)]
-fn walk(reader: &mut json::Reader<'_, '_>, buf: &mut [u8]) -> Result<(), json::Error> {
-    while let Some(token) = reader.token()? {
-        match token {
-            Token::Key(text) | Token::Str(text) => {
-                black_box(text.decode(buf)?);
-            }
-            Token::Number(value) => {
-                black_box(number(value)?);
-            }
-            token => {
-                black_box(token);
-            }
+fn take(token: Token<'_>, buf: &mut [u8]) -> Result<(), json::Error> {
+    match token {
+        Token::Key(text) | Token::Str(text) => {
+            black_box(text.decode(buf)?);
+        }
+        Token::Number(value) => {
+            black_box(number(value)?);
+        }
+        token => {
+            black_box(token);
         }
     }
     Ok(())
@@ -285,47 +283,47 @@ fn number(number: json::Number<'_>) -> Result<Scalar, json::Error> {
 
 /// The serde_json tree of the tokens of rscodec, with each number of [`number`].
 fn rscodec_tree(doc: &[u8], scratch: &mut [Slot], buf: &mut [u8]) -> Value {
-    json::read(doc, &LIMITS, Profile::Rfc8259, scratch, |reader| {
-        let mut open: Vec<(Value, Option<String>)> = Vec::new();
-        let mut key = None;
-        loop {
-            let value = match reader.token()?.expect("a document has a value") {
-                Token::ObjectStart => {
-                    open.push((Value::Object(serde_json::Map::new()), key.take()));
-                    continue;
-                }
-                Token::ArrayStart => {
-                    open.push((Value::Array(Vec::new()), key.take()));
-                    continue;
-                }
-                Token::Key(text) => {
-                    key = Some(text.decode(buf)?.to_owned());
-                    continue;
-                }
-                Token::ObjectEnd | Token::ArrayEnd => {
-                    let (value, name) = open.pop().expect("each end has its start");
-                    key = name;
-                    value
-                }
-                Token::Str(text) => Value::String(text.decode(buf)?.to_owned()),
-                Token::Number(value) => match number(value)? {
-                    Scalar::Unsigned(value) => Value::from(value),
-                    Scalar::Signed(value) => Value::from(value),
-                    Scalar::Float(value) => Value::from(value),
-                },
-                Token::Bool(value) => Value::Bool(value),
-                Token::Null => Value::Null,
-            };
-            match open.last_mut() {
-                Some((Value::Object(members), _)) => {
-                    members.insert(key.take().expect("each member has a key"), value);
-                }
-                Some((Value::Array(elements), _)) => elements.push(value),
-                _ => return Ok(value),
+    let mut open: Vec<(Value, Option<String>)> = Vec::new();
+    let (mut key, mut root) = (None, None);
+    json::visit(doc, &LIMITS, Profile::Rfc8259, scratch, |token| {
+        let value = match token {
+            Token::ObjectStart => {
+                open.push((Value::Object(serde_json::Map::new()), key.take()));
+                return Ok(());
             }
+            Token::ArrayStart => {
+                open.push((Value::Array(Vec::new()), key.take()));
+                return Ok(());
+            }
+            Token::Key(text) => {
+                key = Some(text.decode(buf)?.to_owned());
+                return Ok(());
+            }
+            Token::ObjectEnd | Token::ArrayEnd => {
+                let (value, name) = open.pop().expect("each end has its start");
+                key = name;
+                value
+            }
+            Token::Str(text) => Value::String(text.decode(buf)?.to_owned()),
+            Token::Number(value) => match number(value)? {
+                Scalar::Unsigned(value) => Value::from(value),
+                Scalar::Signed(value) => Value::from(value),
+                Scalar::Float(value) => Value::from(value),
+            },
+            Token::Bool(value) => Value::Bool(value),
+            Token::Null => Value::Null,
+        };
+        match open.last_mut() {
+            Some((Value::Object(members), _)) => {
+                members.insert(key.take().expect("each member has a key"), value);
+            }
+            Some((Value::Array(elements), _)) => elements.push(value),
+            _ => root = Some(value),
         }
+        Ok(())
     })
-    .expect("rscodec reads each document")
+    .expect("rscodec reads each document");
+    root.expect("a document has a value")
 }
 
 /// The rows of the typed decode of `class` into the struct of `C`. Each row must give the struct of
@@ -760,16 +758,15 @@ fn print_f64(criterion: &mut Criterion) {
 /// The tokens of each number of `doc`.
 fn numbers(doc: &'static [u8]) -> Vec<json::Number<'static>> {
     let mut scratch = vec![Slot::EMPTY; SLOTS];
-    json::read(doc, &LIMITS, Profile::Rfc8259, &mut scratch, |reader| {
-        let mut numbers = Vec::new();
-        while let Some(token) = reader.token()? {
-            if let Token::Number(number) = token {
-                numbers.push(number);
-            }
+    let mut numbers = Vec::new();
+    json::visit(doc, &LIMITS, Profile::Rfc8259, &mut scratch, |token| {
+        if let Token::Number(number) = token {
+            numbers.push(number);
         }
-        Ok(numbers)
+        Ok(())
     })
-    .expect("rscodec reads the document")
+    .expect("rscodec reads the document");
+    numbers
 }
 
 /// The numbers of canada.json, and the shortest text of the random values of [`f64_inputs`] in

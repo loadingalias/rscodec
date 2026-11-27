@@ -1,8 +1,14 @@
 # Read and write JSON
 
-rscodec reads one JSON document from a slice in memory. The reader is a pull reader: your code asks
-for each token or value in order, and the reader checks each byte that it passes. It allocates no
-memory, and no code recurses, so a deep document does not grow the stack.
+rscodec reads one JSON document from a slice in memory, in one of two ways:
+
+- `json::read` gives a typed decoder the strict walk: your code asks for each value that it needs,
+  and the walk skips the others ([Read a document](#read-a-document)).
+- `json::visit` gives each token of the document to your closure, in order
+  ([Read the tokens](#read-the-tokens)).
+
+The reader checks each byte that it passes, also each byte that it skips. It allocates no memory,
+and no code recurses, so a deep document does not grow the stack.
 
 The writer writes compact JSON into a slice that you lend. It allocates no memory either.
 
@@ -124,9 +130,12 @@ fn audience<'a>(mut value: Value<'_, 'a, '_>, out: &mut Vec<Str<'a>>) -> Result<
 
 ## Read the tokens
 
-`Reader::token` gives each `Token` in order, and `None` after the end of the document. A `,`, a
-`:`, and whitespace are no tokens. This loop reads the version and the checksum of each line of a
-Cargo sparse-index file:
+`json::visit` reads the whole document and gives each `Token` to a closure, in order. A `,`, a `:`,
+and whitespace are no tokens. One loop reads the document, so this is the fastest way to read each
+token. `visit` gives `Ok` only for a valid document. An error of the closure stops the read, and
+`visit` gives that error.
+
+This closure keeps the version and the checksum of a line of a Cargo sparse-index file:
 
 ```rust
 use rscodec::json::{self, Limits, Profile, Slot, Token};
@@ -142,24 +151,27 @@ const INDEX_LINE: Limits = Limits {
 
 let line = br#"{"name":"rscodec","vers":"0.1.0","deps":[],"cksum":"0f1e","features":{},"yanked":false}"#;
 let mut scratch = [Slot::EMPTY; 32];
-let (vers, cksum) = json::read(line, &INDEX_LINE, Profile::Rfc8259, &mut scratch, #[inline(always)] |reader| {
-    let (mut vers, mut cksum, mut last_key) = (None, None, None);
-    while let Some(token) = reader.token()? {
-        match token {
-            Token::Key(key) => last_key = Some(key),
-            Token::Str(text) if last_key.is_some_and(|key| key == "vers") => vers = Some(text),
-            Token::Str(text) if last_key.is_some_and(|key| key == "cksum") => cksum = Some(text),
-            _ => {}
-        }
+let (mut vers, mut cksum, mut last_key) = (None, None, None);
+json::visit(line, &INDEX_LINE, Profile::Rfc8259, &mut scratch, #[inline(always)] |token| {
+    match token {
+        Token::Key(key) => last_key = Some(key),
+        Token::Str(text) if last_key.is_some_and(|key| key == "vers") => vers = Some(text),
+        Token::Str(text) if last_key.is_some_and(|key| key == "cksum") => cksum = Some(text),
+        _ => {}
     }
-    Ok((vers, cksum))
+    Ok(())
 })?;
 assert!(vers.is_some_and(|vers| vers == "0.1.0") && cksum.is_some_and(|cksum| cksum == "0f1e"));
 # Ok::<(), json::Error>(())
 ```
 
+Mark the closure `#[inline(always)]`. The loop calls it at each place that gives a token, and the
+compiler does not inline a large closure with more than one caller. A closure that the compiler does
+not inline still works, but slower, because the loop then keeps its state in memory.
+
 The keys of a nested object are also `Token::Key`. Keep a depth from the start and end tokens if
-your format can nest a key of the same name.
+your format can nest a key of the same name. For a typed decoder, `json::read` with the strict walk
+does that for you.
 
 ## Read numbers
 

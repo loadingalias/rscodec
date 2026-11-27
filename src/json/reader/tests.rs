@@ -12,7 +12,9 @@ use std::{
     vec::Vec,
 };
 
-use super::super::{Error, ErrorKind, Kind, Limit, Limits, Profile, Reader, Slot, Token, read_with, tests::kernels};
+use super::super::{
+    Backend, Error, ErrorKind, Kind, Limit, Limits, Profile, Reader, Slot, Token, read_with, tests::kernels, visit_with,
+};
 
 /// Limits that no test document reaches, unless a test sets one.
 const WIDE: Limits = Limits {
@@ -64,21 +66,13 @@ fn owned(token: Token<'_>) -> Owned {
     }
 }
 
-/// The result of `decode` on `input`, which each kernel must give.
-fn read_each<T: PartialEq + core::fmt::Debug>(
+/// The result of `run` with each kernel, on `input`, which each kernel must give.
+fn each_kernel<T: PartialEq + core::fmt::Debug>(
     input: &[u8],
-    limits: &Limits,
     profile: Profile,
-    slots: usize,
-    mut decode: impl FnMut(&mut Reader<'_, '_>) -> Result<T, Error>,
+    mut run: impl FnMut(Backend) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let mut scratch = vec![Slot::EMPTY; slots];
-    let mut results = kernels().into_iter().map(|kernel| {
-        (
-            kernel,
-            read_with(kernel, input, limits, profile, &mut scratch, &mut decode),
-        )
-    });
+    let mut results = kernels().into_iter().map(|kernel| (kernel, run(kernel)));
     let (_, first) = results.next().expect("each CPU runs the reference");
     for (kernel, result) in results {
         assert_eq!(
@@ -91,14 +85,30 @@ fn read_each<T: PartialEq + core::fmt::Debug>(
     first
 }
 
+/// The result of `decode` on `input`, which each kernel must give.
+fn read_each<T: PartialEq + core::fmt::Debug>(
+    input: &[u8],
+    limits: &Limits,
+    profile: Profile,
+    slots: usize,
+    mut decode: impl FnMut(&mut Reader<'_, '_>) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let mut scratch = vec![Slot::EMPTY; slots];
+    each_kernel(input, profile, |kernel| {
+        read_with(kernel, input, limits, profile, &mut scratch, &mut decode)
+    })
+}
+
 /// Each token of `input`, which each kernel must give.
 fn tokens(input: &[u8], limits: &Limits, profile: Profile, slots: usize) -> Result<Vec<Owned>, Error> {
-    read_each(input, limits, profile, slots, |reader| {
+    let mut scratch = vec![Slot::EMPTY; slots];
+    each_kernel(input, profile, |kernel| {
         let mut tokens = Vec::new();
-        while let Some(token) = reader.token()? {
+        visit_with(kernel, input, limits, profile, &mut scratch, |token| {
             tokens.push(owned(token));
-        }
-        Ok(tokens)
+            Ok(())
+        })
+        .map(|()| tokens)
     })
 }
 
@@ -727,16 +737,20 @@ fn a_duplicate_in_a_skipped_object_refuses_before_the_end_of_the_object() {
             Ok(())
         });
         assert_eq!(walk, expected, "{members} members");
-        let given = read_each(document.as_bytes(), &WIDE, Profile::Rfc8259, 64, |reader| {
+        let mut scratch = vec![Slot::EMPTY; 64];
+        let given = each_kernel(document.as_bytes(), Profile::Rfc8259, |kernel| {
             let mut ends = 0;
-            let result = loop {
-                match reader.token() {
-                    Ok(Some(Token::ObjectEnd)) => ends += 1,
-                    Ok(Some(_)) => {}
-                    Ok(None) => break Ok(()),
-                    Err(error) => break Err(error),
-                }
-            };
+            let result = visit_with(
+                kernel,
+                document.as_bytes(),
+                &WIDE,
+                Profile::Rfc8259,
+                &mut scratch,
+                |token| {
+                    ends += usize::from(token == Token::ObjectEnd);
+                    Ok(())
+                },
+            );
             assert_eq!(
                 ends, 0,
                 "{members} members: the error comes before the end of each object"

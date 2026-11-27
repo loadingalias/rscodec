@@ -1,5 +1,6 @@
-//! The pull reader: an iterative state machine on the block cursor. No code recurses. The scratch
-//! of the caller holds each open container and the keys of each open object.
+//! The reader on the block cursor: one push loop of the grammar, and the strict walk on it. No
+//! code recurses. The scratch of the caller holds each open container and the keys of each open
+//! object.
 
 #[cfg(test)]
 pub(super) mod tests;
@@ -16,7 +17,7 @@ use super::{
 /// object sorts its keys when it ends (selected on 2026-11-18).
 const LINEAR_KEYS_MAX: u32 = 16;
 
-/// A token of the input, which [`Reader::token`] gives. Each borrows the input.
+/// A token of the input, which [`visit`](super::visit) gives. Each borrows the input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Token<'a> {
     /// `{`.
@@ -82,11 +83,10 @@ enum Item {
     End,
 }
 
-/// The pull reader of one document, which [`read`](super::read) lends to its closure.
+/// The reader of one document, which [`read`](super::read) lends to its closure.
 ///
-/// [`Reader::token`] gives each token in order. [`Reader::value`] gives the next value, to read it
-/// with a type. Both check each rule of the profile on each byte that they pass, and each limit.
-/// After an error, each call gives that error.
+/// [`Reader::value`] gives the next value, to read it with a type. The walk checks each rule of the
+/// profile on each byte that it passes, and each limit. After an error, each call gives that error.
 #[derive(Debug)]
 pub struct Reader<'a, 's> {
     cursor: Cursor<'a>,
@@ -148,14 +148,10 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The next token, or `None` after the end of the document. A `,`, a `:`, and whitespace are no
-    /// tokens.
-    ///
-    /// # Errors
-    ///
-    /// The first refusal of the input, at its offset.
+    /// The next token, or `None` after the end of the document: one item of the walk. A `,`, a `:`,
+    /// and whitespace are no tokens.
     #[inline(always)]
-    pub fn token(&mut self) -> Result<Option<Token<'a>>, Error> {
+    fn token(&mut self) -> Result<Option<Token<'a>>, Error> {
         let token = match self.item()? {
             Item::Value(at, kind) => self.take(at, kind),
             Item::Key(at) => self.key(at).map(Token::Key),
@@ -171,11 +167,129 @@ impl<'a, 's> Reader<'a, 's> {
         Value(self)
     }
 
-    /// Reads each token to the end of the document.
+    /// Reads the document from its start and gives each token to `emit`.
+    #[inline(always)]
+    pub(super) fn visit(&mut self, emit: impl FnMut(Token<'a>) -> Result<(), Error>) -> Result<(), Error> {
+        self.run(emit)
+    }
+
+    /// Reads each token to the end of the document. It takes one item at a time, as the walk does:
+    /// a copy of the push loop at each place of the walk made the typed decoders 2 to 15% slower
+    /// (C223).
     #[inline(always)]
     pub(super) fn finish(&mut self) -> Result<(), Error> {
         while self.token()?.is_some() {}
         Ok(())
+    }
+
+    /// The push loop: it reads the document from its start and gives each token to `emit`. The
+    /// place in the code holds the state of the grammar, so the loop keeps no [`State`] (C223). Each
+    /// refusal of the input passes [`Reader::fail`], and an error of `emit` passes as it is.
+    #[inline(always)]
+    fn run(&mut self, mut emit: impl FnMut(Token<'a>) -> Result<(), Error>) -> Result<(), Error> {
+        let input = self.cursor.input();
+        macro_rules! refuse {
+            ($error:expr) => {
+                return Err(self.fail($error))
+            };
+        }
+        macro_rules! input {
+            ($result:expr) => {
+                match $result {
+                    Ok(value) => value,
+                    Err(error) => refuse!(error),
+                }
+            };
+        }
+        // The offset of the next token, which the cursor keeps. The input must not end there.
+        macro_rules! peek {
+            () => {
+                match self.cursor.peek() {
+                    Ok(Some(at)) => at,
+                    Ok(None) => refuse!(Error::new(ErrorKind::End, input.len())),
+                    Err(invalid) => refuse!(Error::new(ErrorKind::Utf8, invalid.offset)),
+                }
+            };
+        }
+        'value: loop {
+            // One match on the byte, and one call of `emit` for each kind of token, so the match
+            // of `emit` on the token goes at each call. The count of the element comes after the
+            // check of the byte, as in `Reader::take`.
+            let at = peek!();
+            match input[at] {
+                b'"' => {
+                    input!(self.element(at));
+                    emit(Token::Str(input!(self.string(at))))?;
+                }
+                b'-' | b'0'..=b'9' => {
+                    input!(self.element(at));
+                    emit(Token::Number(input!(self.number(at))))?;
+                }
+                b't' | b'f' => {
+                    input!(self.element(at));
+                    emit(Token::Bool(input!(self.literal(at))))?;
+                }
+                b'n' => {
+                    input!(self.element(at));
+                    input!(self.literal(at));
+                    emit(Token::Null)?;
+                }
+                b'[' => {
+                    input!(self.element(at));
+                    input!(self.open(at, Container::Array));
+                    emit(Token::ArrayStart)?;
+                    let first = peek!();
+                    if input[first] != b']' {
+                        continue 'value;
+                    }
+                    emit(input!(self.close()))?;
+                }
+                b'{' => {
+                    input!(self.element(at));
+                    input!(self.open(at, Container::Object));
+                    emit(Token::ObjectStart)?;
+                    let first = peek!();
+                    match input[first] {
+                        b'}' => emit(input!(self.close()))?,
+                        b'"' => {
+                            emit(Token::Key(input!(self.key(first))))?;
+                            continue 'value;
+                        }
+                        _ => refuse!(unexpected(input, first)),
+                    }
+                }
+                _ => refuse!(unexpected(input, at)),
+            }
+            // After a value.
+            loop {
+                let at = match self.cursor.peek() {
+                    Ok(Some(at)) => at,
+                    Ok(None) if self.frame.container == Container::Root => {
+                        self.state = State::Done;
+                        return Ok(());
+                    }
+                    Ok(None) => refuse!(Error::new(ErrorKind::End, input.len())),
+                    Err(invalid) => refuse!(Error::new(ErrorKind::Utf8, invalid.offset)),
+                };
+                match (self.frame.container, input[at]) {
+                    (Container::Array, b',') => {
+                        self.cursor.take();
+                        continue 'value;
+                    }
+                    (Container::Object, b',') => {
+                        self.cursor.take();
+                        let at = peek!();
+                        if input[at] != b'"' {
+                            refuse!(unexpected(input, at));
+                        }
+                        emit(Token::Key(input!(self.key(at))))?;
+                        continue 'value;
+                    }
+                    (Container::Array, b']') | (Container::Object, b'}') => emit(input!(self.close()))?,
+                    _ => refuse!(unexpected(input, at)),
+                }
+            }
+        }
     }
 
     /// Keeps `error` for each later call, and gives it. It inlines, as each method of the reader

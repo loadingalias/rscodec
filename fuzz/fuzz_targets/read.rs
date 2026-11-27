@@ -1,8 +1,8 @@
 //! The differential target of the JSON reader (C206). For each input, in each profile:
 //!
-//! 1. The read paths of rscodec agree: the token walk, the value walk, a walk that drops each odd
-//!    item, `Value::skip`, and `read` with a closure that reads nothing. Each gives the same result,
-//!    error, and offset, and both full walks give the same tree.
+//! 1. The read paths of rscodec agree: the tokens of `visit`, the value walk, a walk that drops
+//!    each odd item, `Value::skip`, and `read` with a closure that reads nothing. Each gives the same
+//!    result, error, and offset, and the tokens and the value walk give the same tree.
 //! 2. `IJson` refuses what `Rfc8259` refuses, and also each noncharacter and each number that
 //!    binary64 does not hold, at its offset.
 //! 3. The accessors of each number give the values of the parsers of `core`.
@@ -11,7 +11,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rscodec::json::{self, Error, ErrorKind, Kind, Limit, Limits, Number, NumberClass, Profile, Reader, Slot, Str, Token, Value};
+use rscodec::json::{self, Error, ErrorKind, Kind, Limit, Limits, Number, NumberClass, Profile, Slot, Str, Token, Value};
 
 /// serde_json refuses the 128th container. simdjson does not count an empty container, so it can
 /// accept a document that is deeper.
@@ -70,7 +70,7 @@ enum Walk {
 /// The document in `profile`, after a check that each read path gives the same result.
 fn read(input: &[u8], profile: Profile) -> Result<Tree<'_>, Error> {
     let mut scratch = vec![Slot::EMPTY; input.len() + 1];
-    let tokens = json::read(input, &LIMITS, profile, &mut scratch, |reader| token_tree(reader, input));
+    let tokens = token_tree(input, profile, &mut scratch);
     let values = json::read(input, &LIMITS, profile, &mut scratch, |reader| value_tree(reader.value(), input, Walk::Each));
     let even = json::read(input, &LIMITS, profile, &mut scratch, |reader| value_tree(reader.value(), input, Walk::Even));
     let skip = json::read(input, &LIMITS, profile, &mut scratch, |reader| reader.value().skip());
@@ -90,23 +90,23 @@ fn read(input: &[u8], profile: Profile) -> Result<Tree<'_>, Error> {
     tokens
 }
 
-fn token_tree<'a>(reader: &mut Reader<'a, '_>, input: &[u8]) -> Result<Tree<'a>, Error> {
+fn token_tree<'a>(input: &'a [u8], profile: Profile, scratch: &mut [Slot]) -> Result<Tree<'a>, Error> {
     // Each open container, with its key in its parent.
     let mut open: Vec<(Option<String>, Tree<'a>)> = Vec::new();
     let (mut key, mut root) = (None, None);
-    while let Some(token) = reader.token()? {
+    json::visit(input, &LIMITS, profile, scratch, |token| {
         let value = match token {
             Token::ObjectStart => {
                 open.push((key.take(), Tree::Object(Vec::new())));
-                continue;
+                return Ok(());
             }
             Token::ArrayStart => {
                 open.push((key.take(), Tree::Array(Vec::new())));
-                continue;
+                return Ok(());
             }
             Token::Key(name) => {
                 key = Some(text(name));
-                continue;
+                return Ok(());
             }
             Token::ObjectEnd | Token::ArrayEnd => {
                 let (name, tree) = open.pop().expect("an end has its start");
@@ -125,7 +125,8 @@ fn token_tree<'a>(reader: &mut Reader<'a, '_>, input: &[u8]) -> Result<Tree<'a>,
             Some((_, Tree::Object(members))) => members.push((key.take().expect("a member has a key"), value)),
             Some(_) => unreachable!("only containers are open"),
         }
-    }
+        Ok(())
+    })?;
     assert!(open.is_empty(), "the end of the document closes each container");
     Ok(root.expect("a document has a value"))
 }

@@ -1,17 +1,18 @@
-//! JSON ([RFC 8259]): a pull reader with two profiles, limits, and a strict walk for typed
-//! decoders, and a writer.
+//! JSON ([RFC 8259]): a reader with two profiles, limits, and a strict walk for typed decoders,
+//! and a writer.
 //!
-//! [`read`] reads one document from a slice in memory. It gives a [`Reader`] to its closure, and
-//! the closure reads the document with it:
+//! Each read takes one document from a slice in memory:
 //!
-//! - [`Reader::token`] gives each [`Token`] in order. Each string and number borrows the input.
-//! - [`Reader::value`] gives the next [`Value`], to read once with a type. [`Value::members`] and
-//!   [`Value::elements`] walk a container in a loop, and they skip what the loop does not read.
+//! - [`visit`] gives each [`Token`] of the document to its closure, in order. Each string and
+//!   number borrows the input.
+//! - [`read`] gives a [`Reader`] to its closure, for a typed decoder. [`Reader::value`] gives the
+//!   next [`Value`], to read once with a type. [`Value::members`] and [`Value::elements`] walk a
+//!   container in a loop, and they skip what the loop does not read.
 //!
 //! The reader checks each rule of its [`Profile`] and each of its [`Limits`] on each byte, also on
 //! each byte that it skips. [`read`] reads to the end of the document after the closure returns,
-//! so a document is valid exactly when `read` gives `Ok`. Each refusal is an [`Error`] with its
-//! cause and its offset, and the errors come in the order of their offsets.
+//! so a document is valid exactly when `read` or `visit` gives `Ok`. Each refusal is an [`Error`]
+//! with its cause and its offset, and the errors come in the order of their offsets.
 //!
 //! The reader allocates no memory. The caller lends a scratch of [`Slot`]s, which holds each open
 //! container and the keys of each open object for the duplicate check. A string with escapes
@@ -199,6 +200,47 @@ fn read_with<'a, T>(
     let value = decode(&mut reader)?;
     reader.finish()?;
     Ok(value)
+}
+
+/// Reads the document `input` and gives each token to `each`, in order. A `,`, a `:`, and
+/// whitespace are no tokens. It reads to the end of the document, so `Ok` means a valid document.
+///
+/// It selects the kernel of the CPU once. One loop reads the whole document, and the place in its
+/// code holds the state of the grammar. Mark the closure `#[inline(always)]`: the loop calls it at
+/// each place that gives a token, and the compiler does not inline a large closure with more than
+/// one caller. The state of the loop stays in registers only when the closure inlines.
+///
+/// # Errors
+///
+/// The first error of `each`, or the first refusal of the input. [`ErrorKind::Limit`] with
+/// [`Limit::InputBytes`] at offset `limits.input_bytes_max` if the input is longer.
+#[inline]
+pub fn visit<'a>(
+    input: &'a [u8],
+    limits: &Limits,
+    profile: Profile,
+    scratch: &mut [Slot],
+    each: impl FnMut(Token<'a>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    visit_with(Backend::chosen(), input, limits, profile, scratch, each)
+}
+
+/// [`visit`] on the kernel of `backend`. Its check of the length repeats the one of `read_with`: a
+/// helper that gave both the reader changed the machine code of each typed decoder (C223).
+#[inline(always)]
+fn visit_with<'a>(
+    backend: Backend,
+    input: &'a [u8],
+    limits: &Limits,
+    profile: Profile,
+    scratch: &mut [Slot],
+    each: impl FnMut(Token<'a>) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let input_bytes_max = limits.input_bytes_max as usize;
+    if input.len() > input_bytes_max {
+        return Err(Error::new(ErrorKind::Limit(Limit::InputBytes), input_bytes_max));
+    }
+    Reader::new(input, backend, *limits, profile, scratch).visit(each)
 }
 
 /// A kernel of the reader: its code that classifies one block, for one instruction set. The
