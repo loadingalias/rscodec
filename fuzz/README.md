@@ -8,9 +8,9 @@ does not take. It uses the toolchain of the repository and `cargo-fuzz`.
 
 For each input, in `Rfc8259` and in `IJson`, the target checks these contracts:
 
-1. Each read path of rscodec gives the same result, error, and offset: the token walk, the value
-   walk, a walk that skips each odd item, `Value::skip`, and `read` with a closure that reads
-   nothing. Both full walks give the same tree.
+1. Each read path of rscodec gives the same result, error, and offset: the tokens of `visit`, the
+   value walk, a walk that skips each odd item, `Value::skip`, and `read` with a closure that reads
+   nothing. The tokens and the value walk give the same tree.
 2. `IJson` refuses each input that `Rfc8259` refuses. It also refuses each noncharacter and each
    number that binary64 does not hold, at its offset.
 3. The accessors of each number give the values of the parsers of `core`.
