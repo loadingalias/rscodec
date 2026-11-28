@@ -178,12 +178,14 @@ jobs:
 
       # Wasmtime without SIMD refuses a binary that holds a SIMD instruction.
       # Thus a test binary that it compiles holds no simd128 kernel.
+      # Only test profiles count: both wasm builds write each example to one shared path.
       - name: Each simd128 test binary holds the simd128 kernels
         shell: bash
         run: |
           set -euo pipefail
           binaries=$(cargo xtask test --target wasm32-wasip1 --config "$SIMD128" -p rscodec \
-            --no-run --cargo-message-format json | grep -o '"executable":"[^"]*"' | cut -d'"' -f4)
+            --no-run --cargo-message-format json | grep '"profile":{[^}]*"test":true}' \
+            | grep -o '"executable":"[^"]*"' | cut -d'"' -f4)
           test -n "$binaries"
           for binary in $binaries; do
             if wasmtime compile -W simd=n,relaxed-simd=n -o /dev/null "$binary" 2> "$RUNNER_TEMP/refusal.txt"; then
