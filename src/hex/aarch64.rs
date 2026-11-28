@@ -16,7 +16,7 @@ use super::encode_steps;
 use crate::{
     ct::Class,
     simd::{SHORT_MAX, overlapping, short_blocks},
-    vector::aarch64::{load16, store16, table64},
+    vector::aarch64::{all_valid, load16, store_first, store16, table64},
 };
 
 /// The digit of each nibble.
@@ -91,11 +91,7 @@ pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
                 flag(flags, vuzp2q_u8(chars, chars)),
             );
             valid = vandq_u8(valid, vandq_u8(hi, lo));
-            let mut bytes = [0; 16];
-            store16::<0, _>(&mut bytes, vsliq_n_u8::<4>(lo, hi));
-            if let Some(low) = bytes.first_chunk() {
-                *dst = *low;
-            }
+            store_first(dst, vsliq_n_u8::<4>(lo, hi));
         });
     } else {
         short_blocks::<32, 16>(
@@ -110,7 +106,7 @@ pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
             },
         );
     }
-    vminvq_u8(valid) >= 0x80
+    all_valid(valid)
 }
 
 /// Decodes a long input in blocks of 128 characters, and gives the AND of the flags.

@@ -43,7 +43,7 @@ use core::fmt;
 use crate::{
     Dit,
     cpu::{self, Caps, Timing},
-    ct::{self, Class, Public, Secret},
+    ct::{Class, Public, Secret},
 };
 
 #[cfg(any(
@@ -362,7 +362,7 @@ impl Profile {
     #[inline(never)]
     fn refusal(self, class: impl Class, symbols: &[u8], out: &mut [u8]) -> Error {
         class.wipe(out);
-        let first = ct::first_negative(symbols.iter().map(|&byte| portable::sextet(self, byte)));
+        let first = portable::first_invalid(self, symbols);
         if first < symbols.len() {
             Error::new(ErrorKind::Symbol, first)
         } else {
@@ -821,7 +821,7 @@ impl Tables {
         while index < 80 {
             let sextet = portable::sextet(profile, b'+' + index);
             if sextet >= 0 {
-                sextets[index as usize] = 0x80 | ct::low(sextet);
+                sextets[index as usize] = 0x80 | crate::ct::low(sextet);
             }
             index += 1;
         }
@@ -835,7 +835,7 @@ impl Tables {
         while byte < 128 {
             let sextet = portable::sextet(profile, byte);
             if sextet >= 0 {
-                sextets[(byte / 64) as usize][(byte % 64) as usize] = ct::low(sextet);
+                sextets[(byte / 64) as usize][(byte % 64) as usize] = crate::ct::low(sextet);
             }
             byte += 1;
         }

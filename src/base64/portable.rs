@@ -89,9 +89,23 @@ impl Alphabet {
 }
 
 /// The sextet of `byte` in the alphabet of `profile`, or -1 for a byte outside it.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline]
 pub(super) const fn sextet(profile: Profile, byte: u8) -> i16 {
     Alphabet::of(profile).sextet(byte)
+}
+
+/// The first byte outside the alphabet, or the length. Only membership enters the count.
+pub(super) fn first_invalid(profile: Profile, symbols: &[u8]) -> usize {
+    let alphabet = Alphabet::of(profile);
+    crate::ct::first_negative(symbols.iter().map(|&byte| {
+        let valid = byte.is_ascii_uppercase()
+            | byte.is_ascii_lowercase()
+            | byte.is_ascii_digit()
+            | (byte == alphabet.c62)
+            | (byte == alphabet.c63);
+        -i16::from(!valid)
+    }))
 }
 
 /// The character of `value`, a sextet, in the alphabet of `profile`.

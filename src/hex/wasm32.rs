@@ -8,7 +8,7 @@ use super::encode_steps;
 use crate::{
     ct::Class,
     simd::{overlapping, short_blocks},
-    vector::wasm32::{load16, store16},
+    vector::wasm32::{load16, store_low, store16},
 };
 
 const DIGITS: [u8; 16] = *b"0123456789abcdef";
@@ -70,11 +70,7 @@ pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
         overlapping::<16, 8>(text, out, |src, dst| {
             let (chars, chars_valid) = nibbles(load16::<0, _>(src));
             valid = v128_and(valid, chars_valid);
-            let mut bytes = [0; 16];
-            store16::<0, _>(&mut bytes, evens(join(chars), join(chars)));
-            if let Some(low) = bytes.first_chunk() {
-                *dst = *low;
-            }
+            store_low(dst, evens(join(chars), join(chars)));
         });
     } else {
         short_blocks(class, text, out, 32, b'0', |len| len / 2, &mut block);

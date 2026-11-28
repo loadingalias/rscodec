@@ -56,12 +56,6 @@ const NO_DATA_X86: &str = "JMP CALL RET NOP ENDBR64 UD2 INT3 LFENCE";
 const NO_DATA_A64: &str = "b bl ret cbz cbnz tbz tbnz nop hint bti paciasp autiasp pacibsp autibsp adr adrp movz \
                            movn movk movi mvni brk udf sb dsb isb";
 
-/// The reductions of A64 across the lanes of a vector: the validity of a text, and the first bad
-/// offset of a refusal, which are results of the call.
-const REDUCTIONS: [&str; 9] = [
-    "umaxv", "uminv", "smaxv", "sminv", "addv", "uaddlv", "saddlv", "umaxp", "uminp",
-];
-
 /// The instructions that set the flags from their operands, and the instructions that read them.
 const SETS_FLAGS_X86: &str = "cmp test add sub and or xor adc sbb inc dec neg shl shr sar rol ror bt bts btr btc \
                               ptest vptest bsf bsr tzcnt lzcnt popcnt imul mul comiss comisd ucomiss ucomisd \
@@ -536,8 +530,6 @@ struct State {
     pushed: Vec<bool>,
     /// The register that holds the environment of a closure, whose general loads give pointers.
     environment: Option<String>,
-    /// The vector registers that a reduction across the lanes wrote last.
-    reduced: BTreeSet<String>,
 }
 
 impl State {
@@ -549,7 +541,6 @@ impl State {
         self.clean = self.clean.intersection(&other.clean).cloned().collect();
         self.flags |= other.flags;
         self.slots.extend(other.slots.iter().cloned());
-        self.reduced = self.reduced.intersection(&other.reduced).cloned().collect();
         let depth = self.pushed.len().min(other.pushed.len());
         self.pushed.truncate(depth);
         for (mine, theirs) in self.pushed.iter_mut().zip(&other.pushed) {
@@ -863,13 +854,7 @@ fn step(
             Isa::A64 => mnemonic.to_owned(),
         };
         if !listed(isa, &name_of, sve) {
-            let source = all.get(1).copied().unwrap_or_default();
-            let reduction = isa == Isa::A64
-                && mnemonic == "fmov"
-                && lanes(isa, source).is_some_and(|vector| state.reduced.contains(&vector));
-            if reduction {
-                findings.insert(format!("note: {name}: {mnemonic} {operands}, of a reduction"));
-            } else if from_data {
+            if from_data {
                 findings.insert(format!(
                     "{name}: {name_of} is not on the list and has a data operand ({mnemonic} {operands})"
                 ));
@@ -935,7 +920,6 @@ fn step(
         state.constant.clear();
         state.data.clear();
         state.clean.clear();
-        state.reduced.clear();
         state.flags = false;
         state.environment = None;
     }
@@ -967,12 +951,7 @@ fn step(
             if from_data {
                 state.clean.remove(&vector);
             } else {
-                state.clean.insert(vector.clone());
-            }
-            if REDUCTIONS.contains(&mnemonic) {
-                state.reduced.insert(vector);
-            } else {
-                state.reduced.remove(&vector);
+                state.clean.insert(vector);
             }
             continue;
         }
@@ -1181,4 +1160,25 @@ fn barriers(functions: &BTreeMap<String, Vec<Instruction>>, findings: &mut BTree
         }
     }
     sets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reduction_of_secret_bytes_keeps_its_data_operand() {
+        // The old hex decoder transferred all bits of the minimum before testing its high bit.
+        let listing = "0 <decode>:\n0: ldr q0, [x0]\n4: uminv b0, v0.16b\n8: fmov w8, s0\n\
+                       c: movi v1.16b, #0\n10: fmov w9, s1\n14: ret";
+        let functions = parse(Isa::A64, listing, &BTreeMap::new());
+        let mut findings = BTreeSet::new();
+        addresses(Isa::A64, "decode", &functions["decode"], true, &mut findings);
+        let data: Vec<_> = findings
+            .iter()
+            .filter(|finding| !finding.starts_with("note:"))
+            .collect();
+        assert_eq!(data.len(), 1);
+        assert!(data[0].contains("fmov w8, s0"));
+    }
 }

@@ -70,15 +70,19 @@ The harness `rscodec-ct` of the repository checks the compiled code of both clas
 the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C) and aarch64
 (Graviton4), and the build with `-C target-cpu=native` on aarch64.
 
-The path count, the scan, and the painted stack give their results at revision `1b483bc`. DudeCT
-gives its results at revision `28bdb86`, for the six secret operations of base64 and hex. It did
-not run on `base64url_secret`.
+The path count and painted stack below ran at revision `1b483bc`. DudeCT ran at `28bdb86` on the six
+secret operations of base64 and hex.
+
+At `7074899`, the Arm scan accepted a general `FMOV` after a vector reduction. The reduced byte still
+held secret bits for valid hex and base64. The corrected scan found six such sites in that code.
+The decoders now transfer the byte with `UMOV`, which Arm lists for DIT.
+The timing effect of the earlier instruction has no hardware measurement.
 
 | Check | Result |
 | --- | --- |
 | Path count: the counters of the instructions and the branches of each call, on each kernel of the CPU, at each length up to 200 bytes and at 13 longer lengths, with random and fixed inputs | One count for each length and outcome |
-| Scan of the disassembly: each function that a secret call can reach, also through a slot of the global offset table (GOT) | No load or store at an address from the data, no write of `PSTATE.DIT` in the secret code, each instruction that reads secret data on the DOIT or DIT list, and no call out of the binary other than `memset` |
-| Painted stack: each secret call on a private stack | No run of 8 secret bytes or 16 secret characters stays in the stack |
+| Scan of all functions reachable from each entry | Zero findings across 19 entries in each corrected Linux build. AArch64 used GNU and musl, each with default features and with `-C target-cpu=neoverse-v2`. The x86_64 musl build used default features. |
+| Painted stack: each secret call on a private stack | No run of 8 secret bytes or 16 secret characters stays in the stack. On a local Linux ARM64 VM, the corrected build also passed 2,256 secret calls. The public control found residue in 40 of 6,171 calls. |
 | DudeCT compares a fixed input with random inputs of the same length | All six secret operations passed at 16, 32, 64, and 4096 decoded bytes in the three builds above. |
 
 At 4096 decoded bytes, the harness generated and copied each input before timing. Each operation ran for 10,000,384 samples per build.

@@ -22,7 +22,7 @@ use super::encode_steps;
 use crate::{
     ct::Class,
     simd::{ends, overlapping, short_blocks},
-    vector::x86::{load_masked, load16, load32, load64, store_masked, store16, store32, store64},
+    vector::x86::{load_masked, load16, load32, load64, store_low, store_masked, store16, store32, store64},
 };
 
 /// The digit of each nibble.
@@ -33,17 +33,6 @@ const PAIR: i16 = 0x0110;
 
 /// The step from `c - '0'` to the nibble of a letter `a`–`f`.
 const LETTER_STEP: i8 = 39;
-
-/// The first 8 bytes of `value`, as 8 bytes of the output.
-#[inline(always)]
-#[target_feature(enable = "sse2")]
-fn store_low(dst: &mut [u8; 8], value: __m128i) {
-    let mut bytes = [0; 16];
-    store16::<0, _>(&mut bytes, value);
-    if let Some(low) = bytes.first_chunk() {
-        *dst = *low;
-    }
-}
 
 /// The short decode path: SSE2, which each x86_64 CPU has, for a short result. It runs inline in
 /// the caller, with no choice of kernel. SSE2 has no `pmaddubsw`, so shifts and `packuswb` join the

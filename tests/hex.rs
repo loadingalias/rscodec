@@ -181,6 +181,28 @@ fn each_backend_equals_the_portable_backend() {
     }
 }
 
+/// Each short vector store fits the caller's unaligned slice, including the last overlapping store.
+#[test]
+fn short_hex_stores_fit_an_unaligned_output_slice() {
+    #[repr(align(16))]
+    struct Buffer([u8; 17]);
+    let bytes = b"0123456789abcde";
+    let text = b"303132333435363738396162636465";
+    for call in calls() {
+        for len in 8..=bytes.len() {
+            let mut output = Buffer([0xff; 17]);
+            assert_eq!(
+                decode_into(call, &text[..2 * len], &mut output.0[1..=len]),
+                Ok(len),
+                "{call:?}"
+            );
+            assert_eq!(&output.0[1..=len], &bytes[..len]);
+            assert_eq!(output.0[0], 0xff);
+            assert!(output.0[len + 1..].iter().all(|&byte| byte == 0xff));
+        }
+    }
+}
+
 /// A short output slice refuses with the length of the result, and the decoder checks the length
 /// first.
 #[test]

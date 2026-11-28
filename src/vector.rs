@@ -39,6 +39,14 @@ pub(crate) mod x86 {
         unsafe { _mm_storeu_si128(dst.as_mut_ptr().add(AT).cast(), value) }
     }
 
+    /// Stores the low eight bytes directly in the output.
+    #[cfg(feature = "hex")]
+    #[inline]
+    pub(crate) fn store_low(dst: &mut [u8; 8], value: __m128i) {
+        // SAFETY: the unaligned store writes exactly the eight bytes of `dst`.
+        unsafe { core::arch::x86_64::_mm_storel_epi64(dst.as_mut_ptr().cast(), value) }
+    }
+
     /// The 32 bytes at `AT` in `src`.
     #[inline]
     #[target_feature(enable = "avx")]
@@ -124,8 +132,7 @@ pub(crate) mod x86 {
     }
 }
 
-/// The loads and stores of aarch64. Each takes an array and an offset in it, and a constant
-/// assertion proves that the access is in the array.
+/// The Neon validity check and memory operations. Each memory access stays inside its input or output.
 #[cfg(target_arch = "aarch64")]
 #[cfg_attr(
     not(any(feature = "base64", feature = "hex")),
@@ -133,7 +140,7 @@ pub(crate) mod x86 {
 )]
 #[expect(
     unsafe_code,
-    reason = "each load or store accesses only bytes of the reference that it takes"
+    reason = "each memory access stays in its reference, and the validity check uses only registers"
 )]
 #[expect(
     clippy::missing_safety_doc,
@@ -143,6 +150,25 @@ pub(crate) mod aarch64 {
     use core::arch::aarch64::{uint8x16_t, uint8x16x4_t, vld1q_u8, vld1q_u8_x4, vst1q_u8};
     #[cfg(feature = "base64")]
     use core::arch::aarch64::{uint8x16x3_t, vld3q_u8, vld4q_u8, vst3q_u8};
+
+    /// Tests bit 7 of every byte. The other bits of the minimum can still hold secret data.
+    #[cfg(any(feature = "base64", feature = "hex"))]
+    #[inline(always)]
+    #[target_feature(enable = "neon")]
+    pub(crate) fn all_valid(flags: uint8x16_t) -> bool {
+        let minimum: u32;
+        // SAFETY: these Neon instructions use only registers. UMOV transfers exactly one byte under DIT.
+        unsafe {
+            core::arch::asm!(
+                "uminv {flags:b}, {flags:v}.16b",
+                "umov {minimum:w}, {flags:v}.b[0]",
+                flags = inout(vreg) flags => _,
+                minimum = lateout(reg) minimum,
+                options(pure, nomem, nostack, preserves_flags),
+            );
+        }
+        minimum & 0x80 != 0
+    }
 
     /// The 16 bytes at `AT` in `src`.
     #[inline]
@@ -256,5 +282,13 @@ pub(crate) mod wasm32 {
         const { assert!(AT + 16 <= N) };
         // SAFETY: the bytes `AT..AT + 16` are in `dst`, and the store needs no alignment.
         unsafe { v128_store(dst.as_mut_ptr().add(AT).cast(), value) }
+    }
+
+    /// Stores the low eight bytes directly in the output.
+    #[cfg(feature = "hex")]
+    #[inline]
+    pub(crate) fn store_low(dst: &mut [u8; 8], value: v128) {
+        // SAFETY: the unaligned lane store writes exactly the eight bytes of `dst`.
+        unsafe { core::arch::wasm32::v128_store64_lane::<0>(value, dst.as_mut_ptr().cast()) }
     }
 }

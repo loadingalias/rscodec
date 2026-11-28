@@ -21,7 +21,7 @@ use super::{Profile, Tables, decode_steps, encode_steps};
 use crate::{
     ct::Class,
     simd::{SHORT_MAX, byte_at, from_end, short_blocks, to_end},
-    vector::aarch64::{load_quads, load_triples, load16, store_triples, store16, table64},
+    vector::aarch64::{all_valid, load_quads, load_triples, load16, store_triples, store16, table64},
 };
 
 /// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.
@@ -207,7 +207,7 @@ fn decode_long(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8])
         valid = vandq_u8(valid, decode_64(&lookups, src, dst));
     }
     let rest_valid = decode_16(class, profile, rest, rest_out);
-    (vminvq_u8(valid) >= 0x80) & rest_valid
+    all_valid(valid) & rest_valid
 }
 
 /// The 48 bytes of 64 characters, and the AND of their flags. Each `sli` keeps only bits of the
@@ -254,5 +254,5 @@ fn decode_16(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -
         let words = vsliq_n_u32::<12>(vshrq_n_u32::<16>(words), words);
         store16::<0, _>(dst, vqtbl1q_u8(vreinterpretq_u8_u32(words), order));
     });
-    (vminvq_u8(valid) >= 0x80) & (trailing == 0)
+    all_valid(valid) & (trailing == 0)
 }
