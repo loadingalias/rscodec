@@ -1233,6 +1233,35 @@ fn a_number_run_that_ends_at_each_offset_of_a_block_gives_the_tree_of_serde_json
     }
 }
 
+/// Both permanent fuzz seeds reach the number run at its first eligible length.
+/// The missing exponent digit refuses after the reader emits every preceding number.
+#[test]
+fn the_4096_byte_fuzz_seeds_reach_the_number_run() {
+    for (file, numbers, result) in [
+        ("number-run-valid.json", 988, Ok(())),
+        (
+            "number-run-incomplete-exponent.json",
+            987,
+            error(ErrorKind::Syntax, 4093),
+        ),
+    ] {
+        let input = fs::read(format!("tests/data/fuzz-seeds/{file}")).unwrap();
+        assert_eq!(input.len(), 4096);
+        assert!(super::numbers_dense(&input));
+        assert!(!super::numbers_dense(&input[..4095]));
+        for profile in PROFILES {
+            for kernel in kernels() {
+                let mut emitted = 0;
+                let end = visit_with(kernel, &input, &WIDE, profile, &mut [Slot::EMPTY; 2], |token| {
+                    emitted += usize::from(matches!(token, Token::Number(_)));
+                    Ok(())
+                });
+                assert_eq!((emitted, end), (numbers, result), "{file}, {profile:?}, {kernel:?}");
+            }
+        }
+    }
+}
+
 /// The classes of `benches/data/json`, one document for each line of a `.jsonl` file.
 fn generated_documents() -> Vec<(String, Vec<u8>)> {
     let mut documents = Vec::new();

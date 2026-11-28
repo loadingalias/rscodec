@@ -62,8 +62,16 @@ After fetching simdjson, run the four regression tests from the repository root.
 cargo test --locked --manifest-path fuzz/Cargo.toml --bin read
 ```
 
-The number-run regression uses a dense array longer than 4 KiB. For fixed-input replay, pass individual
-files to the built `read` binary. A directory starts a fuzz campaign.
+Replay the permanent number-run seeds from the repository root. Pass individual files to run each input once.
+
+```sh
+cargo build --release --locked --manifest-path fuzz/Cargo.toml --bin read
+./fuzz/target/release/read tests/data/fuzz-seeds/*.json
+```
+
+Both arrays are 4,096 bytes and select the dense number loop. The valid seed contains 988 numbers.
+The malformed seed has a space where the last exponent needs a digit. Both profiles report a syntax
+error at byte 4,093 after emitting 987 numbers.
 
 ## Run a campaign
 
@@ -80,7 +88,7 @@ Run each command in `fuzz/`.
 
    ```sh
    mkdir -p corpus/read
-   cp ../tests/data/fuzz/* ../tests/data/JSONTestSuite/test_parsing/*.json corpus/read/
+   cp ../tests/data/fuzz-seeds/*.json ../tests/data/fuzz/* ../tests/data/JSONTestSuite/test_parsing/*.json corpus/read/
    for file in ../benches/data/json/*/*.jsonl; do split -l 1 "$file" "corpus/read/$(basename "$file")-"; done
    cp ../benches/data/json/a*/*.json corpus/read/
    ```
