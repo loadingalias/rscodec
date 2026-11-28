@@ -1,8 +1,8 @@
-# Benchmark inputs
+# Benchmark Inputs
 
 Each directory in `json/` is one input class for the JSON benchmarks. Each JSON Lines record is one document.
 
-## Included inputs
+## Included Inputs
 
 Synthetic identifiers, keys, and accounts use fixed test values. The generated inputs use the repository's Apache-2.0 license.
 
@@ -16,7 +16,7 @@ Synthetic identifiers, keys, and accounts use fixed test values. The generated i
 | `b1-sparse-index` | 11 | 303–4,626 | Cargo registry index format. Each file holds 1–200 version records. |
 | `b2-rustc-diagnostics` | 1 | 42–3,853 | Clippy JSON Lines output from Rust 1.101.0-nightly (`3e92e1a2d`), including 200 diagnostics. |
 
-## Fetched files
+## Fetched Files
 
 The upstream corpora have no stated license. Fetch the pinned files before tests or JSON benchmarks.
 

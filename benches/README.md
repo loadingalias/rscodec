@@ -1,4 +1,4 @@
-# Run the benchmarks
+# Run the Benchmarks
 
 Run these commands from the repository root. The last argument selects the operation, library, and input.
 
@@ -26,7 +26,7 @@ It used 0.1 seconds of warm-up and 0.3 seconds of measurement per row. Published
 The CSV gives each library's mean, minimum, and maximum across the eight medians, in nanoseconds per operation.
 The rival had the lowest mean among eligible libraries. [All 308 comparisons](results/e03f296.csv) · [Results and hosts](../README.md#benchmarks)
 
-## Measured losses
+## Measured Losses
 
 | Owner | What the measurements show |
 | --- | --- |

@@ -1,4 +1,4 @@
-# Test data
+# Test Data
 
 The reader tests use unmodified JSONTestSuite and Kuhn UTF-8 fixtures. Their sources and licenses appear below.
 

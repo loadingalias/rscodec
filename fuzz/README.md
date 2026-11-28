@@ -1,4 +1,4 @@
-# Fuzz the JSON reader
+# Fuzz the JSON Reader
 
 The `read` target runs both JSON profiles. It compares token visits, typed reads, alternating skips,
 whole-value skips, and reads that leave validation to the reader.
@@ -7,14 +7,14 @@ It checks retained keys and values in order, number conversions, and the first e
 Two independent parsers check the RFC tree. serde_json sorts keys and drops earlier duplicates.
 The simdjson shim preserves every member in order. The harness checks each exception against the input.
 
-| Difference | Required evidence |
-| --- | --- |
-| Duplicate key | The error points to a repeated decoded key in the same object. |
-| Depth | Only simdjson can accept the empty 128th container when the harness limit is 127. |
-| Numeric overflow | Replace each verified overflow with zero, pad with spaces to preserve offsets, and compare the whole document again. |
-| UTF-8 byte order mark | Compare simdjson with the rscodec result after removing the mark. |
+| Difference            | Required evidence                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Duplicate key         | The error points to a repeated decoded key in the same object.                                                       |
+| Depth                 | Only simdjson can accept the empty 128th container when the harness limit is 127.                                    |
+| Numeric overflow      | Replace each verified overflow with zero, pad with spaces to preserve offsets, and compare the whole document again. |
+| UTF-8 byte order mark | Compare simdjson with the rscodec result after removing the mark.                                                    |
 
-## Build and replay
+## Build and Replay
 
 Fetch simdjson 5.2.0 and verify both files. Only the fuzz workspace builds its C++ shim.
 
@@ -38,7 +38,7 @@ cargo build --locked --release --manifest-path fuzz/Cargo.toml --bin read
 Both seeds are 4,096 bytes and enter the dense number loop. The valid seed emits 988 numbers.
 The malformed seed emits 987 numbers and returns `Syntax` at byte 4,093.
 
-## Run a campaign
+## Run a Campaign
 
 From `fuzz/`, build for the host you intend to test. This example selects Apple Silicon.
 The target uses the CPU's selected reader. The kernel differential tests also replay the saved corpus.
