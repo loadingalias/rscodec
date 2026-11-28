@@ -1,0 +1,29 @@
+--- a/ct/src/dudect.rs
++++ b/ct/src/dudect.rs
+@@ -249,4 +249,4 @@
+     println!("schedule {} seed={seed} warmups={warmups}", case.name);
+-    let mut time = |calls: usize, inputs: &[u8], ticks: &mut [u64; BATCH]| {
+-        for (input, slot) in inputs.chunks_exact(len).zip(ticks.iter_mut()) {
++    let mut time = |classes: &[usize; BATCH], calls: usize, inputs: &[u8], ticks: &mut [u64; BATCH]| {
++        for ((input, slot), &label) in inputs.chunks_exact(len).zip(ticks.iter_mut()).zip(classes) {
+             for _ in 0..warmups {
+@@ -255,3 +255,3 @@
+             let start = timer::ticks();
+-            for _ in 0..calls {
++            for _ in 0..(calls + usize::from(label == 0)) {
+                 black_box(case.call(dit, black_box(input), &mut out));
+@@ -263,3 +263,3 @@
+     let median = loop {
+-        time(calls, &inputs, &mut ticks);
++        time(&classes, calls, &inputs, &mut ticks);
+         let mut sorted = ticks;
+@@ -279,3 +279,3 @@
+     // The crops come from one batch of both classes, as in DudeCT.
+-    time(calls, &inputs, &mut ticks);
++    time(&classes, calls, &inputs, &mut ticks);
+     let mut sorted = ticks;
+@@ -299,3 +299,3 @@
+         fill_batch(&mut random, fixed, inputs.chunks_exact_mut(len), &mut classes, input)?;
+-        time(calls, &inputs, &mut ticks);
++        time(&classes, calls, &inputs, &mut ticks);
+         for (&class, &sample) in classes.iter().zip(&ticks) {

@@ -7,6 +7,8 @@
 //! - `dudect [samples] [random|zero|aa] [case] [bytes] [calls] [warm|unwarmed] [codec|buffers]`
 //!   compares input classes at one decoded length. The A/A control gives both classes random inputs.
 //!
+//! In a scratch checkout, apply `ct/dudect-extra-call.patch`. Then `dudect 100000 aa hex-encode-secret 4096` must report one timing difference.
+//!
 //! Exit codes are 0 for a pass, 1 for a finding, and 2 when the host cannot run the check.
 
 #![expect(
