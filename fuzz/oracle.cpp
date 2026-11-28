@@ -22,7 +22,7 @@ namespace {
 // container, so it accepts each document of that depth, and some documents that are deeper.
 constexpr size_t DEPTH_MAX = 128;
 
-std::string out;
+thread_local std::string out;
 
 void put_word(uint64_t word) {
   char bytes[8];
@@ -90,11 +90,10 @@ void walk(simdjson::dom::element element) {
 
 } // namespace
 
-// Reads `input`. Returns 0 and the tree in `*tree` and `*tree_len`, valid until the next call, or
-// the simdjson error code.
+// Returns the simdjson error code on failure. On success, the tree stays valid until the next call on this thread.
 extern "C" int simdjson_oracle(const uint8_t *input, size_t len, const uint8_t **tree, size_t *tree_len) {
-  static simdjson::dom::parser parser;
-  static bool ready = false;
+  static thread_local simdjson::dom::parser parser;
+  static thread_local bool ready = false;
   if (!ready) {
     if (parser.allocate(1 << 16, DEPTH_MAX) != simdjson::SUCCESS) {
       return -1;

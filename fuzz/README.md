@@ -10,9 +10,10 @@ For each input, in `Rfc8259` and in `IJson`, the target checks these contracts:
 
 1. Each read path of rscodec gives the same result, error, and offset: the tokens of `visit`, the
    value walk, a walk that skips each odd item, `Value::skip`, and `read` with a closure that reads
-   nothing. The tokens and the value walk give the same tree.
-2. `IJson` refuses each input that `Rfc8259` refuses. It also refuses each noncharacter and each
-   number that binary64 does not hold, at its offset.
+   nothing. The tokens and the value walk give the same tree. The alternating walk retains each key and
+   each even value in input order, including siblings after a skipped container.
+2. The RFC walk identifies the first number outside the IJson range. The target also checks strings for
+   noncharacters before any RFC error. The first refusal must match the IJson error kind and byte offset.
 3. The accessors of each number give the values of the parsers of `core`.
 4. serde_json and simdjson give the tree of `Rfc8259`. They differ only by the rules below.
 
@@ -34,6 +35,11 @@ serde_json keeps each object in a `BTreeMap`, so the target compares its objects
 of the members. simdjson keeps the order. Each trusted reader selects its own type for a number. The
 target compares the number in that type with the parser of `core` on the text that rscodec gives.
 
+A duplicate refusal must point to the first repeated decoded key in the same object.
+Only simdjson can accept a depth refusal, and the 128th container must be empty.
+If an oracle refuses an overflowing JSON number, the target replaces each verified overflow with zero.
+Spaces preserve byte offsets. The same oracle then checks the whole document, including its other values and syntax.
+
 ## Fetch simdjson
 
 `build.rs` builds simdjson with its shim `oracle.cpp`. Fetch the amalgamation of simdjson 5.2.0
@@ -47,6 +53,17 @@ for name in simdjson.h simdjson.cpp; do
 done
 sha256sum -c simdjson.sha256    # On macOS: shasum -a 256 -c simdjson.sha256
 ```
+
+## Check the comparisons
+
+After fetching simdjson, run the four regression tests from the repository root.
+
+```sh
+cargo test --locked --manifest-path fuzz/Cargo.toml --bin read
+```
+
+The number-run regression uses a dense array longer than 4 KiB. For fixed-input replay, pass individual
+files to the built `read` binary. A directory starts a fuzz campaign.
 
 ## Run a campaign
 
