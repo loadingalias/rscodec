@@ -1,10 +1,7 @@
-//! The scan of the build and the tail block against byte-by-byte references.
-
 extern crate std;
 
 use super::{BLOCK, escape, escapes, escapes_of_words, first, tail};
 
-/// The index of the first byte to escape, or 16 if the block has none.
 fn first_escape(block: &[u8; BLOCK]) -> usize {
     match escapes(block) {
         0 => BLOCK,
@@ -25,7 +22,6 @@ fn the_scan_finds_the_first_byte_to_escape_at_each_place_for_each_byte() {
             bytes[place] = byte;
             let expected = if needs_escape(byte) { place } else { BLOCK };
             assert_eq!(first_escape(&bytes), expected, "byte {byte:#04x} at {place}");
-            // A later escape does not hide an earlier one, and a byte that needs none hides no later one.
             for later in place + 1..BLOCK {
                 bytes[later] = 0x1f;
                 assert_eq!(first_escape(&bytes), if needs_escape(byte) { place } else { later });

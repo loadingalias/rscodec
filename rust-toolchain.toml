@@ -1,17 +1,7 @@
 [toolchain]
 channel = "nightly-2026-11-02"
 profile = "minimal"
-# Miri runs the tests of the unsafe code of each codec, for example a SIMD
-# backend, and finds undefined behavior in them, for example a read past the
-# end of a buffer.
 components = ["clippy", "rustfmt", "rust-analyzer", "rust-src", "miri"]
-# wasm32v1-none is a target with no `std`. `cargo xtask fix` and `check` lint
-# the crate without `std` on it, so each use of `std` outside its feature
-# fails. The portable backends build for wasm32-unknown-unknown, and their
-# tests run on wasm32-wasip1 through Wasmtime (.cargo/config.toml). With the
-# two Windows targets, `cargo xtask check --target <target>` lints the
-# workspace for Windows on any host; a link, and thus a test, needs a Windows
-# host.
 targets = [
     "wasm32v1-none",
     "wasm32-unknown-unknown",

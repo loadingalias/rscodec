@@ -12,22 +12,16 @@ use base64::Engine as _;
 use base64ct::Encoding as _;
 use common::Group;
 
-/// Runs `scope` in a scope of `rscodec::with_dit`. Each bench host can tell whether its CPU has
-/// DIT.
 fn secret<T>(scope: impl FnOnce(&rscodec::Dit) -> T) -> T {
     rscodec::with_dit(scope).expect("the bench host reports DIT")
 }
 use criterion::{Criterion, Throughput};
 use rscodec::{base64::Profile, hex};
 
-/// The raw sizes in bytes.
 const SIZES: [usize; 6] = [16, 32, 64, 256, 4096, 65536];
 
-/// The largest raw size that uses base64url without padding. A larger size uses padded standard
-/// base64, the form of bulk data.
 const URL_SIZE_MAX: usize = 4096;
 
-/// One raw input, its text in one alphabet, and the output of each row.
 struct Case {
     label: String,
     url: bool,
@@ -38,7 +32,6 @@ struct Case {
 
 impl Case {
     fn new(label: String, url: bool, raw: &[u8], text: &[u8]) -> Self {
-        // Each decoder may need room for the bytes of a full last quantum.
         let output = Aligned::new(&vec![0; text.len().max(raw.len() + 3)]);
         Self {
             label,
@@ -50,7 +43,6 @@ impl Case {
     }
 }
 
-/// Deterministic pseudo-random bytes (xorshift64*), so that each run reads the same inputs.
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ u64::try_from(len).expect("a length fits u64");
     (0..len)
@@ -94,7 +86,6 @@ fn hex_cases() -> Vec<Case> {
         .collect()
 }
 
-/// A row that encodes `case.raw` with `encode`, which returns the length of the text.
 fn encode_row(group: &mut Group<'_>, case: &mut Case, codec: &str, mut encode: impl FnMut(&[u8], &mut [u8]) -> usize) {
     let Case {
         label,
@@ -110,8 +101,6 @@ fn encode_row(group: &mut Group<'_>, case: &mut Case, codec: &str, mut encode: i
     timed_row(group, codec, label, raw, output, encode);
 }
 
-/// A row that decodes `case.text` with `decode`, which returns the length of the bytes, or `None`
-/// for an error.
 fn decode_row(
     group: &mut Group<'_>,
     case: &mut Case,
@@ -133,8 +122,6 @@ fn decode_row(
     timed_row(group, codec, label, text, output, decode);
 }
 
-/// Keep the input opaque and the output observable. Capturing the output slice keeps its address
-/// in a register. Passing it through the harness state added a load to each short call on Graviton4.
 #[expect(
     clippy::print_stdout,
     reason = "a benchmark binary reports the place of the buffers of each row on standard output, beside Criterion"
@@ -147,8 +134,6 @@ fn timed_row<T>(
     output: &mut [u8],
     mut operation: impl FnMut(&[u8], &mut [u8]) -> T,
 ) {
-    // The offsets of the input and the output in their 4 KiB pages. A load or a store across a
-    // page or a cache line costs more, so the offsets can explain a slow row.
     let page = |bytes: &[u8]| bytes.as_ptr().addr() % 4096;
     let (input_page, output_page) = (page(input), page(output));
     group.row(
@@ -164,13 +149,10 @@ fn timed_row<T>(
     );
 }
 
-/// The name of the row of `kernel`, for example `rscodec-avx2`.
 fn kernel_row(kernel: impl core::fmt::Debug) -> String {
     format!("rscodec-{kernel:?}").to_lowercase()
 }
 
-/// The engines of `base64`: `GeneralPurpose`, the row `base64-engine-gp`, and `Simd`, the row
-/// `base64-engine-simd`.
 fn base64_engines(url: bool) -> (base64::engine::GeneralPurpose, base64::engine::Simd) {
     use base64::engine::{Simd, general_purpose};
     if url {
@@ -446,7 +428,6 @@ fn hex_decode(criterion: &mut Criterion) {
     }
 }
 
-/// The base64 functions of simdutf, which take raw pointers, behind slice bounds.
 #[cfg(not(any(target_env = "msvc", target_family = "wasm")))]
 #[expect(
     unsafe_code,
@@ -464,7 +445,6 @@ mod simdutf_base64 {
     }
 
     pub(crate) fn encode(input: &[u8], output: &mut [u8], options: Base64Options) -> usize {
-        // The length of the text, without a second call into the library.
         let text_len = if options == Base64Options::Url {
             input.len().strict_mul(4).div_ceil(3)
         } else {
@@ -476,7 +456,6 @@ mod simdutf_base64 {
         unsafe { simdutf::binary_to_base64(input.as_ptr(), input.len(), output.as_mut_ptr(), options) }
     }
 
-    /// Strict decode: the last chunk of padded text must have its padding.
     pub(crate) fn decode(input: &[u8], output: &mut [u8], options: Base64Options) -> Option<usize> {
         let last_chunk = if options == Base64Options::Url {
             LastChunkHandlingOptions::Loose

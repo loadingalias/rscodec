@@ -1,6 +1,3 @@
-//! Strings: the borrowed string token, its unescape, and the checks of the escapes and of the
-//! noncharacters.
-
 use super::{Error, ErrorKind, block};
 
 /// A validated string or key that borrows the input. Equality compares decoded text,
@@ -8,7 +5,6 @@ use super::{Error, ErrorKind, block};
 #[derive(Clone, Copy, Debug)]
 pub struct Str<'a> {
     raw: &'a str,
-    /// The length after unescape.
     len: usize,
 }
 
@@ -18,7 +14,6 @@ impl<'a> Str<'a> {
         Self { raw, len }
     }
 
-    /// The string in the input, between its quotes.
     #[inline(always)]
     pub(super) const fn raw(&self) -> &'a str {
         self.raw
@@ -69,10 +64,6 @@ impl<'a> Str<'a> {
     }
 }
 
-/// [`Str::decode`] of the string `raw` with escapes, whose length after unescape is `len`. It does
-/// not inline, so the common string, which has no escape, costs one compare in the code of the
-/// caller. It takes plain values, not the `Str`: a reference across the call keeps each string token
-/// of the caller in memory.
 #[inline(never)]
 #[expect(
     unsafe_code,
@@ -85,12 +76,9 @@ fn decode_escaped<'b>(raw: &str, len: usize, buf: &'b mut [u8]) -> Result<&'b st
     loop {
         let text = run(rest, &mut out[written..]);
         written += text;
-        // After its run of text, `rest` ends, or it has a `\` that starts an escape.
         let Some(after) = rest.get(text + 1..) else {
             break;
         };
-        // `\u00` and two hex digits of a value under 0x80, the common escape of a control byte, is
-        // one ASCII byte.
         if let Some([b'u', b'0', b'0', first, second]) = after.first_chunk()
             && let Ok(value) = hex4(&[b'0', b'0', *first, *second])
             && let Ok(byte) = u8::try_from(value)
@@ -102,7 +90,6 @@ fn decode_escaped<'b>(raw: &str, len: usize, buf: &'b mut [u8]) -> Result<&'b st
             continue;
         }
         let (char, used) = unescape(after);
-        // Each escape but `\u` of a code point past 0x7f gives one ASCII byte.
         match u8::try_from(char) {
             Ok(byte) if byte.is_ascii() => {
                 out[written] = byte;
@@ -119,7 +106,6 @@ fn decode_escaped<'b>(raw: &str, len: usize, buf: &'b mut [u8]) -> Result<&'b st
 }
 
 impl PartialEq for Str<'_> {
-    /// Whether the strings are equal after unescape. It needs no buffer.
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self.borrowed(), other.borrowed()) {
@@ -132,7 +118,6 @@ impl PartialEq for Str<'_> {
 impl Eq for Str<'_> {}
 
 impl PartialEq<&str> for Str<'_> {
-    /// Whether the string equals `other` after unescape. It needs no buffer.
     #[inline]
     fn eq(&self, other: &&str) -> bool {
         match self.borrowed() {
@@ -142,10 +127,6 @@ impl PartialEq<&str> for Str<'_> {
     }
 }
 
-/// The index of the first `\` of the 8 bytes of `word` in little-endian order, if it has one: a
-/// byte of `word ^ 0x5c…` is zero exactly at a `\`, and the lowest bit of
-/// `(x - 0x01…) & !x & 0x80…` is in the first zero byte of `x`, because a borrow moves only up from
-/// a zero byte.
 #[inline(always)]
 fn backslash(word: u64) -> Option<usize> {
     const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
@@ -155,11 +136,6 @@ fn backslash(word: u64) -> Option<usize> {
     (zero != 0).then_some((zero.trailing_zeros() / 8) as usize)
 }
 
-/// Copies the text of `raw` before its first `\` to the start of `out`, and gives its length: the
-/// length of `raw` if it has no `\`. While both hold 8 more bytes, each word is one load and one
-/// store, with no call. A word can copy bytes after the `\` into `out`: the caller writes the
-/// escape and the text after it over them. The last run of fewer than 8 bytes also takes loads and
-/// stores of a fixed size, so it calls no `memcpy`.
 #[inline(always)]
 fn run(raw: &[u8], out: &mut [u8]) -> usize {
     let mut at = 0;
@@ -173,8 +149,6 @@ fn run(raw: &[u8], out: &mut [u8]) -> usize {
         }
         at += 8;
     }
-    // The run ends in the next 8 bytes: `out` holds the run, and `raw` holds it before its `\` or
-    // its end. `word` pads the bytes after `raw` with spaces, which are no `\`.
     let rest = &raw[at..];
     let bytes = rest.get(..8).unwrap_or(rest);
     let word = block::word(bytes);
@@ -183,8 +157,6 @@ fn run(raw: &[u8], out: &mut [u8]) -> usize {
     at + len
 }
 
-/// Writes the first bytes of `bytes` to each byte of `out`, at most 8, with stores of a fixed size:
-/// two of 4 bytes, which can overlap, or three of 1 byte.
 #[inline(always)]
 fn put(out: &mut [u8], bytes: [u8; 8]) {
     let len = out.len();
@@ -199,9 +171,6 @@ fn put(out: &mut [u8], bytes: [u8; 8]) {
     }
 }
 
-/// The UTF-8 bytes of the string `raw` between its quotes, after unescape. The reader checked the
-/// escapes of `raw`. UTF-8 keeps the order of the scalar values, so the order of these bytes is
-/// the order of the characters.
 pub(super) fn bytes(raw: &[u8]) -> impl Iterator<Item = u8> {
     let mut rest = raw;
     let mut char = [0; 4];
@@ -222,11 +191,8 @@ pub(super) fn bytes(raw: &[u8]) -> impl Iterator<Item = u8> {
     })
 }
 
-/// The character of the escape whose bytes after its `\` start `after`, and the number of these
-/// bytes. The reader checked the escape: a surrogate escape has its pair.
 #[inline]
 fn unescape(after: &[u8]) -> (char, usize) {
-    // `u32::MAX` is no scalar value, so an escape that the reader did not check fails the assertion.
     let (value, len) = match after.split_first() {
         Some((b'u', digits)) => match hex4(digits) {
             Ok(high @ 0xd800..0xdc00) => {
@@ -252,11 +218,8 @@ fn unescape(after: &[u8]) -> (char, usize) {
     (char, len)
 }
 
-/// The value of the 4 hex digits at the start of `digits`, or the index of the first byte that is
-/// not a hex digit, which can be the end of `digits`.
 #[inline]
 pub(super) fn hex4(digits: &[u8]) -> Result<u32, usize> {
-    /// The value of each hex digit, and 0x10 for each other byte.
     const VALUES: [u8; 256] = {
         let mut values = [0x10; 256];
         let mut byte = 0_u8;
@@ -291,8 +254,6 @@ pub(super) const fn noncharacter(value: u32) -> bool {
     matches!(value, 0xfdd0..=0xfdef) || value & 0xfffe == 0xfffe
 }
 
-/// The offset in `text` of the first noncharacter, if `text` has one. `text` is UTF-8 that starts
-/// at a character.
 #[inline]
 pub(super) fn first_noncharacter(text: &[u8]) -> Option<usize> {
     if text.is_ascii() {
@@ -306,11 +267,9 @@ pub(super) fn first_noncharacter(text: &[u8]) -> Option<usize> {
         (first == 0xef && second == 0xb7 && matches!(third, 0x90..=0xaf))
             || (second == 0xbf && matches!(third, 0xbe | 0xbf) && (first == 0xef || first & 0xcf == 0x8f))
     })?;
-    // A window that starts at a continuation byte starts at the second byte of its sequence.
     Some(if text[window] == 0xef { window } else { window - 1 })
 }
 
-/// The length in UTF-8 of the scalar value `value` of the Basic Multilingual Plane.
 #[inline]
 pub(super) const fn utf8_len(value: u32) -> usize {
     match value {

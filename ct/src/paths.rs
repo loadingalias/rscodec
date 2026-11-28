@@ -1,8 +1,3 @@
-//! The path count. A branch on the data, or an exit at the first bad block, changes the number of
-//! instructions or branches that a call runs. Thus each call runs under the CPU counters, in user
-//! mode, and each length and outcome must give one count over its inputs: random data, zeros, and
-//! ones, and for a refusal, a bad character at each kind of offset.
-
 use core::hint::black_box;
 
 use crate::{
@@ -11,26 +6,20 @@ use crate::{
     random::Random,
 };
 
-/// The lengths of the data in bytes: each length up to 200, which covers each short path and two
-/// blocks of each kernel with each tail, and the lengths around the larger blocks.
 const LENGTHS: [usize; 13] = [
     255, 256, 257, 511, 512, 1023, 1024, 4095, 4096, 4097, 65_535, 65_536, 65_537,
 ];
 
-/// The inputs of each length and outcome.
 const INPUTS: usize = 24;
 
 /// The counts of each input. The smallest count is the count of the call: an interrupt can only
 /// add to a count.
 const REPEATS: usize = 3;
 
-/// The counts of an input whose count differs, before the check reports it.
 const RECOUNTS: usize = 40;
 
-/// The seed of the inputs, fixed so that a run repeats.
 const SEED: u64 = 0xc103;
 
-/// Runs the path count on each case of this CPU, or on each case whose name starts with `args[0]`.
 pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     let counters = perf::Counters::open()?;
     let prefix = args.first().map_or("", String::as_str);
@@ -62,8 +51,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                         }
                     }
                     let Some(first) = inputs.first() else { continue };
-                    // The first call of a function chooses its kernel. A valid call fills its output, so
-                    // the count is of the whole work, and not of a refusal for the length of the output.
                     let written = black_box(case.call(dit, first, &mut out));
                     if outcome == Outcome::Valid && written != out.len() {
                         return Err(Failure::Check(format!(
@@ -83,7 +70,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                     distinct.sort_unstable();
                     distinct.dedup();
                     if distinct.len() > 1 {
-                        // Count each input again, many times, so that no interrupt stays in its least count.
                         for (input, slot) in inputs.iter().zip(&mut counts) {
                             *slot = count(input, &mut out, RECOUNTS)?;
                         }
@@ -120,7 +106,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     }
 }
 
-/// The least instructions and branches of `repeats` runs of `call`.
 fn least(counters: &perf::Counters, repeats: usize, mut call: impl FnMut() -> usize) -> Result<[u64; 2], Failure> {
     let mut least = [u64::MAX; 2];
     for _ in 0..repeats {
@@ -130,7 +115,6 @@ fn least(counters: &perf::Counters, repeats: usize, mut call: impl FnMut() -> us
     Ok(least)
 }
 
-/// The counters of instructions and branches of this thread in user mode, from `perf_event_open`.
 #[cfg(target_os = "linux")]
 #[expect(
     unsafe_code,
@@ -184,7 +168,6 @@ mod perf {
     const RESET: c_ulong = 0x2403;
     const GROUP: c_ulong = 1;
 
-    /// A group of two counters: instructions, then branches.
     #[derive(Debug)]
     pub(super) struct Counters {
         leader: OwnedFd,
@@ -192,7 +175,6 @@ mod perf {
     }
 
     impl Counters {
-        /// The counters of this thread.
         pub(super) fn open() -> Result<Self, Failure> {
             let leader = open(INSTRUCTIONS, -1, DISABLED)?;
             let member = open(BRANCHES, leader.as_raw_fd(), 0)?;
@@ -202,25 +184,35 @@ mod perf {
             })
         }
 
-        /// The instructions and the branches of `call` in user mode, with the constant work of the
-        /// two system calls around it.
         pub(super) fn count(&self, call: &mut impl FnMut() -> usize) -> Result<[u64; 2], Failure> {
             let fd = self.leader.as_raw_fd();
-            // SAFETY: `fd` is an open perf event, and these requests take an integer argument.
-            unsafe {
-                ioctl(fd, RESET, GROUP);
-                ioctl(fd, ENABLE, GROUP);
-            }
+            let control = |request, operation| {
+                // SAFETY: these perf group requests take an open event and an integer flag.
+                if unsafe { ioctl(fd, request, GROUP) } == -1 {
+                    return Err(Failure::Host(format!(
+                        "{operation} perf counters: {}",
+                        io::Error::last_os_error()
+                    )));
+                }
+                Ok(())
+            };
+            control(RESET, "reset")?;
+            control(ENABLE, "enable")?;
             black_box(call());
-            // SAFETY: as above.
-            unsafe { ioctl(fd, DISABLE, GROUP) };
+            control(DISABLE, "disable")?;
             let mut values = [0_u64; 3];
             // SAFETY: `values` is owned and has the size that the read may write.
             let read = unsafe { read(fd, values.as_mut_ptr().cast(), size_of_val(&values)) };
-            if usize::try_from(read).ok() != Some(size_of_val(&values)) || values[0] != 2 {
+            if read < 0 {
                 return Err(Failure::Host(format!(
                     "read of the counters: {}",
                     io::Error::last_os_error()
+                )));
+            }
+            if usize::try_from(read).ok() != Some(size_of_val(&values)) || values[0] != 2 {
+                return Err(Failure::Host(format!(
+                    "incomplete perf group: {read} bytes, {} counters",
+                    values[0]
                 )));
             }
             Ok([values[1], values[2]])
@@ -251,9 +243,26 @@ mod perf {
         // SAFETY: the system call gave a new descriptor that nothing else owns.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
+
+    #[cfg(test)]
+    mod tests {
+        use std::fs::File;
+
+        use super::{Counters, Failure};
+
+        #[test]
+        fn a_failed_reset_stops_before_the_measured_call() {
+            let fd = File::open("/dev/null").expect("Linux has /dev/null");
+            let counters = Counters {
+                _member: fd.try_clone().expect("duplicate the descriptor").into(),
+                leader: fd.into(),
+            };
+            let result = counters.count(&mut || panic!("the counters did not start"));
+            assert!(matches!(result, Err(Failure::Host(message)) if message.starts_with("reset perf counters:")));
+        }
+    }
 }
 
-/// No counters: only Linux has `perf_event_open`.
 #[cfg(not(target_os = "linux"))]
 mod perf {
     use crate::Failure;

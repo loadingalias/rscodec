@@ -1,15 +1,5 @@
-//! The x86_64 kernels: SSSE3, AVX2, AVX-512BW, and AVX-512 VBMI.
-//!
-//! The SSSE3, AVX2, and AVX-512BW kernels use the method of Muła and Lemire (2018): two nibble
-//! lookups with `pshufb` classify each character, and `pmaddubsw` and `pmaddwd` pack the bits. The
-//! VBMI kernels use the method of Muła and Lemire (2020), with `vpermb`, `vpermi2b`, and
-//! `vpmultishiftqb`. Each decoder ORs the classes of each block into one vector, and tests it once
-//! after the last block.
-
-#![expect(
-    clippy::missing_safety_doc,
-    reason = "each function is safe; only its target feature makes a call from code without the feature unsafe"
-)]
+//! The SSSE3, AVX2, and AVX-512BW kernels use the nibble lookups of Muła and Lemire (2018).
+//! The VBMI kernel uses their 2020 byte-permute method.
 
 use core::arch::x86_64::*;
 
@@ -20,11 +10,8 @@ use crate::{
     vector::x86::{lane, load_masked, load16, load32, load64, store_masked, store16, store32, store64},
 };
 
-/// The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane, for the encoder.
 const ENCODE_ORDER: [u8; 16] = [1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10];
 
-/// The three bytes of each 32-bit lane after the decoder packs it, first byte first. The last four
-/// lanes are zero.
 const DECODE_ORDER: [u8; 16] = [2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, 0x80, 0x80, 0x80, 0x80];
 
 /// The multipliers that pack four sextets into 24 bits: `pmaddubsw` gives `a << 6 | b` and
@@ -32,8 +19,6 @@ const DECODE_ORDER: [u8; 16] = [2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, 0x80, 0x
 const PAIRS: i32 = 0x0140_0140;
 const WORDS: i32 = 0x0001_1000;
 
-/// The masks and the multipliers that move the four sextets of `b1 b0 b2 b1` into the four bytes
-/// of the lane (Muła and Lemire, 2018).
 const HIGH_SEXTETS: i32 = 0x0fc0_fc00;
 const HIGH_SHIFTS: i32 = 0x0400_0040;
 const LOW_SEXTETS: i32 = 0x003f_03f0;
@@ -47,6 +32,8 @@ pub(super) mod ssse3 {
         WORDS, byte_at, decode_steps, encode_steps, from_end, load16, short_blocks, store16, to_end,
     };
 
+    /// # Safety
+    /// The CPU must support SSSE3.
     #[target_feature(enable = "ssse3")]
     pub(in super::super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
         let tables = &Tables::of(profile).nibbles;
@@ -69,14 +56,12 @@ pub(super) mod ssse3 {
                 _mm_set1_epi32(LOW_SHIFTS),
             );
             let sextets = _mm_or_si128(high, low);
-            // The class: 0 for a-z, 1 to 10 for 0-9, 11 and 12 for the last two, and 13 for A-Z.
             let class = _mm_or_si128(
                 _mm_subs_epu8(sextets, _mm_set1_epi8(51)),
                 _mm_and_si128(_mm_cmpgt_epi8(_mm_set1_epi8(26), sextets), _mm_set1_epi8(13)),
             );
             store16::<0, _>(dst, _mm_add_epi8(sextets, _mm_shuffle_epi8(shift, class)));
         };
-        // A slice pattern gives the last 16 bytes with no test of their address for null.
         match bytes.as_rchunks().1 {
             [.., last] => encode_steps(class, bytes, last, out, |first, len| to_end(first, len), block),
             [] => {
@@ -93,6 +78,8 @@ pub(super) mod ssse3 {
         }
     }
 
+    /// # Safety
+    /// The CPU must support SSSE3.
     #[target_feature(enable = "ssse3")]
     pub(in super::super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let tables = &Tables::of(profile).nibbles;
@@ -130,21 +117,21 @@ pub(super) mod avx2 {
         WORDS, load16, load32, ssse3, store32,
     };
 
-    /// A table of 16 bytes in each 128-bit lane.
     #[inline]
+    /// # Safety
+    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     fn each_lane(table: &[u8; 16]) -> __m256i {
         _mm256_broadcastsi128_si256(load16::<0, _>(table))
     }
 
+    /// # Safety
+    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     pub(in super::super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
         let shift = each_lane(&Tables::of(profile).nibbles.shift);
         let order = each_lane(&ENCODE_ORDER);
-        // The 12 bytes of each 128-bit lane: the 32-bit words 0 to 2 and 3 to 5.
         let spread = _mm256_setr_epi32(0, 1, 2, 2, 3, 4, 5, 5);
-        // Block `i` reads the bytes from `24 i` to `24 i + 32`. The blocks leave 16 to 39 bytes, for
-        // the kernel of 16-byte vectors.
         let blocks = bytes.len().saturating_sub(16) / 24;
         let windows = bytes.array_windows::<32>().step_by(24).zip(out.as_chunks_mut::<32>().0);
         for (src, dst) in windows.take(blocks) {
@@ -164,10 +151,11 @@ pub(super) mod avx2 {
             );
             store32::<0, _>(dst, _mm256_add_epi8(sextets, _mm256_shuffle_epi8(shift, class)));
         }
-        // The rest, in vectors of 16 bytes.
         ssse3::encode(class, profile, &bytes[24 * blocks..], &mut out[32 * blocks..]);
     }
 
+    /// # Safety
+    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     pub(in super::super) fn decode(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let tables = &Tables::of(profile).nibbles;
@@ -176,12 +164,9 @@ pub(super) mod avx2 {
         let special = _mm256_set1_epi8(tables.special.cast_signed());
         let special_index = _mm256_set1_epi8(tables.special_index.cast_signed());
         let order = each_lane(&DECODE_ORDER);
-        // The 12 bytes of each 128-bit lane, together.
         let pack = _mm256_setr_epi32(0, 1, 2, 4, 5, 6, 3, 7);
         let nibble = _mm256_set1_epi8(0x0f);
         let mut invalid = _mm256_setzero_si256();
-        // Block `i` writes 32 bytes from byte `24 i`. The blocks leave 16 to 47 characters, for the
-        // kernel of 16-byte vectors.
         let blocks = text.len().saturating_sub(16) / 32;
         for (src, at) in text.as_chunks::<32>().0.iter().zip((0..).step_by(24)).take(blocks) {
             let Some(dst) = out.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<32>) else {
@@ -203,15 +188,11 @@ pub(super) mod avx2 {
                 _mm256_permutevar8x32_epi32(_mm256_shuffle_epi8(words, order), pack),
             );
         }
-        // The rest, in vectors of 16 bytes.
         let rest_valid = ssse3::decode(class, profile, &text[32 * blocks..], &mut out[24 * blocks..]);
         (_mm256_movemask_epi8(_mm256_cmpeq_epi8(invalid, _mm256_setzero_si256())) == -1) & rest_valid
     }
 }
 
-/// The AVX-512BW kernels: the method of the AVX2 kernels on 64-byte vectors, with the shifts
-/// `vpsrlvw` and `vpsllvw` in place of the multiplies. They use only instructions of the DOIT list
-/// of Intel.
 pub(super) mod avx512bw {
     use core::arch::x86_64::*;
 
@@ -220,24 +201,24 @@ pub(super) mod avx512bw {
         encode_64, encode_rest, load16,
     };
 
-    /// A table of 16 bytes in each 128-bit lane.
     #[inline]
+    /// # Safety
+    /// The CPU must support AVX512BW.
     #[target_feature(enable = "avx512bw")]
     fn each_lane(table: &[u8; 16]) -> __m512i {
         _mm512_broadcast_i32x4(load16::<0, _>(table))
     }
 
-    /// The block of the encoder of `profile`: the 64 characters of the first 48 bytes of a vector.
     #[inline]
+    /// # Safety
+    /// The CPU must support AVX512BW.
     #[target_feature(enable = "avx512bw")]
     fn encoder(profile: Profile) -> impl FnMut(__m512i) -> __m512i {
         let shift = each_lane(&Tables::of(profile).nibbles.shift);
         let order = each_lane(&ENCODE_ORDER);
-        // The 12 bytes of each 128-bit lane: the 32-bit words 0 to 2, 3 to 5, 6 to 8, and 9 to 11.
         let spread = _mm512_setr_epi32(0, 1, 2, 2, 3, 4, 5, 5, 6, 7, 8, 8, 9, 10, 11, 11);
         move |src| {
             let input = _mm512_shuffle_epi8(_mm512_permutexvar_epi32(spread, src), order);
-            // The shifts of each 16-bit lane in place of the multiplies of the AVX2 kernel.
             let high = _mm512_srlv_epi16(
                 _mm512_and_si512(input, _mm512_set1_epi32(HIGH_SEXTETS)),
                 _mm512_set1_epi32(0x0006_000a),
@@ -257,9 +238,9 @@ pub(super) mod avx512bw {
         }
     }
 
-    /// The block of the decoder of `profile`: the 48 bytes of a vector of characters. It ORs the
-    /// classes of the characters into `invalid`, which is not zero for a byte outside the alphabet.
     #[inline]
+    /// # Safety
+    /// The CPU must support AVX512BW.
     #[target_feature(enable = "avx512bw")]
     fn decoder(profile: Profile, invalid: &mut __m512i) -> impl FnMut(__m512i) -> __m512i {
         let tables = &Tables::of(profile).nibbles;
@@ -268,7 +249,6 @@ pub(super) mod avx512bw {
         let special = _mm512_set1_epi8(tables.special.cast_signed());
         let special_index = _mm512_set1_epi8(tables.special_index.cast_signed());
         let order = each_lane(&DECODE_ORDER);
-        // The 12 bytes of each 128-bit lane, together.
         let pack = _mm512_setr_epi32(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 3, 7, 11, 15);
         let nibble = _mm512_set1_epi8(0x0f);
         move |src| {
@@ -289,22 +269,25 @@ pub(super) mod avx512bw {
         }
     }
 
-    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
     #[cfg_attr(target_feature = "avx512bw", inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW.
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
         encode_64(bytes, out, encoder(profile));
     }
 
-    /// Encodes at most `ONE_MAX` bytes, with no loop.
     #[cfg_attr(target_feature = "avx512bw", inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW.
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn encode_one(profile: Profile, bytes: &[u8], out: &mut [u8]) {
         encode_rest(bytes, out, encoder(profile));
     }
 
-    // A build with the feature fixes the kernel, and then the kernel runs inline in the caller.
     #[cfg_attr(target_feature = "avx512bw", inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW.
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
@@ -312,8 +295,9 @@ pub(super) mod avx512bw {
         (_mm512_test_epi8_mask(invalid, invalid) == 0) & trailing
     }
 
-    /// Decodes a text of at most `ONE_MAX` bytes of result, with no loop.
     #[cfg_attr(target_feature = "avx512bw", inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW.
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn decode_one(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
@@ -322,18 +306,17 @@ pub(super) mod avx512bw {
     }
 }
 
-/// The AVX-512 VBMI kernels: byte permutes in place of the nibble lookups and the shuffles.
 pub(super) mod avx512vbmi {
     use core::arch::x86_64::*;
 
     use super::{PAIRS, Profile, Tables, WORDS, decode_64, decode_rest, encode_64, encode_rest, load64};
 
-    /// The block of the encoder of `profile`: the 64 characters of the first 48 bytes of a vector.
     #[inline]
+    /// # Safety
+    /// The CPU must support AVX512BW, AVX512VBMI.
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     fn encoder(profile: Profile) -> impl FnMut(__m512i) -> __m512i {
         let alphabet = load64::<0, _>(&Tables::of(profile).alphabet);
-        // The bytes `b1 b0 b2 b1` of each three input bytes, in each 32-bit lane.
         let order = _mm512_setr_epi32(
             0x0102_0001,
             0x0405_0304,
@@ -352,7 +335,6 @@ pub(super) mod avx512vbmi {
             0x2b2c_2a2b,
             0x2e2f_2d2e,
         );
-        // The bit offset of each sextet in each 64-bit lane.
         let shifts = _mm512_set1_epi64(0x3036_242a_1016_040a);
         move |src| {
             let sextets = _mm512_multishift_epi64_epi8(shifts, _mm512_permutexvar_epi8(order, src));
@@ -360,14 +342,13 @@ pub(super) mod avx512vbmi {
         }
     }
 
-    /// The block of the decoder of `profile`: the 48 bytes of a vector of characters. It ORs each
-    /// character and its sextet into `invalid`: bit 7 is set for a byte outside the alphabet.
     #[inline]
+    /// # Safety
+    /// The CPU must support AVX512BW, AVX512VBMI.
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     fn decoder(profile: Profile, invalid: &mut __m512i) -> impl FnMut(__m512i) -> __m512i {
         let [low, high] = &Tables::of(profile).sextets;
         let (low, high) = (load64::<0, _>(low), load64::<0, _>(high));
-        // The three bytes of each 32-bit lane, first byte first, together.
         let pack = _mm512_setr_epi32(
             0x0600_0102,
             0x090a_0405,
@@ -397,22 +378,25 @@ pub(super) mod avx512vbmi {
         }
     }
 
-    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
     #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW, AVX512VBMI.
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn encode(profile: Profile, bytes: &[u8], out: &mut [u8]) {
         encode_64(bytes, out, encoder(profile));
     }
 
-    /// Encodes at most `ONE_MAX` bytes, with no loop.
     #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW, AVX512VBMI.
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn encode_one(profile: Profile, bytes: &[u8], out: &mut [u8]) {
         encode_rest(bytes, out, encoder(profile));
     }
 
-    // A build with the features fixes the kernel, and then the kernel runs inline in the caller.
     #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW, AVX512VBMI.
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn decode(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
@@ -420,8 +404,9 @@ pub(super) mod avx512vbmi {
         (_mm512_movepi8_mask(invalid) == 0) & trailing
     }
 
-    /// Decodes a text of at most `ONE_MAX` bytes of result, with no loop.
     #[cfg_attr(all(target_feature = "avx512bw", target_feature = "avx512vbmi"), inline)]
+    /// # Safety
+    /// The CPU must support AVX512BW, AVX512VBMI.
     #[target_feature(enable = "avx512bw,avx512vbmi")]
     pub(in super::super) fn decode_one(profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         let mut invalid = _mm512_setzero_si512();
@@ -430,17 +415,12 @@ pub(super) mod avx512vbmi {
     }
 }
 
-/// Encodes in blocks of 48 bytes with `block`, which gives the 64 characters of the first 48
-/// bytes of a vector. A full load reads each block whose 64 bytes are in the input, two blocks in
-/// each step of the loop, so `vpermb` can take the load. A masked load of 48 lanes, with a constant
-/// mask, reads a last block that has fewer than 64 bytes, and masked accesses the rest.
 #[inline]
+/// # Safety
+/// The CPU must support AVX512BW.
 #[target_feature(enable = "avx512bw")]
 fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
     let zero = _mm512_setzero_si512();
-    // Step `i` reads the bytes from `96 i` to `96 i + 112`. `out` has 64 characters for each 48
-    // bytes, so a shift of its length counts the whole blocks, with no division. The last
-    // whole block reads a full vector only if 16 bytes follow it.
     let whole = out.len() >> 6;
     let steps = whole.saturating_sub(usize::from((out.len() & 63) * 3 / 4 < 16)) >> 1;
     let windows = bytes
@@ -467,21 +447,19 @@ fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m
     }
 }
 
-/// The most bytes of one block of 48 bytes: the entries of one block take at most 64 characters.
 pub(super) const ONE_MAX: usize = 48;
 
-/// Encodes at most `ONE_MAX` bytes in one block with `block`, with masked loads and stores.
 #[inline]
+/// # Safety
+/// The CPU must support AVX512BW.
 #[target_feature(enable = "avx512bw")]
 fn encode_rest(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
     store_masked(out, block(load_masked(bytes, _mm512_setzero_si512())));
 }
 
-/// Decodes a text of at most `ONE_MAX` bytes of result in one block with `block`, with masked
-/// loads and stores. 'A', which is zero, is in place of the characters after the end. Gives whether
-/// the trailing bits are zero: they are in the byte after the result. Only a last group of 2 or 3
-/// characters has them, and then that byte is in the first 48 lanes, the bytes of the block.
 #[inline]
+/// # Safety
+/// The CPU must support AVX512BW.
 #[target_feature(enable = "avx512bw")]
 fn decode_rest(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) -> bool {
     let bytes = block(load_masked(text, _mm512_set1_epi8(b'A'.cast_signed())));
@@ -490,16 +468,11 @@ fn decode_rest(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __
     _mm512_mask_test_epi8_mask(after, bytes, bytes) == 0
 }
 
-/// Decodes in blocks of 64 characters with `block`, which gives the 48 bytes of a vector of
-/// characters. Each step of the loop runs four blocks, and three full stores write their 192 bytes:
-/// two-source permutes of 64-bit words join the blocks. A masked store of 48 lanes, with a constant
-/// mask, writes each of the last blocks, so the loops have no branch on the place of a block.
-/// Gives whether the trailing bits are zero.
 #[inline]
+/// # Safety
+/// The CPU must support AVX512BW.
 #[target_feature(enable = "avx512bw")]
 fn decode_64(text: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) -> bool {
-    // The six words of each block in turn: words 0 to 7 of the first source, then 8 to 15 of the
-    // second.
     let first = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 8, 9);
     let second = _mm512_setr_epi64(2, 3, 4, 5, 8, 9, 10, 11);
     let third = _mm512_setr_epi64(4, 5, 8, 9, 10, 11, 12, 13);

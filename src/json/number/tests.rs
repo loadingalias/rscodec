@@ -1,14 +1,9 @@
-//! The contracts of the number accessors. The expected results come from the grammar of RFC 8259
-//! section 6, from the parsers of `core`, from the text, and from Nigel Tao's data, not from the
-//! accessors.
-
 extern crate std;
 
 use std::{format, fs, string::String, vec::Vec};
 
 use super::super::{Decimal, Error, ErrorKind, Limits, Number, NumberClass, Profile, Slot, read};
 
-/// Limits that no test number reaches.
 const LIMITS: Limits = Limits {
     input_bytes_max: u32::MAX,
     depth_max: 1,
@@ -18,7 +13,6 @@ const LIMITS: Limits = Limits {
     number_digits_max: u16::MAX,
 };
 
-/// What the accessors give for one number. `f64` holds the bits of the value.
 #[derive(Debug, PartialEq)]
 struct Values {
     class: NumberClass,
@@ -28,11 +22,6 @@ struct Values {
     f64: Result<u64, Error>,
 }
 
-/// The values of the accessors for the document `text`, or `None` if the reader refuses it.
-///
-/// The scan reads a number in the last 48 bytes of the input on its exact path, and each other
-/// number on its common path if it can. Thus each text also reads with 48 spaces after it, and the
-/// two reads must agree.
 fn values(text: &str) -> Option<Values> {
     let read_values = |document: &[u8]| {
         let mut scratch = [Slot::EMPTY; 1];
@@ -78,8 +67,6 @@ fn grammar(text: &str) -> Option<(&str, Option<&str>, Option<&str>)> {
         .then_some((integer, fraction, exponent))
 }
 
-/// The values of `text`, a number at offset 0, from the grammar, from the parsers of `core`, and
-/// from the digits of the text.
 fn oracle(text: &str) -> Option<Values> {
     let (integer, fraction, exponent) = grammar(text)?;
     let refused = |kind| Error::new(kind, 0);
@@ -127,10 +114,6 @@ fn oracle(text: &str) -> Option<Values> {
     })
 }
 
-/// Each string of up to 7 bytes over `0`, `1`, `9`, `-`, `+`, `.`, `e`, `E`, and `x`, a byte
-/// outside the grammar, is a number exactly when the grammar of RFC 8259 section 6 accepts it.
-/// Then each accessor gives the value of the oracle. The bound holds `-0.0e+0`, which uses each
-/// rule of the grammar.
 #[test]
 fn each_short_string_is_a_number_exactly_when_the_grammar_accepts_it() {
     const ALPHABET: &[u8; 9] = b"019-+.eEx";
@@ -148,8 +131,6 @@ fn each_short_string_is_a_number_exactly_when_the_grammar_accepts_it() {
     }
 }
 
-/// Each line of Nigel Tao's data: a string that the grammar accepts reads as the binary64 value of
-/// its line, or as the range error if that value is an infinity. Each other string refuses.
 #[test]
 fn each_number_of_nigel_taos_data_reads_its_binary64_value() {
     const FILES: [&str; 14] = [
@@ -173,7 +154,6 @@ fn each_number_of_nigel_taos_data_reads_its_binary64_value() {
         let data = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("{path}: {error}; tests/data/README.md fetches it"));
         for line in data.lines() {
-            // Each line has the bits of the f16, f32, and f64 values, and then the string.
             let fields: Vec<_> = line.splitn(4, ' ').collect();
             let [_, _, bits, text] = fields[..] else {
                 panic!("{path}: the line {line:?} has 4 fields");
@@ -191,13 +171,10 @@ fn each_number_of_nigel_taos_data_reads_its_binary64_value() {
     }
 }
 
-/// A fixed-seed sample of finite `f64` values reads back from three forms of each: the shortest,
-/// the exponent form, and 31 significant digits, which take the path of more than 19 digits.
 #[test]
 fn each_value_of_a_fixed_seed_sample_reads_back_from_each_form() {
     let mut state = 0x5eed_0004_u64;
     for _ in 0..1 << 18 {
-        // xorshift64*: a fixed seed gives the same values on each run.
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
@@ -212,7 +189,6 @@ fn each_value_of_a_fixed_seed_sample_reads_back_from_each_form() {
     }
 }
 
-/// The value of `accessor` on the number `text` in an array, at offset 1.
 fn at_one<T>(text: &str, accessor: impl FnOnce(Number<'_>) -> Result<T, Error>) -> Result<T, Error> {
     let mut scratch = [Slot::EMPTY; 1];
     let document = format!("[{text}]");
@@ -223,8 +199,6 @@ fn at_one<T>(text: &str, accessor: impl FnOnce(Number<'_>) -> Result<T, Error>) 
     })
 }
 
-/// Each accessor reads the values at its limits. It refuses each value past them with its typed
-/// error at the offset of the number, so `?` in the closure of `read` gives that error.
 #[test]
 fn each_accessor_reads_to_its_limits_and_refuses_past_them() {
     let range = Error::new(ErrorKind::Range, 1);
@@ -280,8 +254,6 @@ fn each_accessor_reads_to_its_limits_and_refuses_past_them() {
     let bits = |value: f64| Ok(value.to_bits());
     for (text, expected) in [
         ("1.7976931348623157e308", bits(f64::MAX)),
-        // The halfway point to 2^1024 is 1.797693134862315807…e308. A value at it or above it
-        // rounds to infinity, because the significand of `f64::MAX` is odd.
         ("1.7976931348623158e308", bits(f64::MAX)),
         ("1.7976931348623159e308", Err(range)),
         ("-1.7976931348623159e308", Err(range)),
@@ -291,7 +263,6 @@ fn each_accessor_reads_to_its_limits_and_refuses_past_them() {
         ("-1e-400", bits(-0.0)),
         ("-0", bits(-0.0)),
         ("0e99999999999999999999", bits(0.0)),
-        // Half of the least subnormal value is 2.4703282292062327208…e-324.
         ("2.4703282292062327e-324", bits(0.0)),
         ("2.4703282292062328e-324", bits(5e-324)),
         ("2.2250738585072014e-308", bits(f64::MIN_POSITIVE)),

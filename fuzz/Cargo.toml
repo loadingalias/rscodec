@@ -1,4 +1,3 @@
-# Keep libFuzzer and its compiler flags outside the library workspace.
 [package]
 name = "rscodec-fuzz"
 version = "0.0.0"
@@ -15,7 +14,6 @@ rscodec = { path = "..", features = ["json"] }
 # Compare correctly rounded floats and check overflow syntax before converting the number.
 serde_json = { version = "=1.0.154", features = ["float_roundtrip", "raw_value"] }
 
-# build.rs builds simdjson, the second trusted reader, with its shim `oracle.cpp`.
 [build-dependencies]
 cc = "=1.11.1"
 
@@ -27,7 +25,6 @@ bench = false
 
 [workspace]
 
-# Integer overflow is a defect in every profile, also in the fuzz build.
 [profile.release]
 debug = 1
 overflow-checks = true

@@ -1,33 +1,17 @@
-//! Print the shortest decimal that reads back to the input binary64 value, in Rust's debug format.
-//!
-//! The printer follows zmij (Zverovich, 2025) and Schubfach (Giulietti). Adjacent binary64 values
-//! set the rounding interval. One 128-bit power of ten scales the input so the interval can contain
-//! at most one integer. If it contains one, those digits suffice. Otherwise the next digit selects
-//! the nearest decimal at the finer scale.
-//!
-//! [`scale`] uses a 192-bit product and significand parity to decide interval endpoints.
-//! The 17th digit uses zmij's bias for the rounded-down table. An exact last-digit tie rounds up
-//! to match `core::fmt`. zmij rounds that tie down.
-//!
-//! [`read`] converts a decimal significand of up to 64 bits with Cox's unrounded scaling
-//! (“Floating-Point Printing and Parsing Can Be Simple And Fast”, 2026, and “Fast Unrounded Scaling: Proof by Ivy”, Theorem 1).
+//! The printer uses zmij (Zverovich, 2025) and Schubfach (Giulietti). Exact last-digit ties round up for Rust debug format.
+//! The reader uses Cox’s unrounded scaling (“Floating-Point Printing and Parsing Can Be Simple And Fast”, 2026).
 
 #[cfg(test)]
 mod tests;
 
-/// The most bytes of the form of an `f64`: `-2.2250738585072014e-308`.
 pub(super) const BYTES_MAX: usize = 24;
 
-/// The bytes that [`write`] can store, more than it keeps: it stores whole 8-byte words, the last
-/// one from byte 29 at most.
 pub(super) const SPAN: usize = 32;
 
 /// Half a unit of `2^−64`, and the bias of zmij for the 17th digit of a regular value: the fraction
 /// of [`scale`] is below its exact value by less than 1.1 units, so ten times it by less than 11.
 const BIASED_HALF: u64 = (1 << 63) + 6;
 
-/// The least and the greatest `n` of the table of `10^n`: `n = −k − 1` for the `k` of each finite
-/// binary64 value.
 const POW10_MIN: i32 = -293;
 const POW10_MAX: i32 = 324;
 
@@ -35,8 +19,6 @@ const POW10_MAX: i32 = 324;
 /// the low 64 bits of `⌊10^n × 2^(127 − ⌊n × log2 10⌋)⌋`.
 static POW10: [(u64, u64); 618] = pow10_table(POW10_MIN, POW10_MAX, Rounding::Down);
 
-/// The least and the greatest power of 10 of the table of [`read`]. Each `u64` of digits rounds to
-/// zero below it, and each nonzero one rounds to infinity above it.
 const POW10_UP_MIN: i32 = -343;
 const POW10_UP_MAX: i32 = 308;
 
@@ -45,17 +27,13 @@ const POW10_UP_MAX: i32 = 308;
 /// the high word is rounded up.
 static POW10_UP: [(u64, u64); 652] = pow10_table(POW10_UP_MIN, POW10_UP_MAX, Rounding::Up);
 
-/// The rounding of the 128-bit significands of a table of powers of 10.
 #[derive(Clone, Copy)]
 enum Rounding {
-    /// The floor, as the high and the low word.
     Down,
     /// The ceiling, as `(hi, lo)` with the value `hi × 2^64 − lo`.
     Up,
 }
 
-/// A finite nonzero value without its sign: `c × 2^q`. `irregular` marks a power of two above
-/// the subnormals, whose lower neighbor is half as far as its upper neighbor.
 #[derive(Clone, Copy, Debug)]
 struct Binary {
     c: u64,
@@ -63,8 +41,6 @@ struct Binary {
     irregular: bool,
 }
 
-/// A decimal value `(digits × 10 + extra) × 10^exponent`: 16 digits, with zeros before them when
-/// the value has fewer, and a 17th digit, or 0 when the value has 16 digits or fewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Decimal {
     digits: u64,
@@ -72,9 +48,6 @@ struct Decimal {
     exponent: i32,
 }
 
-/// Writes the shortest form of the finite `value` from the start of `dest` in the layout of `{:?}`,
-/// and returns its length, at most [`BYTES_MAX`]. The bytes of `dest` after that length are
-/// unspecified.
 #[inline]
 pub(super) fn write(value: f64, dest: &mut [u8; SPAN]) -> usize {
     let bits = value.to_bits();
@@ -106,8 +79,6 @@ pub(super) fn write(value: f64, dest: &mut [u8; SPAN]) -> usize {
     sign + layout(shortest(binary), dest)
 }
 
-/// The shortest decimal in the rounding interval of `binary`, the nearest to it if several are,
-/// with a tie up.
 #[inline]
 fn shortest(binary: Binary) -> Decimal {
     let Binary { c, q, irregular } = binary;
@@ -117,7 +88,6 @@ fn shortest(binary: Binary) -> Decimal {
         floor_log10_pow2(q)
     };
     let (integral, fraction, half) = scale(c, q, k);
-    // The nearest integer to ten times `fraction`, in units of 2^−64, after the bias `add`.
     let tenfold = |fraction: u64, add: u64| fraction.carrying_mul(10, add).1;
     let (up, down, digit) = if irregular {
         // The lower neighbor of a power of two is half as far, so the lower bound is a quarter unit
@@ -134,8 +104,6 @@ fn shortest(binary: Binary) -> Decimal {
             tenfold(fraction, BIASED_HALF),
         )
     };
-    // With neither bound past an integer, the interval holds no shorter form, so the 17th digit
-    // is not 0.
     let longer = !up && !down;
     Decimal {
         digits: integral + u64::from(up),
@@ -156,7 +124,6 @@ fn shortest(binary: Binary) -> Decimal {
 fn scale(c: u64, q: i32, k: i32) -> (u64, u64, u64) {
     let n = -k - 1;
     let (high, low) = POW10[(n - POW10_MIN).cast_unsigned() as usize];
-    // `10^n = g × 2^(⌊n × log2 10⌋ − 127)`, and `X × 2^70 = (c × 2^shift) × g / 2^64`.
     let shift = (q + floor_log2_pow10(n) + 7).cast_unsigned();
     let scaled = c << shift;
     let (low_product, high_product) = scaled.carrying_mul(high, scaled.carrying_mul(low, 0).1);
@@ -184,14 +151,9 @@ pub(super) fn read(digits: u64, power: i32) -> Option<f64> {
     }
     let lead = digits.leading_zeros().cast_signed();
     let log2 = floor_log2_pow10(power);
-    // `digits` is in `[2^(63 − lead), 2^(64 − lead))` and `10^power` is in `[2^log2, 2^(log2 + 1))`,
-    // so this `e` puts `v` in `[2^52, 2^54)`.
     let e = (lead - 11 - log2).min(1074);
-    // The shift of the high word of the product keeps two bits below the integer part. It is 8
-    // when `e` is not at its cap, and more when it is.
     let shift = lead - e - log2 - 3;
     if shift >= 64 {
-        // `v` is under a quarter, so it rounds to zero.
         return Some(0.0);
     }
     let unrounded = uscale(digits << lead, scale, shift.cast_unsigned());
@@ -201,8 +163,6 @@ pub(super) fn read(digits: u64, power: i32) -> Option<f64> {
     let unrounded = unrounded >> u32::from(over) | unrounded & 1;
     let e = e - i32::from(over);
     let significand = (unrounded + 1 + (unrounded >> 2 & 1)) >> 2;
-    // The significand is under 2^53. Under 2^52, the value is subnormal and `e` is 1074, so the
-    // biased exponent is 0.
     if significand < 1 << 52 {
         return Some(f64::from_bits(significand));
     }
@@ -223,7 +183,6 @@ fn uscale(x: u64, (hi, lo): (u64, u64), shift: u32) -> u64 {
     if top & ((1 << shift) - 1) == 0 {
         let (_, borrow) = x.carrying_mul(lo, 0);
         sticky = u64::from(middle.wrapping_sub(borrow) > 1);
-        // `top` is at least 2^62, because `x` and `hi` are each at least 2^63.
         top -= u64::from(middle < borrow);
     }
     top >> shift | sticky
@@ -237,29 +196,23 @@ const fn halves(value: u128) -> (u64, u64) {
     ((value >> 64) as u64, value as u64)
 }
 
-/// `⌊q × log10 2⌋` for `q` from −1074 to 971.
 #[inline(always)]
 const fn floor_log10_pow2(q: i32) -> i32 {
     (q * 315_653) >> 20
 }
 
-/// `⌊log10(3/4 × 2^q)⌋` for `q` from −1074 to 971.
 #[inline(always)]
 const fn floor_log10_three_quarters_pow2(q: i32) -> i32 {
     (q * 315_653 - 131_072) >> 20
 }
 
-/// `⌊n × log2 10⌋` for `n` from [`POW10_UP_MIN`] to [`POW10_MAX`].
 #[inline(always)]
 const fn floor_log2_pow10(n: i32) -> i32 {
     (n * 217_706) >> 16
 }
 
-/// The table of `10^n` for each `n` from `min` to `max`, a negative `min`, with long arithmetic on
-/// integers of [`TABLE_LIMBS`] limbs at compile time.
 const fn pow10_table<const LEN: usize>(min: i32, max: i32, rounding: Rounding) -> [(u64, u64); LEN] {
     let mut table = [(0, 0); LEN];
-    // 10^n for n from 0, exactly.
     let mut power = [0_u64; TABLE_LIMBS];
     power[0] = 1;
     let mut n = 0;
@@ -296,14 +249,10 @@ const fn pow10_table<const LEN: usize>(min: i32, max: i32, rounding: Rounding) -
     table
 }
 
-/// The significand whose floor is `(high, low)`, in the form of `rounding`. `inexact` is set if
-/// the exact significand is not an integer.
 const fn rounded((high, low): (u64, u64), inexact: bool, rounding: Rounding) -> (u64, u64) {
     match rounding {
         Rounding::Down => (high, low),
         Rounding::Up => {
-            // The ceiling `high × 2^64 + low`, as `(high + 1) × 2^64 − (2^64 − low)` when `low` is
-            // not 0.
             let (low, carry) = low.overflowing_add(inexact as u64);
             let high = high + carry as u64;
             (high + (low != 0) as u64, low.wrapping_neg())
@@ -311,11 +260,8 @@ const fn rounded((high, low): (u64, u64), inexact: bool, rounding: Rounding) -> 
     }
 }
 
-/// Enough limbs for 10^324 and for 2^1279 / 10^343 with 128 bits.
 const TABLE_LIMBS: usize = 20;
 
-/// The 128 bits of `value` from its highest set bit down, with zeros after its lowest bit, and
-/// whether a set bit of `value` is below them.
 const fn high_128(value: &[u64; TABLE_LIMBS]) -> ((u64, u64), bool) {
     let mut top = TABLE_LIMBS - 1;
     while value[top] == 0 {
@@ -330,7 +276,6 @@ const fn high_128(value: &[u64; TABLE_LIMBS]) -> ((u64, u64), bool) {
     } else {
         wide << lead | (third >> (64 - lead)) as u128
     };
-    // The bits of `third` below the 128, and each limb below `third`.
     let mut inexact = third << lead != 0;
     let mut index = 0;
     while index + 3 <= top {
@@ -353,10 +298,6 @@ fn layout(decimal: Decimal, dest: &mut [u8; SPAN - 1]) -> usize {
         extra,
         exponent,
     } = decimal;
-    // 16 digits with a first digit that is not 0, the 17th digit or 0, and the power of 10 of the
-    // first digit. The integer part of a normal binary64 value has 15 or 16 digits, so 15 digits
-    // take the 17th digit in with no branch. The fewer digits of a subnormal value take zeros
-    // after them in [`widen`].
     let short = digits < POWERS[15];
     let (mut digits, mut extra, mut point) = if short {
         (digits * 10 + u64::from(extra), 0, exponent + 15)
@@ -368,21 +309,16 @@ fn layout(decimal: Decimal, dest: &mut [u8; SPAN - 1]) -> usize {
     }
     match point {
         0..16 => {
-            // `point + 1` digits, a point, and the rest of the digits or one zero.
             let whole = point.cast_unsigned() as usize + 1;
             let count = mantissa(digits, extra, whole, dest);
-            // `count + 1` when a digit is after the point, else `whole + 2`, with no branch.
             (count + 1).max(whole + 2)
         }
         -4..0 => {
-            // `0.`, `−point − 1` zeros, and the digits.
             let at = point.unsigned_abs() as usize + 1;
             dest[..8].copy_from_slice(b"0.000000");
             at + plain(digits, extra, at, dest)
         }
         _ => {
-            // The first digit, a point, the other digits, and the exponent. The point stays only
-            // before other digits.
             let count = mantissa(digits, extra, 1, dest);
             let at = count + usize::from(count > 1);
             let exponent = EXPONENTS[(point + EXPONENT_BIAS).cast_unsigned() as usize];
@@ -392,11 +328,6 @@ fn layout(decimal: Decimal, dest: &mut [u8; SPAN - 1]) -> usize {
     }
 }
 
-// The text of the digits. `mantissa` writes the 16 digits of `digits`, from 10^15 up and under
-// 10^16, and `extra`, the 17th digit or 0, from the start of `dest`, with a point after the first
-// `whole` digits, from 1 to 16. `plain` writes them from `at`, at most 5, with no point. Each gives
-// the count of the digits without the zeros after the last one, or 17 when `extra` is not 0. The
-// bytes after the 17th digit are unspecified.
 cfg_select! {
     all(target_arch = "aarch64", target_feature = "neon") => {
         use super::aarch64::digits::{mantissa, plain};
@@ -434,9 +365,6 @@ cfg_select! {
             count
         }
 
-        /// The text of the 16 digits in two words, of the 17th digit, and their count. The
-        /// digits stay in words, and each word goes to `dest` with one store, so no load reads a
-        /// stored byte back.
         #[inline(always)]
         fn words(digits: u64, extra: u8) -> (u64, u64, u64, usize) {
             const ZEROS: u64 = u64::from_ne_bytes([b'0'; 8]);
@@ -446,12 +374,10 @@ cfg_select! {
             } else {
                 8 + high.leading_zeros() / 8
             };
-            // A select, not a branch: the count of digits varies from value to value.
             let count = select_unpredictable(extra != 0, 17, 16 - zeros as usize);
             (high | ZEROS, low | ZEROS, u64::from(b'0' + extra), count)
         }
 
-        /// Stores the three little-endian `words` into `dest` from `at`.
         #[inline(always)]
         fn store(dest: &mut [u8], at: usize, words: [u64; 3]) {
             if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<24>) {
@@ -464,8 +390,6 @@ cfg_select! {
     }
 }
 
-/// `digits`, under 10^15 and not 0, with zeros after it to 16 digits, no 17th digit, and the
-/// power of 10 of its first digit, from `point`, the power of 10 of its digit 15.
 #[cold]
 fn widen(digits: u64, point: i32) -> (u64, u8, i32) {
     let count = digits.checked_ilog10().unwrap_or(0) + 1;
@@ -476,8 +400,6 @@ fn widen(digits: u64, point: i32) -> (u64, u8, i32) {
     )
 }
 
-/// `word` with `byte` at index `at`, under 8, and the bytes from `at` one place higher, and the
-/// byte that leaves the word at the top.
 #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
 #[inline(always)]
 pub(super) const fn insert(word: u64, at: usize, byte: u8) -> (u64, u64) {
@@ -488,7 +410,6 @@ pub(super) const fn insert(word: u64, at: usize, byte: u8) -> (u64, u64) {
     )
 }
 
-/// `10^n` for each `n` up to 17.
 const POWERS: [u64; 18] = {
     let mut powers = [1; 18];
     let mut n = 1;
@@ -499,11 +420,8 @@ const POWERS: [u64; 18] = {
     powers
 };
 
-/// The least power of 10 of the first digit of a finite binary64 value: `5e-324`.
 const EXPONENT_BIAS: i32 = 324;
 
-/// The exponent text of each power of 10 from −324 to 308, for example `e-5` and `e100`, in the low
-/// bytes, and its length in the high byte.
 static EXPONENTS: [u64; 633] = {
     let mut table = [0; 633];
     let mut power = -EXPONENT_BIAS;

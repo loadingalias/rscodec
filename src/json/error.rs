@@ -1,5 +1,3 @@
-//! The refusals of the reader and of the writer.
-
 use core::fmt;
 
 /// The cause of a refusal.
@@ -79,8 +77,6 @@ pub struct Error {
     code: usize,
 }
 
-/// The kinds of [`ErrorKind`] with no field, in the order of their codes. A code past them is
-/// [`ErrorKind::Limit`] of the limit at code − 13.
 const KINDS: [ErrorKind; 13] = [
     ErrorKind::Syntax,
     ErrorKind::End,
@@ -97,7 +93,6 @@ const KINDS: [ErrorKind; 13] = [
     ErrorKind::NonFinite,
 ];
 
-/// The limits of [`ErrorKind::Limit`], in the order of their codes.
 const LIMITS: [Limit; 6] = [
     Limit::InputBytes,
     Limit::Depth,

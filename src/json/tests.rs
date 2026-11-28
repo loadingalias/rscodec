@@ -1,7 +1,3 @@
-//! The contracts of the kernels and the cursor. Each kernel gives the classes, the tokens, and the
-//! carry of the reference on each block. The cursor gives the tokens of a scan of one byte at a
-//! time, and the UTF-8 error of `core::str::from_utf8`.
-
 extern crate std;
 
 use std::{format, fs, path::Path, vec, vec::Vec};
@@ -12,7 +8,6 @@ use super::{
     cursor::{Cursor, InvalidUtf8},
 };
 
-/// Each kernel that this CPU runs, the fastest first. The last is the reference.
 pub(super) fn kernels() -> Vec<Backend> {
     let kernels: Vec<_> = Kernel::ALL
         .iter()
@@ -33,7 +28,6 @@ fn classify(kernel: Backend, input: &[u8], start: usize, carry: Carry) -> Block 
     unsafe { kernel.0.function()(input, start, carry) }
 }
 
-/// The tokens that the cursor gives, and its end: `Ok` or the UTF-8 error.
 fn cursor(input: &[u8], kernel: Backend) -> (Vec<usize>, Result<(), InvalidUtf8>) {
     let mut cursor = Cursor::new(input, kernel);
     let mut tokens = Vec::new();
@@ -49,8 +43,6 @@ fn cursor(input: &[u8], kernel: Backend) -> (Vec<usize>, Result<(), InvalidUtf8>
     }
 }
 
-/// The tokens of `input` ([`Block::tokens`]), by a scan of one byte at a time. A `\` escapes the
-/// next byte also outside a string, as in the kernels.
 fn scan(input: &[u8]) -> Vec<usize> {
     let (mut in_string, mut escape, mut scalar) = (false, false, false);
     let mut tokens = Vec::new();
@@ -79,11 +71,6 @@ fn scan(input: &[u8]) -> Vec<usize> {
     tokens
 }
 
-/// The cursor of `kernel` gives the tokens of [`scan`] before the first byte that is not UTF-8,
-/// then the error at the offset that `core::str::from_utf8` gives.
-///
-/// The one token at the offset of the error that can come first ([`Cursor`]) is a byte at 0x80 or
-/// more outside a string, in the last 3 bytes of a block.
 fn check_cursor(input: &[u8], tokens: &[usize], kernel: Backend) {
     let (given, end) = cursor(input, kernel);
     let expected = core::str::from_utf8(input).map(drop).map_err(|error| InvalidUtf8 {
@@ -99,10 +86,8 @@ fn check_cursor(input: &[u8], tokens: &[usize], kernel: Backend) {
     );
 }
 
-/// Each kernel gives the block of the reference, with its carry, on each block of `input`.
 fn check_blocks(input: &[u8], kernels: &[Backend]) {
     let mut carries = vec![Carry::default(); kernels.len()];
-    // The cursor gives a kernel each block of the input at its offset.
     for (index, start) in (0..input.len()).step_by(64).enumerate() {
         let reference = classify(kernels[kernels.len() - 1], input, start, carries[kernels.len() - 1]);
         for (&kernel, carry) in kernels.iter().zip(&mut carries) {
@@ -113,8 +98,6 @@ fn check_blocks(input: &[u8], kernels: &[Backend]) {
     }
 }
 
-/// Each kernel equals the reference on each block of each file, from each of the first 64 offsets.
-/// Thus each byte comes in each lane, and the last block has each length from 1 to 64.
 fn check_files(files: &[&Path]) {
     let kernels = kernels();
     for file in files {
@@ -134,7 +117,6 @@ fn check_files(files: &[&Path]) {
     }
 }
 
-/// Each corpus file of the repository.
 #[test]
 fn each_kernel_equals_the_reference_on_the_generated_corpora() {
     let mut files = Vec::new();
@@ -147,8 +129,6 @@ fn each_kernel_equals_the_reference_on_the_generated_corpora() {
     check_files(&files.iter().map(|file| file.as_path()).collect::<Vec<_>>());
 }
 
-/// The minimized corpus of the fuzz campaign (`fuzz/README.md`). The fuzz runs only the kernel
-/// that its CPU selects, so this test compares the other kernels with the reference on its inputs.
 #[test]
 fn each_kernel_equals_the_reference_on_the_fuzz_corpus() {
     let files: Vec<_> = fs::read_dir("tests/data/fuzz")
@@ -159,14 +139,12 @@ fn each_kernel_equals_the_reference_on_the_fuzz_corpus() {
     check_files(&files.iter().map(|file| file.as_path()).collect::<Vec<_>>());
 }
 
-/// The three corpora that benches/data/README.md fetches. A missing file fails the test.
 #[test]
 fn each_kernel_equals_the_reference_on_the_fetched_corpora() {
     let files = ["twitter", "citm_catalog", "canada"].map(|name| format!("benches/data/fetched/{name}.json"));
     check_files(&files.each_ref().map(Path::new));
 }
 
-/// The word of `N` bytes of `bytes` at `index`, for each index in `0..bytes.len().pow(N)`.
 fn word<const N: usize>(bytes: &[u8], index: usize) -> [u8; N] {
     let mut rest = index;
     core::array::from_fn(|_| {
@@ -176,18 +154,10 @@ fn word<const N: usize>(bytes: &[u8], index: usize) -> [u8; N] {
     })
 }
 
-/// A byte of each UTF-8 class of the check: ASCII, the continuation bytes, and the lead bytes with
-/// each class of low nibble.
 const UTF8_BYTES: [u8; 18] = [
     b'a', 0x80, 0x90, 0xa0, 0xbf, 0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xe1, 0xed, 0xee, 0xf0, 0xf1, 0xf4, 0xf5, 0xff,
 ];
 
-/// Each string of 6 bytes of quotes, `\`, a scalar byte, whitespace, a structural byte, and a byte
-/// under 0x20, across the end of a block at each place. Thus each run of `\` before a quote, also an
-/// escaped `\`, and each carry.
-///
-/// No corpus has an escaped `\` before a quote (`\\"`). Thus this test, not the corpus tests,
-/// fails a quote mask that takes that quote as escaped.
 #[test]
 fn escapes_quotes_and_scalars_across_blocks_give_the_tokens_of_the_scan() {
     const BYTES: [u8; 6] = [b'"', b'\\', b'a', b' ', b',', 0x01];
@@ -209,8 +179,6 @@ fn escapes_quotes_and_scalars_across_blocks_give_the_tokens_of_the_scan() {
     }
 }
 
-/// Each sequence of 4 bytes of the UTF-8 classes of the check, in a string across the end of a
-/// block at each place, at the end of the input and before more bytes.
 #[test]
 fn each_utf8_sequence_across_blocks_gives_the_error_of_std() {
     let kernels = kernels();
@@ -233,10 +201,6 @@ fn each_utf8_sequence_across_blocks_gives_the_error_of_std() {
     }
 }
 
-/// Each input of 1 to 3 bytes, and each input of any byte and 3 bytes of `UTF8_BYTES`, as the
-/// first and last block, has a UTF-8 error in each kernel exactly when `core::str::from_utf8`
-/// refuses it. Thus each pair of bytes meets the tables of the check, and each byte meets the
-/// check of the third and fourth bytes after it.
 #[test]
 fn each_short_input_gives_the_utf8_error_of_std() {
     let kernels = kernels();
@@ -260,15 +224,8 @@ fn each_short_input_gives_the_utf8_error_of_std() {
     }
 }
 
-/// Each invalid sequence at each place in a run of structural bytes, so that tokens come before
-/// and after the first invalid byte in its block and in the next block. The cursor gives each token
-/// before that byte, then its error, so the first error by offset comes first. Each sequence also
-/// comes at each place in a string of 256 bytes, so that the cursor must find the error in a block
-/// that has no token.
 #[test]
 fn the_cursor_gives_the_tokens_before_the_first_invalid_byte_then_its_error() {
-    // A continuation byte, a byte that no UTF-8 has, an overlong form, a sequence that ends too
-    // soon, and a surrogate.
     const SEQUENCES: [&[u8]; 5] = [&[0x80], &[0xff], &[0xc0, 0x80], &[0xe2, 0x82], &[0xed, 0xa0, 0x80]];
     let kernels = kernels();
     let check = |input: &[u8]| {
@@ -295,12 +252,8 @@ fn the_cursor_gives_the_tokens_before_the_first_invalid_byte_then_its_error() {
     }
 }
 
-/// The one token that can come at the offset of its UTF-8 error: the first byte of a scalar at
-/// 0x80 or more in the last 3 bytes of a block, when the check finds the error in the next block.
-/// At one offset the UTF-8 error wins over an error of the grammar, so the reader checks UTF-8 there.
 #[test]
 fn a_scalar_in_the_last_bytes_of_a_block_comes_before_its_utf8_error() {
-    // A sequence that needs one, two, and three more bytes, at the end of the first block.
     for sequence in [&[0xc3][..], &[0xe2, 0x82], &[0xf0, 0x9f, 0x98]] {
         let at = 64 - sequence.len();
         let mut input = vec![b','; 70];
@@ -317,12 +270,8 @@ fn a_scalar_in_the_last_bytes_of_a_block_comes_before_its_utf8_error() {
     }
 }
 
-/// Each length of the last block, and an input of whole blocks. The kernel reads the bytes of a
-/// short last block with spaces after them, and it reads no byte after the input.
 #[test]
 fn the_last_block_of_each_length_gives_the_tokens_of_the_scan() {
-    // Structural bytes, whitespace, strings with an escaped quote and an escaped `\`, a number, and
-    // literals.
     const TEXT: &[u8] = b"{\"a\\\"b\": [1, -2.5e3, \"\\\\\", true],\n\"c\": {\"d\": null}} ";
     let text: Vec<u8> = TEXT.iter().copied().cycle().take(130).collect();
     let kernels = kernels();
@@ -336,10 +285,6 @@ fn the_last_block_of_each_length_gives_the_tokens_of_the_scan() {
     }
 }
 
-/// Each byte value in each lane gives the tokens of its class in RFC 8259: outside a string,
-/// between bytes of a scalar, and in a string. Outside a string, a structural byte, whitespace,
-/// and a byte of a scalar each give other tokens. In a string, only a quote, a `\\`, and a byte
-/// under 0x20 give a token.
 #[test]
 fn each_byte_in_each_lane_gives_the_tokens_of_its_class() {
     let kernels = kernels();
@@ -347,8 +292,6 @@ fn each_byte_in_each_lane_gives_the_tokens_of_its_class() {
         for byte in 0..=u8::MAX {
             let mut outside = vec![b'x'; 64];
             outside[lane] = byte;
-            // The quote opens a string, and the byte is in lane `lane + 1`, or in lane 0 of the
-            // second block.
             let mut inside = [&b"\""[..], &[b'x'; 64]].concat();
             inside[lane + 1] = byte;
             for input in [outside, inside] {
@@ -362,15 +305,10 @@ fn each_byte_in_each_lane_gives_the_tokens_of_its_class() {
     }
 }
 
-/// The selection gives a kernel only to a CPU that has each feature of its `#[target_feature]`
-/// functions, with each feature that they imply. A kernel on a CPU without one of them is
-/// undefined behavior. WebAssembly selects at compile time, so it has no case.
 #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[test]
 fn the_selection_gives_a_kernel_only_with_each_of_its_features() {
     use crate::cpu::{Caps, Timing, close_implications};
-    // The kernel of a CPU that has each feature but `missing`, after the detection removes each
-    // feature whose implied features are not all present.
     let without =
         |missing: Caps| Kernel::ALL[Kernel::fastest(close_implications(Caps::ALL.difference(missing)), Timing::Public)];
     assert_eq!(without(Caps::NONE), Kernel::ALL[0]);

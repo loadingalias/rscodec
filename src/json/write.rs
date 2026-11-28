@@ -1,5 +1,3 @@
-//! The writer: compact JSON into a slice that the caller lends.
-
 use super::{Error, ErrorKind, escape, float, integer};
 
 #[cfg(test)]
@@ -47,8 +45,6 @@ pub struct Place<'w> {
     out: &'w mut [u8],
     len: &'w mut usize,
     key: Option<&'w str>,
-    /// The index of the first value of the container: a value there has no `,` before it. The
-    /// writer keeps it, so it reads no byte of `out` back.
     first: usize,
 }
 
@@ -235,9 +231,6 @@ impl Place<'_> {
         })
     }
 
-    /// Writes `open`, the content that `fill` writes, and `close`. `fill` takes the slice without
-    /// its last byte, which stays free for `close`, and the length after `open`, and it gives the
-    /// length after the content.
     #[inline(always)]
     fn container(
         mut self,
@@ -250,15 +243,12 @@ impl Place<'_> {
         let at = self.begin().ok_or(full)?;
         let last = self.out.len().checked_sub(1).filter(|&last| at < last).ok_or(full)?;
         self.out[at] = open;
-        // Commit the length only after the closing delimiter.
         let end = fill(&mut self.out[..last], at + 1).map_err(|error| Error::new(error.kind(), start))?;
         self.out[end] = close;
         *self.len = end + 1;
         Ok(())
     }
 
-    /// The index after the `,` and the key before the value, or `None` if the slice ends. A
-    /// value after the `{` or the `[` of its container, or at the start, has no `,`.
     #[inline(always)]
     fn begin(&mut self) -> Option<usize> {
         let mut at = *self.len;
@@ -274,9 +264,6 @@ impl Place<'_> {
         Some(at)
     }
 
-    /// Writes the JSON string of the base64url text of `bytes`. It tests the room for the whole
-    /// value before `encode` writes a character into the slice that it takes, whose length is the
-    /// length of the text.
     #[cfg(feature = "base64")]
     #[inline(always)]
     fn base64url_by(
@@ -286,7 +273,6 @@ impl Place<'_> {
     ) -> Result<(), Error> {
         let full = Error::new(ErrorKind::Full, *self.len);
         let at = self.begin().ok_or(full)?;
-        // The `,`, the key, and `at` fit in the slice, so `at + 2` does not overflow.
         let end = crate::base64::Profile::Url
             .encoded_len(bytes.len())
             .and_then(|len| len.checked_add(at + 2))
@@ -295,14 +281,12 @@ impl Place<'_> {
             return Err(full);
         };
         *open = b'"';
-        // `text` has the length of the text, so the encoder does not refuse.
         encode(bytes, text).map_err(|_| full)?;
         *close = b'"';
         *self.len = end;
         Ok(())
     }
 
-    /// Writes `text`, a literal of JSON.
     #[inline(always)]
     fn literal(mut self, text: &'static [u8]) -> Result<(), Error> {
         let end = self.begin().and_then(|at| {
@@ -324,15 +308,11 @@ impl Place<'_> {
     }
 }
 
-/// The `SPAN` bytes of `out` from `at` where a printer stores its text, or `spare` near the end of
-/// `out`. A printer stores up to `SPAN` bytes and keeps the length that it returns.
 #[inline(always)]
 fn stage<'s, const SPAN: usize>(out: &'s mut [u8], at: usize, spare: &'s mut [u8; SPAN]) -> &'s mut [u8; SPAN] {
     out.get_mut(at..).and_then(<[u8]>::first_chunk_mut).unwrap_or(spare)
 }
 
-/// The index after the `len` bytes that a printer keeps from `at`, or `None` if they do not fit.
-/// It copies them from `spare` when [`stage`] gave `spare`.
 #[inline(always)]
 fn keep<const SPAN: usize>(out: &mut [u8], at: usize, spare: &[u8; SPAN], len: usize) -> Option<usize> {
     let rest = out.get_mut(at..)?;

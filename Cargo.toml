@@ -16,7 +16,6 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [features]
 default = ["std"]
-# Enable runtime CPU detection where available.
 std = []
 base64 = []
 hex = []
@@ -26,10 +25,8 @@ json = []
 workspace = true
 
 [dev-dependencies]
-# Enable all codecs for tests and benchmarks.
 rscodec = { path = ".", default-features = false, features = ["base64", "hex", "json"] }
 criterion = { version = "=0.8.2", default-features = false }
-# base-N
 base16ct = "=1.0.0"
 # `simd-unsafe`, a default feature, gives the `Simd` engine.
 base64 = "=0.23.1"
@@ -42,24 +39,19 @@ const-hex = "=1.19.3"
 data-encoding = "=2.11.1"
 encodify = "=1.0.2"
 faster-hex = { version = "=1.0.0", default-features = false, features = ["std"] }
-# JSON and float printers
 flexon = { version = "=0.4.9", features = ["nightly"] }
 # The `num-bigint` default feature only widens integers past i64.
 jiter = { version = "=0.19.0", default-features = false }
 ryu = "=1.0.23"
-# Benchmark the same typed records in each reader.
 serde = { version = "=1.0.229", features = ["derive"] }
-# Without `float_roundtrip`, serde_json reads 11,975 of the 111,080 floats of canada.json 1 ULP
-# away from the correctly rounded value. The bar takes only correct output.
+# Without float_roundtrip, serde_json misses correct rounding by 1 ULP for 11,975 of 111,080 canada.json floats.
 serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
-# The default features without `runtime-detection`: `-C target-cpu=native` selects the kernel at
-# compile time, with no dispatch.
+# Without runtime-detection, simd-json selects the native kernel at compile time.
 simd-json = { version = "=0.19.0", default-features = false, features = ["serde_impl", "swar-number-parsing"] }
 # `avx512` takes effect only where `-C target-cpu` enables AVX-512.
 sonic-rs = { version = "=0.5.11", features = ["avx512"] }
 zmij = "=1.0.23"
 
-# Exclude the C++ benchmark dependency on WebAssembly and when cross-checking MSVC.
 [target.'cfg(not(any(target_env = "msvc", target_family = "wasm")))'.dev-dependencies]
 simdutf = "=0.7.0"
 
@@ -91,8 +83,6 @@ harness = false
 resolver = "3"
 members = [".", "ct", "xtask"]
 
-# `rust-version` is the release number of the nightly that rust-toolchain.toml pins. Cargo then
-# refuses an older toolchain with one message. Set it again when the pin moves.
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
@@ -111,20 +101,14 @@ raw_borrows_via_references = "deny"
 suspicious_runtime_symbol_definitions = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = "deny"
-# Unsafe code is denied everywhere. Each necessary unsafe region is the
-# smallest private module or item, with a reasoned `#[expect(unsafe_code)]`.
 unsafe_code = "deny"
-# Library documentation and `Debug` coverage.
 missing_docs = "deny"
 missing_debug_implementations = "deny"
-# Visibility says what is API: nothing `pub` that the crate root cannot reach.
 unreachable_pub = "deny"
 
 [workspace.lints.clippy]
-# Individual lints take precedence over this group.
 default = { level = "deny", priority = -1 }
 
-# Concurrency and async correctness.
 arc_with_non_send_sync = "deny"
 await_holding_invalid_type = "deny"
 await_holding_lock = "deny"
@@ -132,7 +116,6 @@ await_holding_refcell_ref = "deny"
 non_send_fields_in_send_ty = "deny"
 significant_drop_in_scrutinee = "deny"
 
-# Production panics and incomplete control flow.
 panic = "deny"
 string_slice = "deny"
 todo = "deny"
@@ -141,12 +124,10 @@ unimplemented = "deny"
 unreachable = "deny"
 unwrap_used = "deny"
 
-# Dropped work, errors, and weak test diagnostics.
 assertions_on_result_states = "deny"
 let_underscore_must_use = "deny"
 unused_result_ok = "deny"
 
-# Numeric conversions and literals must make loss and sign changes explicit.
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 cast_sign_loss = "deny"
@@ -155,7 +136,6 @@ fn_to_numeric_cast_any = "deny"
 invalid_upcast_comparisons = "deny"
 lossy_float_literal = "deny"
 
-# API clarity and maintainability.
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 dbg_macro = "deny"
@@ -164,19 +144,15 @@ expl_impl_clone_on_copy = "deny"
 iter_not_returning_iterator = "deny"
 same_functions_in_if_condition = "deny"
 
-# Keep core-only builds independent of the standard library.
 alloc_instead_of_core = "deny"
 std_instead_of_core = "deny"
 
-# Command-line tools opt in to printing.
 print_stderr = "deny"
 print_stdout = "deny"
 
-# Cargo semantics. Do not enable clippy::cargo wholesale.
 negative_feature_names = "deny"
 wildcard_dependencies = "deny"
 
-# High-signal nursery lints selected individually.
 coerce_container_to_any = "deny"
 collection_is_never_read = "deny"
 debug_assert_with_mut_call = "deny"
@@ -191,7 +167,6 @@ transmute_undefined_repr = "deny"
 uninhabited_references = "deny"
 volatile_composites = "deny"
 
-# Unsafe-code proof obligations and destructor correctness.
 as_ptr_cast_mut = "deny"
 as_pointer_underscore = "deny"
 borrow_as_ptr = "deny"
@@ -209,19 +184,13 @@ unnecessary_safety_doc = "deny"
 broken_intra_doc_links = "deny"
 private_intra_doc_links = "deny"
 
-# Integer overflow is a defect in every profile. Intentional modular or
-# saturating arithmetic uses explicit operations.
 [profile.release]
 overflow-checks = true
 
-# The competitors build as their users build them for release, without overflow checks. The
-# members of this workspace keep the checks in the benchmarks too.
+# Cargo applies this override to dependencies outside the workspace.
 [profile.bench.package."*"]
 overflow-checks = false
 
-# The tests run each backend on millions of inputs. Optimization inlines the intrinsics of the
-# kernels, so the tests run the code of a release build. The checks of overflow and the debug
-# assertions stay on.
 [profile.test.package.rscodec]
 opt-level = 3
 

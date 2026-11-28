@@ -1,39 +1,28 @@
-//! Arithmetic with no branch and no table: the operations of the portable backends. Also the
-//! timing class as a type, with the stores of zero of the secret class.
-//!
-//! Each arithmetic function takes and gives values in -256..=255, so no operation overflows. The
-//! wrapping operations add no overflow check, which is a branch on the data.
+//! For inputs in -256..=255, wrapping arithmetic avoids overflow checks that could branch on secret data.
 
 #[cfg(all(feature = "base64", target_arch = "x86_64"))]
 use crate::cpu::Timing;
 
-/// `plus` if `lo <= c <= hi`, and zero if not. `(lo - 1 - c) & (c - hi - 1)` is negative only in the
-/// range, so its shift right by 8 is -1 in the range and 0 outside it.
 #[inline(always)]
 pub(crate) const fn in_range(c: i16, lo: u8, hi: u8, plus: i16) -> i16 {
     ((lo as i16 - 1).wrapping_sub(c) & c.wrapping_sub(hi as i16 + 1)) >> 8 & plus
 }
 
-/// `plus` if `value` is past `last`, and zero if not: `(last - value) >> 8` is -1 past it and 0 up
-/// to it.
 #[inline(always)]
 pub(crate) const fn past(value: i16, last: i16, plus: i16) -> i16 {
     (last.wrapping_sub(value) >> 8) & plus
 }
 
-/// The low byte of a value.
 #[inline(always)]
 pub(crate) const fn low(value: i16) -> u8 {
     value.to_le_bytes()[0]
 }
 
-/// All ones if `value` is negative, and zero if not.
 #[inline(always)]
 pub(crate) const fn negative_mask(value: i16) -> usize {
     0_usize.wrapping_sub((value.cast_unsigned() >> 15) as usize)
 }
 
-/// Count entries before the first negative value. Once set, `seen` prevents further increments.
 /// LLVM compiled a minimum into a branch on x86_64 and a select into a data-indexed stack load on AArch64.
 #[inline]
 pub(crate) fn first_negative(values: impl Iterator<Item = i16>) -> usize {
@@ -48,16 +37,10 @@ pub(crate) fn first_negative(values: impl Iterator<Item = i16>) -> usize {
     first
 }
 
-/// A timing class as a type: [`Public`] or [`Secret`]. A kernel that takes one compiles a copy for
-/// each class. Thus the copy of the public class has no store of the secret class.
 pub(crate) trait Class: Copy {
-    /// The class, for a choice that the compiler makes for each copy: the dispatch of base64 on
-    /// x86_64, whose copy of the secret class has no path to a kernel of the public class.
     #[cfg(all(feature = "base64", target_arch = "x86_64"))]
     const TIMING: Timing;
 
-    /// In the secret class, writes zero to `array`, a temporary copy of input or result bytes,
-    /// before its function returns. In the public class, it does nothing.
     #[cfg_attr(
         not(any(
             feature = "base64",
@@ -69,16 +52,12 @@ pub(crate) trait Class: Copy {
     )]
     fn clear<const N: usize>(self, array: &mut [u8; N]);
 
-    /// In the secret class, writes zero to `output` after a decoder refuses its text. In the
-    /// public class, it does nothing.
     fn wipe(self, output: &mut [u8]);
 }
 
-/// The class of the functions for public data.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Public;
 
-/// The class of the functions for secret data.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Secret;
 
@@ -121,7 +100,6 @@ mod zero {
         sync::atomic::{Ordering::SeqCst, compiler_fence},
     };
 
-    /// Writes zero to `array` with one store of the whole array.
     #[cfg_attr(
         not(any(
             feature = "base64",
@@ -138,7 +116,6 @@ mod zero {
         compiler_fence(SeqCst);
     }
 
-    /// Writes zero to each byte of `bytes`, a slice of any length.
     #[inline]
     pub(super) fn bytes(bytes: &mut [u8]) {
         for byte in bytes {

@@ -13,7 +13,6 @@ use rscodec::json::{
 /// accept a document that is deeper.
 const DEPTH_MAX: u16 = 127;
 
-/// No limit other than the depth refuses an input of the fuzz.
 const LIMITS: Limits = Limits {
     input_bytes_max: u32::MAX,
     depth_max: DEPTH_MAX,
@@ -43,7 +42,6 @@ fn check(input: &[u8]) {
     }
 }
 
-/// A value that rscodec reads. A number keeps its text and its offset.
 #[derive(Debug, PartialEq)]
 enum Tree<'a> {
     Null,
@@ -54,16 +52,12 @@ enum Tree<'a> {
     Object(Vec<(String, Tree<'a>)>),
 }
 
-/// The items that a value walk reads.
 #[derive(Clone, Copy)]
 enum Walk {
-    /// Each item.
     Each,
-    /// Each even item. The walk drops each odd item, so the reader skips it.
     Even,
 }
 
-/// The document and the offset of the first emitted number outside the IJson range.
 fn read(input: &[u8], profile: Profile) -> (Result<Tree<'_>, Error>, Option<usize>) {
     let mut scratch = vec![Slot::EMPTY; input.len() + 1];
     let mut first_number = None;
@@ -98,7 +92,6 @@ impl Tree<'_> {
         assert_eq!(even, self, "the even items and all member keys in input order");
     }
 
-    /// The even walk reads every key and leaves a null placeholder for each skipped child.
     fn skip_odd(&mut self, index: usize) {
         if index % 2 == 1 {
             *self = Self::Null;
@@ -126,7 +119,6 @@ fn token_tree<'a>(
     scratch: &mut [Slot],
     first_number: &mut Option<usize>,
 ) -> Result<Tree<'a>, Error> {
-    // Each open container, with its key in its parent.
     let mut open: Vec<(Option<String>, Tree<'a>)> = Vec::new();
     let (mut key, mut root) = (None, None);
     json::visit(input, &LIMITS, profile, scratch, |token| {
@@ -208,7 +200,6 @@ fn value_tree<'a>(mut value: Value<'_, 'a, '_>, input: &[u8], walk: Walk) -> Res
     })
 }
 
-/// The string after unescape.
 fn text(string: Str<'_>) -> String {
     let mut buf = vec![0; string.len()];
     let decoded = string
@@ -219,7 +210,6 @@ fn text(string: Str<'_>) -> String {
     decoded
 }
 
-/// The number, after a check of each accessor with the parsers of `core`.
 fn checked<'a>(number: Number<'a>, input: &[u8]) -> Tree<'a> {
     let text = number.as_str();
     let class = if text.contains(['e', 'E']) {
@@ -264,8 +254,6 @@ fn kind<T>(result: Result<T, Error>) -> Result<T, ErrorKind> {
     result.map_err(|error| error.kind())
 }
 
-/// The sign, the coefficient, and the exponent of `text`, if the coefficient has at most 38
-/// significant digits and the exponent fits `i32`.
 fn decimal_of(text: &str) -> Option<(bool, u128, i32)> {
     let (negative, text) = text.strip_prefix('-').map_or((false, text), |rest| (true, rest));
     let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
@@ -287,7 +275,6 @@ fn decimal_of(text: &str) -> Option<(bool, u128, i32)> {
     Some((negative, coefficient, i32::try_from(exponent).ok()?))
 }
 
-/// Whether binary64 holds the number `text`, in the rule of `IJson`.
 fn binary64_holds(text: &str) -> bool {
     if !text.contains(['.', 'e', 'E']) {
         return text.parse::<i64>().is_ok_and(|value| value.unsigned_abs() < 1 << 53);
@@ -303,7 +290,6 @@ fn noncharacter(value: u32) -> bool {
     (0xfdd0..=0xfdef).contains(&value) || value & 0xfffe == 0xfffe
 }
 
-/// Whether the character or the escape at `at` is a noncharacter.
 fn noncharacter_at(input: &[u8], at: usize) -> bool {
     let hex = |from: usize| {
         let digits = input.get(from..from + 4)?;
@@ -338,7 +324,6 @@ fn noncharacter_at(input: &[u8], at: usize) -> bool {
     noncharacter(value)
 }
 
-/// Raw lexemes and their byte offsets. Only the independent parsers decide whether the grammar is valid.
 fn lexemes(input: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
     let mut pos = 0;
     std::iter::from_fn(move || {
@@ -378,7 +363,6 @@ fn lexemes(input: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
     })
 }
 
-/// The first noncharacter inside a string of the RFC prefix, including an unfinished string.
 fn first_noncharacter(input: &[u8]) -> Option<usize> {
     for (start, raw) in lexemes(input).filter(|(_, raw)| raw[0] == b'"') {
         let mut at = 1;
@@ -417,8 +401,6 @@ fn check_profiles(
     }
 }
 
-/// A value that a trusted reader reads. A string is bytes, so a string that is not UTF-8 compares
-/// too.
 #[derive(Debug)]
 enum Oracle {
     Null,
@@ -426,7 +408,6 @@ enum Oracle {
     U64(u64),
     I64(i64),
     F64(f64),
-    /// An integer that 64 bits do not hold, as its text.
     Integer(String),
     String(Vec<u8>),
     Array(Vec<Oracle>),
@@ -474,7 +455,6 @@ impl Parser {
     }
 }
 
-/// Whether `tree` and `oracle` hold the same value. A number compares in the type of the oracle.
 fn same(tree: &Tree<'_>, oracle: &Oracle, parser: Parser, replaced: &mut BTreeMap<usize, &str>) -> bool {
     if let Tree::Number(text, at) = tree {
         let text = match replaced.remove(at) {
@@ -519,7 +499,6 @@ fn same(tree: &Tree<'_>, oracle: &Oracle, parser: Parser, replaced: &mut BTreeMa
     }
 }
 
-/// A refusal that an accepting oracle can explain, at the first such byte in the document.
 fn oracle_exception(input: &[u8], parser: Parser) -> Option<(ErrorKind, usize)> {
     let mut keys = Vec::<BTreeSet<String>>::new();
     let mut tokens = lexemes(input).peekable();
@@ -585,11 +564,9 @@ fn check_oracle(input: &[u8], parser: Parser, rfc: &Result<Tree<'_>, Error>, ora
 }
 
 unsafe extern "C" {
-    /// `oracle.cpp`.
     fn simdjson_oracle(input: *const u8, len: usize, tree: *mut *const u8, tree_len: *mut usize) -> i32;
 }
 
-/// The tree of simdjson, or its error code.
 fn simdjson(input: &[u8]) -> Result<Oracle, i32> {
     let (mut tree, mut len) = (core::ptr::null(), 0);
     // SAFETY: `input` is readable for its length, and the shim writes the two out pointers only.
@@ -605,7 +582,6 @@ fn simdjson(input: &[u8]) -> Result<Oracle, i32> {
     Ok(oracle)
 }
 
-/// The value at `at` in the form of `oracle.cpp`.
 fn decode(bytes: &[u8], at: &mut usize) -> Oracle {
     fn take<'b>(bytes: &'b [u8], at: &mut usize, len: usize) -> &'b [u8] {
         *at += len;

@@ -1,7 +1,3 @@
-//! The contracts of the reader. Each test reads with each kernel of this CPU, and each kernel must
-//! give the same result. The expected results come from the standards, from `core`, or from
-//! serde_json, not from the reader.
-
 extern crate std;
 
 use std::{
@@ -16,7 +12,6 @@ use super::super::{
     Backend, Error, ErrorKind, Kind, Limit, Limits, Profile, Reader, Slot, Token, read_with, tests::kernels, visit_with,
 };
 
-/// Limits that no test document reaches, unless a test sets one.
 const WIDE: Limits = Limits {
     input_bytes_max: u32::MAX,
     depth_max: 1024,
@@ -28,7 +23,6 @@ const WIDE: Limits = Limits {
 
 const PROFILES: [Profile; 2] = [Profile::Rfc8259, Profile::IJson];
 
-/// A token with its strings decoded.
 #[derive(Clone, Debug, PartialEq)]
 enum Owned {
     ObjectStart,
@@ -66,7 +60,6 @@ fn owned(token: Token<'_>) -> Owned {
     }
 }
 
-/// The result of `run` with each kernel, on `input`, which each kernel must give.
 fn each_kernel<T: PartialEq + core::fmt::Debug>(
     input: &[u8],
     profile: Profile,
@@ -85,7 +78,6 @@ fn each_kernel<T: PartialEq + core::fmt::Debug>(
     first
 }
 
-/// The result of `decode` on `input`, which each kernel must give.
 fn read_each<T: PartialEq + core::fmt::Debug>(
     input: &[u8],
     limits: &Limits,
@@ -99,7 +91,6 @@ fn read_each<T: PartialEq + core::fmt::Debug>(
     })
 }
 
-/// Each token of `input`, which each kernel must give.
 fn tokens(input: &[u8], limits: &Limits, profile: Profile, slots: usize) -> Result<Vec<Owned>, Error> {
     let mut scratch = vec![Slot::EMPTY; slots];
     each_kernel(input, profile, |kernel| {
@@ -112,7 +103,6 @@ fn tokens(input: &[u8], limits: &Limits, profile: Profile, slots: usize) -> Resu
     })
 }
 
-/// The result of reading `input` with its tokens, without them.
 fn check(input: &[u8], limits: &Limits, profile: Profile, slots: usize) -> Result<(), Error> {
     tokens(input, limits, profile, slots).map(drop)
 }
@@ -121,11 +111,8 @@ fn error(kind: ErrorKind, offset: usize) -> Result<(), Error> {
     Err(Error::new(kind, offset))
 }
 
-/// The serde_json tree of the tokens of `input`. A number is the serde_json value of its text.
 pub(in crate::json) fn tree(input: &[u8], profile: Profile) -> Result<serde_json::Value, Error> {
     use serde_json::{Map, Value};
-    // Each container and each key takes one slot and at least one byte, so a slot for each byte
-    // is enough. A scratch of 1 MiB for each short string cost new pages on Windows at each call.
     let tokens = tokens(input, &WIDE, profile, input.len().min(1 << 16) + 1)?;
     let mut open: Vec<(Value, Option<String>)> = Vec::new();
     let mut key = None;
@@ -182,11 +169,9 @@ fn jsontestsuite() -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// Check each JSONTestSuite acceptance and rejection case against the documented profile differences.
 #[test]
 fn each_file_of_jsontestsuite_gives_its_decided_result() {
     use ErrorKind::{Duplicate, Noncharacter, Number, Surrogate, Syntax, Utf8};
-    // The `y_` files that refuse, with the profiles that refuse them.
     let refused: [(&str, &[Profile], ErrorKind, usize); 10] = [
         ("y_object_duplicated_key.json", &PROFILES, Duplicate, 9),
         ("y_object_duplicated_key_and_value.json", &PROFILES, Duplicate, 9),
@@ -326,7 +311,6 @@ fn each_file_of_jsontestsuite_gives_its_decided_result() {
         ("i_string_truncated-utf-8.json", Some((Utf8, 2)), Some((Utf8, 2))),
         ("i_string_utf16BE_no_BOM.json", Some((Syntax, 0)), Some((Syntax, 0))),
         ("i_string_utf16LE_no_BOM.json", Some((Syntax, 1)), Some((Syntax, 1))),
-        // Accepted with a depth limit of 500 or more.
         ("i_structure_500_nested_arrays.json", None, None),
         // A byte order mark refuses (RFC 8259 section 8.1 lets a reader refuse or ignore it).
         (
@@ -378,8 +362,6 @@ fn each_file_of_jsontestsuite_gives_its_decided_result() {
 #[test]
 fn each_line_of_kuhns_file_gives_the_result_of_its_profile() {
     let text = fs::read("tests/data/kuhn/UTF-8-test.txt").expect("tests/data holds Kuhn's file");
-    // A quote, a `\`, and a byte under 0x20 become ASCII that a string holds, so each line is one
-    // string with the same UTF-8.
     let plain: Vec<u8> = text
         .iter()
         .map(|&byte| match byte {
@@ -423,9 +405,6 @@ fn each_line_of_kuhns_file_gives_the_result_of_its_profile() {
     assert!(invalid > 50 && noncharacters >= 2, "{invalid} {noncharacters}");
 }
 
-/// Each pair of `\u` escapes of the surrogates U+D800 to U+DFFF: a high and then a low surrogate is
-/// one character, which `char::decode_utf16` gives. Each other pair refuses at its first lone
-/// surrogate, in each profile. `IJson` also refuses the noncharacters of the planes 1 to 16.
 #[test]
 fn each_surrogate_escape_pair_gives_its_character_or_refuses() {
     let kernels = kernels();
@@ -441,7 +420,6 @@ fn each_surrogate_escape_pair_gives_its_character_or_refuses() {
                         Err(Error::new(ErrorKind::Noncharacter, 1))
                     }
                     Some(char) => Ok(Some(char)),
-                    // A low surrogate first is lone, and so is a high surrogate without a low one.
                     None => Err(Error::new(ErrorKind::Surrogate, 1)),
                 };
                 for &kernel in &kernels {
@@ -458,8 +436,6 @@ fn each_surrogate_escape_pair_gives_its_character_or_refuses() {
     }
 }
 
-/// The 66 noncharacters of Unicode, as UTF-8 and as escapes: `Rfc8259` accepts each, and `IJson`
-/// refuses each at its offset. The characters next to them are no noncharacters.
 #[test]
 fn each_noncharacter_refuses_only_in_ijson() {
     let noncharacters: Vec<char> = (0xfdd0..=0xfdef)
@@ -508,7 +484,6 @@ fn each_noncharacter_refuses_only_in_ijson() {
     }
 }
 
-/// Hostile inputs give typed errors. A 60,000-level document must fit a thread with a 64 KiB stack.
 #[test]
 fn the_hostile_set_gives_its_typed_errors() {
     let tight = Limits {
@@ -606,7 +581,6 @@ fn the_hostile_set_gives_its_typed_errors() {
     for (name, document, profile, kind, offset) in cases {
         assert_eq!(check(document, &tight, profile, 1 << 17), error(kind, offset), "{name}");
     }
-    // Within wide limits, each document of the set that has no other defect reads.
     let wide = Limits {
         depth_max: u16::MAX,
         number_digits_max: 4301,
@@ -625,7 +599,6 @@ fn the_hostile_set_gives_its_typed_errors() {
         let read = super::super::read(deepest.as_bytes(), &wide, Profile::Rfc8259, &mut scratch, |_| Ok(()));
         assert_eq!(read, Ok(()));
     };
-    // WebAssembly with WASI has no threads, so the read runs on the stack of the test there.
     if cfg!(target_family = "wasm") {
         read_deepest();
     } else {
@@ -638,8 +611,6 @@ fn the_hostile_set_gives_its_typed_errors() {
     }
 }
 
-/// Each limit accepts a document at the limit and refuses the first item past it, at its offset.
-/// The count of a container comes back after a nested container ends.
 #[test]
 fn each_limit_refuses_the_first_item_past_it() {
     use Limit::{Depth, Elements, InputBytes, Members, NumberDigits, StringBytes};
@@ -654,7 +625,6 @@ fn each_limit_refuses_the_first_item_past_it() {
     let members: fn(&mut Limits, u32) = |limits, value| limits.members_max = value;
     let elements: fn(&mut Limits, u32) = |limits, value| limits.elements_max = value;
     let digits: fn(&mut Limits, u32) = |limits, value| limits.number_digits_max = u16::try_from(value).unwrap();
-    // The document, the limit that it meets, and the offset of the first item past one less.
     type Set = fn(&mut Limits, u32);
     let cases: [(&str, Set, Limit, u32, usize); 12] = [
         ("[1,2]", input, InputBytes, 5, 4),
@@ -687,8 +657,6 @@ fn each_limit_refuses_the_first_item_past_it() {
     }
 }
 
-/// A scratch needs one slot for each open container and one for each key of each open object. A
-/// scratch one slot too short refuses at the item that needs the slot.
 #[test]
 fn a_scratch_one_slot_too_short_refuses_at_the_item_that_needs_it() {
     for (document, slots, offset) in [
@@ -709,9 +677,6 @@ fn a_scratch_one_slot_too_short_refuses_at_the_item_that_needs_it() {
     }
 }
 
-/// A duplicate key in an object at depth 3 that the decoder skips refuses before the reader
-/// reports the end of that object. An object of 16 members compares each key at once. An object
-/// of 17 compares when it ends.
 #[test]
 fn a_duplicate_in_a_skipped_object_refuses_before_the_end_of_the_object() {
     for members in [16, 17] {
@@ -757,8 +722,6 @@ fn a_duplicate_in_a_skipped_object_refuses_before_the_end_of_the_object() {
     }
 }
 
-/// After a nested container ends, the frame of its object comes back with the filter of its keys:
-/// a key after the container that equals a key before it refuses.
 #[test]
 fn a_duplicate_after_a_nested_container_refuses() {
     for document in [r#"{"a":{"b":1},"a":2}"#, r#"{"a":[1,{"a":1}],"a":2}"#] {
@@ -773,13 +736,8 @@ fn a_duplicate_after_a_nested_container_refuses() {
     }
 }
 
-/// Errors come in the order of their offsets, also when an object of more than 16 members checks
-/// a later key only when it ends: an error after a duplicate key, in the object or in an object in
-/// it, or the end of the input, gives the duplicate.
 #[test]
 fn a_duplicate_comes_before_a_later_error_in_a_large_object() {
-    // The members of an object, `"k0":0` to `"k{count - 1}":0`, with the key of member `twin` equal
-    // to the key of member 2, and the value of member `bad` replaced by `value`.
     let members = |count: usize, twin: usize, bad: usize, value: &str| {
         (0..count)
             .map(|index| {
@@ -790,18 +748,12 @@ fn a_duplicate_comes_before_a_later_error_in_a_large_object() {
             .collect::<Vec<_>>()
             .join(",")
     };
-    // The offset of the second `"k2"`.
     let twin = |document: &str| document.match_indices("\"k2\"").nth(1).map_or(0, |(at, _)| at);
     let cases = [
-        // The duplicate at member 17, and an error of the grammar at member 18.
         format!("{{{}}}", members(20, 17, 18, "tru")),
-        // The same error in an object in a member after the duplicate.
         format!("{{{}}}", members(20, 17, 18, r#"{"x":[1,tru]}"#)),
-        // The same in an object in the large object, which is not the root.
         format!("[{{\"a\":{{{}}}}}]", members(20, 17, 18, "tru")),
-        // The input ends after the duplicate.
         format!("{{{}", members(20, 17, 18, "0")),
-        // A duplicate at member 3 refuses at once, before an error at member 15.
         format!("{{{}}}", members(17, 3, 15, "tru")),
     ];
     for document in &cases {
@@ -813,7 +765,6 @@ fn a_duplicate_comes_before_a_later_error_in_a_large_object() {
             );
         }
     }
-    // An error before the duplicate comes first.
     let document = format!("{{{}}}", members(20, 17, 16, "tru"));
     let at = document.find("tru").unwrap() + 3;
     assert_eq!(
@@ -822,24 +773,17 @@ fn a_duplicate_comes_before_a_later_error_in_a_large_object() {
     );
 }
 
-/// Keys of 20 bytes that differ only in bytes 4 to 7 and 12 to 15, so their fingerprints are equal:
-/// the first, middle, and last 4 bytes, and the length.
 fn twin_key(index: usize) -> String {
     format!("aaaa{index:04}aaaa{:04}aaaa", index * 7 % 10_000)
 }
 
-/// The object of `keys`, each with the value 0, and `tail` after the last member.
 fn object_of(keys: &[String], tail: &str) -> String {
     let members: Vec<String> = keys.iter().map(|key| format!("\"{key}\":0")).collect();
     format!("{{{}{tail}}}", members.join(","))
 }
 
-/// In an object of more than 16 members, keys whose fingerprints are equal but whose bytes differ
-/// read: the filter compares them, and it refuses no key that is not a duplicate.
 #[test]
 fn keys_of_a_large_object_with_one_fingerprint_that_differ_read() {
-    // 16 keys that the linear check compares, then 6 keys of one fingerprint, so the filter
-    // compares 5 of them and does not sort.
     let mut keys: Vec<String> = (0..16).map(|index| format!("k{index}")).collect();
     keys.extend((0..6).map(twin_key));
     for profile in PROFILES {
@@ -847,9 +791,6 @@ fn keys_of_a_large_object_with_one_fingerprint_that_differ_read() {
     }
 }
 
-/// Keys of one length with the same first, middle, and last 4 bytes, as a hostile object can have:
-/// past 8 keys of one fingerprint, the check sorts. It still refuses each duplicate, before a later
-/// error, and an object of such distinct keys reads.
 #[test]
 fn keys_that_share_their_start_middle_and_end_refuse_each_duplicate() {
     let mut keys: Vec<String> = (0..2000).map(twin_key).collect();
@@ -872,8 +813,6 @@ fn keys_that_share_their_start_middle_and_end_refuse_each_duplicate() {
     }
 }
 
-/// Keys compare after unescape, in an object of up to 16 members and in a larger one. Thus
-/// `"\u0061lg"` equals `"alg"`.
 #[test]
 fn keys_compare_after_unescape() {
     let pairs = [
@@ -898,8 +837,6 @@ fn keys_compare_after_unescape() {
             }
         }
     }
-    // Each key of 1 to 24 bytes, with each of its bytes once as an escape: the fingerprint of the
-    // key with the escape reads the same bytes as that of the key without it.
     let letters = b"abcdefghijklmnopqrstuvwx";
     let text = |bytes: &[u8]| core::str::from_utf8(bytes).unwrap().to_owned();
     for len in 1..=letters.len() {
@@ -943,9 +880,6 @@ fn keys_compare_after_unescape() {
     assert_eq!(found, Ok(true));
 }
 
-/// An invalid UTF-8 sequence at a token start in the last 3 bytes of a block, which ends in the
-/// next block, gives the UTF-8 error at its offset, not an error of the grammar. A valid
-/// character there gives the error of the grammar. This holds at each place where a token starts.
 #[test]
 fn an_invalid_sequence_at_a_token_in_the_last_bytes_of_a_block_gives_the_utf8_error() {
     let invalid: [&[u8]; 5] = [
@@ -955,7 +889,6 @@ fn an_invalid_sequence_at_a_token_in_the_last_bytes_of_a_block_gives_the_utf8_er
         &[0x80],
         &[0xff],
     ];
-    // The bytes before the sequence: a value in an array, a key, the end of a value, and the root.
     let before: [(&[u8], &[u8]); 4] = [(b"[0,", b"]"), (b"{", b"}"), (b"[0", b"]"), (b"", b"")];
     for at in 60..64 {
         for (head, tail) in before {
@@ -981,9 +914,6 @@ fn an_invalid_sequence_at_a_token_in_the_last_bytes_of_a_block_gives_the_utf8_er
     }
 }
 
-/// Each document of profile A with one byte changed or one character added: an error comes no
-/// later than the UTF-8 error of `core::str::from_utf8`, and at that offset, it is the UTF-8
-/// error. A document that is UTF-8 has no UTF-8 error.
 #[test]
 fn each_changed_document_gives_no_error_after_its_utf8_error() {
     for document in generated_documents()
@@ -991,7 +921,6 @@ fn each_changed_document_gives_no_error_after_its_utf8_error() {
         .filter(|(class, _)| class.starts_with('a'))
     {
         let text = document.1;
-        // Each place in a short document, and each 11th place in a longer one, so the test takes seconds.
         let step = if text.len() > 1024 { 11 } else { 1 };
         for at in (0..text.len()).step_by(step) {
             for change in [&[0x80][..], &[0xc3], &[0xff], &[0xe9], "é".as_bytes()] {
@@ -1024,8 +953,6 @@ fn each_changed_document_gives_no_error_after_its_utf8_error() {
     }
 }
 
-/// A value that the walk skips gets each check of its profile: the walk gives the error that the
-/// tokens give.
 #[test]
 fn a_skipped_value_gets_each_check_of_its_profile() {
     let defects: [(&[u8], Profile); 11] = [
@@ -1062,8 +989,6 @@ fn a_skipped_value_gets_each_check_of_its_profile() {
     }
 }
 
-/// The walk reads a value with a type, and `kind` gives the type to choose the read. A read of
-/// another type refuses at the value and takes nothing.
 #[test]
 fn the_walk_reads_each_type_and_refuses_another() {
     for (document, expected) in [(r#"{"aud":"a"}"#, vec!["a"]), (r#"{"aud":["a","b"]}"#, vec!["a", "b"])] {
@@ -1121,9 +1046,6 @@ fn the_walk_reads_each_type_and_refuses_another() {
     }
 }
 
-/// A loop can leave a value, or a container that it opened, part way. The next call of the walk
-/// skips the rest, with each check, and gives the next item of its own container. After the end
-/// of its container, a walk gives `None` again and takes nothing after the end.
 #[test]
 fn the_walk_skips_the_rest_of_what_the_loop_left() {
     let walk = |document: &[u8]| {
@@ -1160,15 +1082,8 @@ fn the_walk_skips_the_rest_of_what_the_loop_left() {
     assert_eq!(walk(duplicate), Err(Error::new(ErrorKind::Duplicate, offset)));
 }
 
-/// The number run reads an array of numbers itself, and the cursor resumes at the first other
-/// byte. Each document here takes the push loop with the run: it holds an array of 1,500
-/// numbers at its middle. With the end of a run at each offset of a block of 64 bytes, each document
-/// gives the tree of serde_json: a run that ends at whitespace, at a `[ ]`, in an object, and in
-/// nested arrays. A run that ends at a byte that is not UTF-8, at a `]` after a `,`, or at the end of
-/// the input gives that error at its offset.
 #[test]
 fn a_number_run_that_ends_at_each_offset_of_a_block_gives_the_tree_of_serde_json() {
-    // 48 numbers, about 3 blocks, and the array of numbers that sends each document to the run.
     let run = (0..48_i32)
         .map(|index| (index * 37 - 500).to_string())
         .collect::<Vec<_>>()
@@ -1229,8 +1144,6 @@ fn a_number_run_that_ends_at_each_offset_of_a_block_gives_the_tree_of_serde_json
     }
 }
 
-/// Both permanent fuzz seeds reach the number run at its first eligible length.
-/// The missing exponent digit refuses after the reader emits every preceding number.
 #[test]
 fn the_4096_byte_fuzz_seeds_reach_the_number_run() {
     for (file, numbers, result) in [
@@ -1258,7 +1171,6 @@ fn the_4096_byte_fuzz_seeds_reach_the_number_run() {
     }
 }
 
-/// The classes of `benches/data/json`, one document for each line of a `.jsonl` file.
 fn generated_documents() -> Vec<(String, Vec<u8>)> {
     let mut documents = Vec::new();
     let mut classes: Vec<_> = fs::read_dir("benches/data/json")
@@ -1290,8 +1202,6 @@ fn generated_documents() -> Vec<(String, Vec<u8>)> {
     documents
 }
 
-/// The tokens of each corpus give the tree of serde_json: the reader gives each string, key, and
-/// number of the document, in order.
 #[test]
 fn the_tokens_of_each_corpus_give_the_tree_of_serde_json() {
     let fetched = ["twitter", "citm_catalog", "canada"].map(|name| {
@@ -1302,7 +1212,6 @@ fn the_tokens_of_each_corpus_give_the_tree_of_serde_json() {
     let generated = generated_documents()
         .into_iter()
         .map(|document| (document, &PROFILES[..]));
-    // twitter.json has integers past 2^53, which `IJson` refuses.
     let fetched = fetched.into_iter().map(|document| (document, &PROFILES[..1]));
     for ((class, document), profiles) in generated.chain(fetched) {
         let expected: serde_json::Value = serde_json::from_slice(&document).unwrap();
@@ -1312,8 +1221,6 @@ fn the_tokens_of_each_corpus_give_the_tree_of_serde_json() {
     }
 }
 
-/// Each string of up to 7 bytes over `\`, `u`, `0`, `a`, `"`, `n`, and 0x1f, in quotes: the reader
-/// accepts it exactly when serde_json does, and it decodes it to the string of serde_json.
 #[test]
 fn each_short_string_decodes_as_serde_json_does() {
     const BYTES: [u8; 7] = [b'\\', b'u', b'0', b'a', b'"', b'n', 0x1f];
@@ -1340,9 +1247,6 @@ fn each_short_string_decodes_as_serde_json_does() {
     }
 }
 
-/// Each byte at each of the 4 digits of a `\u` escape: the reader accepts the escape exactly when
-/// the byte is a hex digit, and gives the character of its value. Otherwise it refuses at that
-/// byte: a byte of 0x80 or more is not UTF-8, and each other byte is a syntax error.
 #[test]
 fn each_byte_at_each_digit_of_a_unicode_escape_is_a_hex_digit_or_refuses() {
     for at in 3..7 {
@@ -1366,9 +1270,6 @@ fn each_byte_at_each_digit_of_a_unicode_escape_is_a_hex_digit_or_refuses() {
     }
 }
 
-/// The number rule of `IJson`: the reader accepts a number exactly when the oracle does. The
-/// oracle counts the significant digits of the text, and it reads the value with the correctly
-/// rounded parser of `core`.
 #[test]
 fn ijson_accepts_a_number_exactly_when_binary64_holds_it() {
     fn holds(text: &str) -> bool {
@@ -1427,7 +1328,6 @@ fn ijson_accepts_a_number_exactly_when_binary64_holds_it() {
     .map(str::to_owned)
     .to_vec();
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    // A pseudo-random number under `bound` (xorshift64).
     let mut below = |bound: usize| {
         state ^= state << 13;
         state ^= state >> 7;

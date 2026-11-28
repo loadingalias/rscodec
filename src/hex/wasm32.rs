@@ -1,7 +1,3 @@
-//! The WebAssembly SIMD kernels: `i8x16.swizzle` maps each nibble to its digit, and compares
-//! classify each character. The decoder ANDs the valid lanes of each block into one vector, and
-//! tests it once after the last block.
-
 use core::arch::wasm32::*;
 
 use super::encode_steps;
@@ -13,26 +9,22 @@ use crate::{
 
 const DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-/// The nibbles of 16 characters, and the lanes that are digits, which are all ones.
 #[inline]
 fn nibbles(chars: v128) -> (v128, v128) {
     let value = i8x16_sub(chars, u8x16_splat(b'0'));
     let digit = u8x16_lt(value, u8x16_splat(10));
     let letter = u8x16_lt(i8x16_sub(chars, u8x16_splat(b'a')), u8x16_splat(6));
-    // The step from `c - '0'` to the nibble of a letter.
     (
         i8x16_sub(value, v128_and(letter, u8x16_splat(39))),
         v128_or(digit, letter),
     )
 }
 
-/// The byte of each 16-bit lane of two nibbles: the first, the high nibble, is the low byte.
 #[inline]
 fn join(nibbles: v128) -> v128 {
     v128_or(i16x8_shl(nibbles, 4), u16x8_shr(nibbles, 8))
 }
 
-/// The even bytes of two vectors, the bytes of the joined lanes.
 #[inline]
 fn evens(first: v128, second: v128) -> v128 {
     u8x16_shuffle::<0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30>(first, second)

@@ -129,14 +129,11 @@ impl Profile {
         }
     }
 
-    /// The number of characters of the text of `len` bytes before the padding, and with it, or
-    /// `None` if a number overflows `usize`. It divides the length one time.
     const fn text_lens(self, len: usize) -> Option<(usize, usize)> {
         let rest = len % 3;
         let Some(full) = (len / 3).checked_mul(4) else {
             return None;
         };
-        // A rest of 1 or 2 bytes gives 2 or 3 characters.
         let Some(symbols) = full.checked_add(rest + rest.div_ceil(2)) else {
             return None;
         };
@@ -193,8 +190,6 @@ impl Profile {
         self.encode_by(Public, backend, bytes, out)
     }
 
-    /// Encodes `bytes` on the kernel of `backend` in `class`. The kernel writes the characters
-    /// before the padding.
     #[inline(always)]
     fn encode_by<'o>(
         self,
@@ -263,9 +258,6 @@ impl Profile {
         self.decode_by(Public, backend, text, out)
     }
 
-    /// Decodes `text` on the kernel of `backend` in `class`. The kernel decodes the characters
-    /// before the padding and gives whether each is in the alphabet. In the secret class, a refusal
-    /// of the characters writes zero to the output first.
     #[inline(always)]
     fn decode_by<'o>(
         self,
@@ -277,14 +269,12 @@ impl Profile {
         let symbols = self.symbols(text)?;
         let len = bytes_len(symbols.len());
         let out = out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))?;
-        // The kernel checks the alphabet and the trailing bits. One branch for the whole text.
         if !kernel::decode(class, backend, self, symbols, out) {
             return Err(self.refusal(class, symbols, out));
         }
         Ok(out)
     }
 
-    /// The characters of `text` before the padding.
     const fn symbols(self, text: &[u8]) -> Result<&[u8], Error> {
         let length = Error::new(ErrorKind::Length, text.len());
         match self {
@@ -298,8 +288,6 @@ impl Profile {
         }
     }
 
-    /// Report the first invalid symbol or nonzero trailing bits. Secret decode clears the output first.
-    /// Keep refusal out of line to avoid spills on the valid path.
     #[cold]
     #[inline(never)]
     fn refusal(self, class: impl Class, symbols: &[u8], out: &mut [u8]) -> Error {
@@ -313,7 +301,6 @@ impl Profile {
     }
 }
 
-/// The number of bytes of `len` characters with no padding.
 const fn bytes_len(len: usize) -> usize {
     len / 4 * 3 + (len % 4).saturating_sub(1)
 }
@@ -366,7 +353,6 @@ impl Kernel {
         Self::Portable,
     ];
 
-    /// The CPU features that the kernel needs, and its timing class.
     const fn needs(self) -> (Caps, Timing) {
         #[cfg(target_arch = "x86_64")]
         use crate::cpu::x86::{AVX2, AVX512BW, AVX512F, AVX512VBMI, SSSE3};
@@ -420,7 +406,6 @@ impl Backend {
     }
 }
 
-/// The calls of each kernel.
 #[cfg_attr(
     any(target_arch = "x86_64", target_arch = "aarch64"),
     expect(
@@ -440,7 +425,6 @@ mod kernel {
     use crate::cpu::Timing;
     use crate::ct::Class;
 
-    /// Encodes `bytes` into the characters `out`, with no padding.
     #[inline(always)]
     pub(super) fn encode<C: Class>(class: C, backend: Backend, profile: Profile, bytes: &[u8], out: &mut [u8]) {
         match backend.0 {
@@ -461,8 +445,7 @@ mod kernel {
             Kernel::Avx512Vbmi if C::TIMING.runs(Timing::Public) => unsafe {
                 x86::avx512vbmi::encode(profile, bytes, out)
             },
-            // The copy of the secret class has no path to the VBMI kernel, of the public class. VBMI
-            // needs the features of AVX-512BW, so its backend runs the AVX-512BW kernel there.
+            // Intel excludes VBMI permutes from DOIT. A VBMI CPU also supports AVX-512BW.
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of either kernel exists only on a CPU that has AVX-512BW.
             Kernel::Avx512Bw | Kernel::Avx512Vbmi if bytes.len() <= x86::ONE_MAX => unsafe {
@@ -479,8 +462,6 @@ mod kernel {
         }
     }
 
-    /// Decodes the characters `text`, with no padding, into `out`, and gives whether each is in the
-    /// alphabet.
     #[inline(always)]
     pub(super) fn decode<C: Class>(class: C, backend: Backend, profile: Profile, text: &[u8], out: &mut [u8]) -> bool {
         match backend.0 {
@@ -501,7 +482,6 @@ mod kernel {
             Kernel::Avx512Vbmi if C::TIMING.runs(Timing::Public) => unsafe {
                 x86::avx512vbmi::decode(profile, text, out)
             },
-            // As in `encode`: the copy of the secret class has no path to the VBMI kernel.
             #[cfg(target_arch = "x86_64")]
             // SAFETY: a `Backend` of either kernel exists only on a CPU that has AVX-512BW.
             Kernel::Avx512Bw | Kernel::Avx512Vbmi if out.len() <= x86::ONE_MAX => unsafe {
@@ -519,29 +499,14 @@ mod kernel {
     }
 }
 
-/// Encodes `bytes`, at least 16, into the characters `out`, with no padding, with the `block` of a
-/// kernel of 16-byte vectors. `last` is the last 16 bytes. `block(src, skip, dst)` takes the 12
-/// bytes from `skip` in `src`, with zero after the end of `src`, and gives 16 characters.
-///
-/// Whole blocks of 12 bytes come first, and the last block takes the last 1 to 12 bytes from
-/// `last`. The last block runs first, and `to_end` puts its characters at the end of `out`: the
-/// blocks before it then write the other lanes of that store again. Each length comes from the
-/// length of `out` with shifts, and a loop on the place in the input runs the whole blocks, so the
-/// path has no division and no count of blocks.
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "aarch64",
     all(target_arch = "wasm32", target_feature = "simd128")
 ))]
 #[inline(always)]
+#[cfg_attr(target_arch = "aarch64", doc = "# Safety\nThe CPU must support Neon.")]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(
-        clippy::missing_safety_doc,
-        reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
-    )
-)]
 fn encode_steps(
     class: impl Class,
     bytes: &[u8],
@@ -550,8 +515,6 @@ fn encode_steps(
     to_end: impl Fn(&[u8; 16], usize) -> [u8; 16],
     block: impl Fn(&[u8; 16], u8, &mut [u8; 16]),
 ) {
-    // The last block has the last 1 to 16 characters, after the whole blocks of 16, and 3 bytes
-    // for each 4 characters: 12 bytes for 16, and 1 or 2 bytes for 2 or 3.
     let chars = 16 - (out.len().wrapping_neg() & 15);
     let skip = 16 - 3 * chars / 4;
     let mut dst = [0; 16];
@@ -570,7 +533,6 @@ fn encode_steps(
         block(src, 0, dst);
         rest = rest.get(12..).unwrap_or_default();
     }
-    // A rest of 13 to 15 bytes has one more whole block, in `last`.
     if let Some(skip) = 16_usize.checked_sub(rest.len()).filter(|&skip| skip < 4)
         && let Some(dst) = outs.next()
     {
@@ -578,29 +540,14 @@ fn encode_steps(
     }
 }
 
-/// Decodes the characters `text`, with no padding, into `out` with the `block` of a kernel of
-/// 16-byte vectors: each block takes 16 characters and gives 12 bytes at the start of 16.
-///
-/// A block writes all 16 bytes where `out` has room, and the next block writes its bytes over the
-/// last 4. The characters after the last whole block come from the last 16 characters of the text,
-/// put in place by `from_end`, with `A` after them. A text of fewer than 16 characters runs on
-/// arrays on the stack. Gives the byte after the result in the last block, from `byte_at`: the
-/// trailing bits, which are zero in a canonical text. A load of it from memory would wait for the
-/// store of the vector on Graviton4.
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "aarch64",
     all(target_arch = "wasm32", target_feature = "simd128")
 ))]
 #[inline(always)]
+#[cfg_attr(target_arch = "aarch64", doc = "# Safety\nThe CPU must support Neon.")]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
-#[cfg_attr(
-    target_arch = "aarch64",
-    expect(
-        clippy::missing_safety_doc,
-        reason = "the function is safe; only its target feature makes a call from code without the feature unsafe"
-    )
-)]
 fn decode_steps(
     class: impl Class,
     text: &[u8],
@@ -620,7 +567,6 @@ fn decode_steps(
         if let Some(dst) = out.get_mut(at..).and_then(<[u8]>::first_chunk_mut) {
             block(src, dst);
         } else if let Some(bytes) = out.get_mut(at..at + 12) {
-            // The last whole block, with no room for 16 bytes.
             let mut dst = [0; 16];
             block(src, &mut dst);
             write16(bytes, &dst);
@@ -640,24 +586,18 @@ fn decode_steps(
     after
 }
 
-/// The tables of the SIMD kernels of a profile.
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "aarch64",
     all(target_arch = "wasm32", target_feature = "simd128")
 ))]
 struct Tables {
-    /// The tables of the nibble lookups of the x86_64 and WebAssembly kernels.
     #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
     nibbles: Nibbles,
-    /// The character of each sextet.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     alphabet: [u8; 64],
-    /// The sextet of each ASCII byte, or 0x80 for a byte outside the alphabet.
     #[cfg(target_arch = "x86_64")]
     sextets: [[u8; 64]; 2],
-    /// The sextet with bit 7 set of each byte from `+`, the first byte of the two alphabets, to `z`,
-    /// the last, or zero for a byte outside the alphabet.
     #[cfg(target_arch = "aarch64")]
     sextets_from_plus: [u8; 80],
 }
@@ -670,13 +610,9 @@ struct Nibbles {
     /// outside the alphabet.
     lo: [u8; 16],
     hi: [u8; 16],
-    /// The step from a character to its sextet, at the high nibble of the character. The step of
-    /// `special` is at its high nibble plus `special_index`.
     roll: [u8; 16],
     special: u8,
     special_index: u8,
-    /// The step from a sextet to its character, at its class: 0 for `a`–`z`, 1 to 10 for
-    /// `0`–`9`, 11 and 12 for the last two characters, and 13 for `A`–`Z`.
     shift: [u8; 16],
 }
 
@@ -688,7 +624,6 @@ struct Nibbles {
 impl Tables {
     #[inline]
     const fn of(profile: Profile) -> &'static Self {
-        // The steps are bytes: -65 is 0xbf, for example.
         const URL: Tables = Tables {
             #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
             nibbles: Nibbles {
@@ -781,7 +716,6 @@ impl Tables {
     }
 }
 
-/// The kernel table of x86_64.
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::Kernel;
@@ -790,7 +724,6 @@ mod tests {
         x86::{AVX2, AVX512BW, AVX512F, AVX512VBMI, AVX512VBMI2, AVX512VL, BMI1, BMI2, PCLMULQDQ, SSSE3},
     };
 
-    /// The kernel of each timing class on a CPU with `features`.
     fn chosen(features: &[Caps]) -> [Kernel; 2] {
         let caps = features.iter().copied().fold(Caps::NONE, Caps::union);
         [Timing::Public, Timing::Secret].map(|class| Kernel::ALL[Kernel::fastest(caps, class)])

@@ -24,7 +24,6 @@ fn check_f64(value: f64) {
     );
 }
 
-/// xorshift64*: a fixed seed gives the same values on each run.
 fn random(mut state: u64) -> impl Iterator<Item = u64> {
     core::iter::repeat_with(move || {
         state ^= state << 13;
@@ -34,8 +33,6 @@ fn random(mut state: u64) -> impl Iterator<Item = u64> {
     })
 }
 
-/// The binary form and the digits of `core::fmt` of the finite nonzero `value`, as the pair of the
-/// integer of its digits and the power of 10 of its last digit.
 fn binary_and_digits(value: f64) -> (Binary, (u64, i32)) {
     let bits = value.to_bits();
     let (biased, field) = ((bits >> 52 & 0x7ff) as i32, bits & ((1 << 52) - 1));
@@ -63,7 +60,6 @@ fn binary_and_digits(value: f64) -> (Binary, (u64, i32)) {
     )
 }
 
-/// `digits × 10^exponent` without its trailing zeros.
 fn normal((mut digits, mut exponent): (u64, i32)) -> (u64, i32) {
     while digits % 10 == 0 {
         digits /= 10;
@@ -146,7 +142,6 @@ fn each_power_of_two_prints_as_core_fmt() {
         check_f64(f64::from_bits(biased << 52));
         check_f64(-f64::from_bits(biased << 52));
     }
-    // The powers of two of binary32, as binary64 values.
     for biased in 1..0xff_u32 {
         check_f64(f64::from(f32::from_bits(biased << 23)));
         check_f64(-f64::from(f32::from_bits(biased << 23)));
@@ -165,7 +160,6 @@ fn each_exponent_prints_as_core_fmt_with_its_extreme_and_random_significands() {
             check_f64(f64::from_bits(biased << 52 | field));
         }
     }
-    // The binary32 exponents, as binary64 values.
     for biased in 0..0xff_u32 {
         let extremes = [0, 1, 2, 3, (1 << 23) - 1, (1 << 23) - 2, 1 << 22];
         let fields = extremes
@@ -192,8 +186,6 @@ fn each_value_of_a_fixed_seed_sample_prints_as_core_fmt_and_reads_back() {
     }
 }
 
-/// `shortest` gives the digits of `core::fmt` on a sample, on each power of two, and on the hard
-/// values, before the layout.
 #[test]
 fn shortest_gives_the_digits_of_core_fmt() {
     let sample = random(0x5eed_0003).take(1 << 16).map(f64::from_bits);
@@ -212,12 +204,9 @@ fn shortest_gives_the_digits_of_core_fmt() {
     }
 }
 
-/// Sample both sides of each rounding threshold in units of 2⁻⁶⁴.
 const BAND: u64 = 4;
 const TENFOLD_BAND: u64 = 16;
 
-/// Whether the estimates for `binary` are in a band, so that only an exact decision gives the
-/// form of `core::fmt`.
 fn in_band(binary: Binary) -> bool {
     let Binary { c, q, irregular } = binary;
     let k = if irregular {
@@ -264,7 +253,6 @@ fn band_values() -> std::vec::Vec<f64> {
         if modulus >= 1 << 51 {
             break;
         }
-        // `c` for `2c + 1` and for `2c − 1` divisible by the modulus, from 2^52 up, and the next one.
         for residue in [(modulus - 1) / 2, modulus.div_ceil(2)] {
             let first = (1 << 52) + (residue + modulus - (1 << 52) % modulus) % modulus;
             values.extend([first, first + modulus].map(|c| Binary { c, q, irregular: false }));
@@ -280,7 +268,6 @@ fn band_values() -> std::vec::Vec<f64> {
 #[test]
 fn each_value_in_a_band_prints_as_core_fmt() {
     let values = band_values();
-    // The ties of `c / 4`, the bounds on a decimal, and the powers of two in a band, such as 2^-25.
     assert!(values.len() > 1 << 12, "{} values are in a band", values.len());
     for value in [2.9802322387695312e-8, 1_125_899_906_842_624.3] {
         assert!(values.contains(&value), "{value:e} is in a band");
@@ -291,7 +278,6 @@ fn each_value_in_a_band_prints_as_core_fmt() {
     }
 }
 
-/// The order of `p × 2^twos × 10^tens` and `y`, exactly: the oracle of the logarithm formulas.
 fn compare(p: u64, twos: i32, tens: i32, y: u64) -> Ordering {
     let (mut left, mut right) = (Big::new(p), Big::new(y));
     if tens >= 0 {
@@ -308,7 +294,6 @@ fn compare(p: u64, twos: i32, tens: i32, y: u64) -> Ordering {
     left.0.iter().rev().cmp(right.0.iter().rev())
 }
 
-/// An unsigned integer of [`Big::LIMBS`] 64-bit limbs, the least significant first.
 struct Big([u64; Big::LIMBS]);
 
 impl Big {
@@ -322,7 +307,6 @@ impl Big {
     }
 
     fn mul_pow5(&mut self, mut power: u32) {
-        /// The greatest power of 5 under 2^64.
         const STEP: u32 = 27;
         while power > 0 {
             let factor = 5_u64.pow(power.min(STEP));

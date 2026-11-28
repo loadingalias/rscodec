@@ -1,6 +1,3 @@
-//! The simd128 kernel. Nibble tables classify the bytes and check UTF-8. WebAssembly has no
-//! carry-less multiply, so six shifts build the string mask.
-
 use core::arch::wasm32::*;
 
 use super::{
@@ -9,7 +6,6 @@ use super::{
 };
 use crate::vector::wasm32::load16;
 
-/// The simd128 kernel.
 #[inline(never)]
 pub(super) fn simd128(input: &[u8], start: usize, carry: Carry) -> Block {
     let (bytes, before) = (&input[start..], block::before(input, start));
@@ -45,14 +41,12 @@ pub(super) fn simd128(input: &[u8], start: usize, carry: Carry) -> Block {
     simd::scan(classes, carry, block::prefix_xor)
 }
 
-/// The bit of each byte of `lanes` that has bit 7 set.
 #[inline]
 fn bits(lanes: [v128; 4]) -> u64 {
     let [a, b, c, d] = lanes.map(|lane| u64::from(u8x16_bitmask(lane)));
     a | b << 16 | c << 32 | d << 48
 }
 
-/// The UTF-8 check of [`block::utf8_error_at`] on each byte of `quarters`.
 #[inline]
 fn utf8_error(quarters: [v128; 4], before: u32) -> bool {
     let [a, b, c, d] = quarters;
@@ -68,8 +62,6 @@ fn utf8_error(quarters: [v128; 4], before: u32) -> bool {
     v128_any_true(error)
 }
 
-/// A byte that is not zero at each byte of `input` that ends an error, after the bytes of
-/// `previous`.
 #[inline]
 fn check(input: v128, previous: v128, [first_high, first_low, second_high]: [v128; 3]) -> v128 {
     let first = i8x16_shuffle::<13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28>(previous, input);
@@ -82,7 +74,6 @@ fn check(input: v128, previous: v128, [first_high, first_low, second_high]: [v12
         ),
         u8x16_swizzle(second_high, u8x16_shr(input, 4)),
     );
-    // Bit 7 is set where `second` is at least 0xe0 or `first` is at least 0xf0.
     let continues = v128_or(
         u8x16_sub_sat(second, u8x16_splat(0x60)),
         u8x16_sub_sat(first, u8x16_splat(0x70)),
@@ -90,17 +81,13 @@ fn check(input: v128, previous: v128, [first_high, first_low, second_high]: [v12
     v128_xor(v128_and(continues, u8x16_splat(0x80)), pair)
 }
 
-/// The bits of a mask for each byte of [`escapes`].
 pub(super) const BITS: u32 = 1;
 
-/// A mask with [`BITS`] bits for each byte of `block` that a JSON string escapes: `"`, `\\`, or a
-/// byte under 0x20, the first byte in the low bits.
 #[inline(always)]
 pub(super) fn escapes(block: &[u8; 16]) -> u64 {
     scan(load16::<0, 16>(block))
 }
 
-/// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
 #[inline(always)]
 pub(super) fn escapes_of_words(low: u64, high: u64) -> u64 {
     scan(u64x2(low, high))

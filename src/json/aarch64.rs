@@ -1,19 +1,8 @@
-//! The Neon kernels. Nibble tables classify the bytes and check UTF-8. A carry-less multiply
-//! (PMULL) builds the string mask where the CPU has it, and six shifts where it does not.
-//!
-//! The macro `kernel` makes the module of each kernel from one source, so each kernel has its own
-//! copy of each helper, with the target features of the kernel. The compiler does not inline a
-//! helper of this size that has two callers, and a call for each block costs time.
-
-#![expect(
-    clippy::missing_safety_doc,
-    reason = "each function is safe; only its target feature makes a call from code without the feature unsafe"
-)]
-
 use core::arch::aarch64::vmull_p64;
 
-/// The XOR of bits `0..=i` of `bits` in each bit `i`: the carry-less product with all ones.
 #[inline]
+/// # Safety
+/// The CPU must support NEON, AES.
 #[target_feature(enable = "neon,aes")]
 #[expect(
     clippy::cast_possible_truncation,
@@ -23,8 +12,6 @@ fn pmull_prefix_xor(bits: u64) -> u64 {
     vmull_p64(bits, u64::MAX) as u64
 }
 
-/// The scan of the writer for the bytes that a JSON string escapes. Neon is in the base of each
-/// aarch64 target that has it, so the build fixes the kernel.
 #[cfg(target_feature = "neon")]
 #[expect(
     unsafe_code,
@@ -38,18 +25,14 @@ pub(super) mod escape {
 
     use crate::vector::aarch64::load16;
 
-    /// The bits of a mask for each byte of [`escapes`].
     pub(in super::super) const BITS: u32 = 4;
 
-    /// A mask with [`BITS`] bits for each byte of `block` that a JSON string escapes: `"`, `\\`,
-    /// or a byte under 0x20, the first byte in the low bits.
     #[inline(always)]
     pub(in super::super) fn escapes(block: &[u8; 16]) -> u64 {
         // SAFETY: the build has Neon, the feature of `load16` and `scan`.
         unsafe { scan(load16::<0, 16>(block)) }
     }
 
-    /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
     #[inline(always)]
     pub(in super::super) fn escapes_of_words(low: u64, high: u64) -> u64 {
         // SAFETY: the build has Neon, the feature of `scan`.
@@ -57,6 +40,8 @@ pub(super) mod escape {
     }
 
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support Neon.
     #[target_feature(enable = "neon")]
     fn scan(bytes: uint8x16_t) -> u64 {
         let quote = vceqq_u8(bytes, vdupq_n_u8(b'"'));
@@ -68,8 +53,6 @@ pub(super) mod escape {
     }
 }
 
-/// The digits of the printers. Neon is in the base of each aarch64 target that has it, so the build
-/// fixes the kernel.
 #[cfg(target_feature = "neon")]
 #[expect(
     unsafe_code,
@@ -86,8 +69,6 @@ pub(super) mod digits {
 
     use crate::vector::aarch64::{load16, store16};
 
-    /// For each `whole` from 1 to 16, at index `whole − 1`, the bytes of the lookup of [`mantissa`]:
-    /// each digit before the point, a 0 for the point, and each other digit one place higher.
     static POINTS: [[u8; 16]; 16] = {
         let mut table = [[0; 16]; 16];
         let mut whole: u8 = 1;
@@ -108,8 +89,6 @@ pub(super) mod digits {
         table
     };
 
-    /// [`super::super::integer::eight_digits`] of the two halves of `value`, under 10^16, high
-    /// first.
     #[inline(always)]
     pub(in super::super) fn sixteen(value: u64) -> (u64, u64) {
         // SAFETY: the build has Neon, the feature of `split` and of each intrinsic here.
@@ -119,8 +98,6 @@ pub(super) mod digits {
         }
     }
 
-    /// [`super::super::float::mantissa`]. The digits stay in their register: one lookup puts the
-    /// point in, and two stores write them, so no digit goes through a general register.
     #[inline(always)]
     pub(in super::super) fn mantissa(digits: u64, extra: u8, whole: usize, dest: &mut [u8]) -> usize {
         // SAFETY: the build has Neon, the feature of `text`, `load16`, `store`, and `vqtbl1q_u8`.
@@ -130,14 +107,11 @@ pub(super) mod digits {
             store(dest, 0, vqtbl1q_u8(text, load16::<0, 16>(&POINTS[whole - 1])));
             count
         };
-        // The lookup writes 0 in the place of the point, and it cannot reach the 17th byte, which
-        // takes the point when `whole` is 16.
         dest[whole] = b'.';
         dest[17] = b'0' + extra;
         count
     }
 
-    /// [`super::super::float::plain`].
     #[inline(always)]
     pub(in super::super) fn plain(digits: u64, extra: u8, at: usize, dest: &mut [u8]) -> usize {
         // SAFETY: the build has Neon, the feature of `text` and `store`.
@@ -150,27 +124,22 @@ pub(super) mod digits {
         count
     }
 
-    /// The 16 digits of `digits`, from 10^15 up and under 10^16, as text, the first in lane 0,
-    /// and their count without the zeros after the last one, or 17 when `extra` is not 0.
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support Neon.
     #[target_feature(enable = "neon")]
     fn text(digits: u64, extra: u8) -> (uint8x16_t, usize) {
         let values = split(digits);
-        // Four bits for each digit that is not 0: the narrowing shift keeps the middle byte of each
-        // 16-bit lane.
         let nonzero = vget_lane_u64::<0>(vreinterpret_u64_u8(vshrn_n_u16::<4>(vreinterpretq_u16_u8(vtstq_u8(
             values, values,
         )))));
-        // The count with no branch, because it varies from value to value: a 17th digit sets the
-        // top bit, and without one, the bits of the first digit go and each other digit is one
-        // digit lower, which a first digit alone leaves 0.
         let count = 17 - ((nonzero >> 4 | u64::from(extra != 0) << 63).leading_zeros() / 4) as usize;
         (vorrq_u8(values, vdupq_n_u8(b'0')), count)
     }
 
-    /// Stores `bytes` into `dest` from `at`. The offsets of the callers leave 16 bytes, so the
-    /// store always runs.
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support Neon.
     #[target_feature(enable = "neon")]
     fn store(dest: &mut [u8], at: usize, bytes: uint8x16_t) {
         if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<16>) {
@@ -185,6 +154,8 @@ pub(super) mod digits {
     /// `x < 100`. Thus each half has its digits from the last, and a reverse of each half gives them
     /// from the first: the digit values of `value`, under 10^16, the first in lane 0.
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support Neon.
     #[target_feature(enable = "neon")]
     fn split(value: u64) -> uint8x16_t {
         let (high, low) = (value / 100_000_000, value % 100_000_000);
@@ -202,11 +173,8 @@ pub(super) mod digits {
     }
 }
 
-/// Makes the module `$name` of a kernel with the target features `$features`. `$prefix_xor` gives
-/// the XOR of bits `0..=i` of its argument in each bit `i`.
 macro_rules! kernel {
-    ($(#[$doc:meta])* $name:ident, $features:literal, $prefix_xor:expr) => {
-        $(#[$doc])*
+    ($name:ident, $features:literal, $prefix_xor:expr) => {
         pub(super) mod $name {
             use core::arch::aarch64::*;
 
@@ -216,8 +184,8 @@ macro_rules! kernel {
             };
             use crate::vector::aarch64::{load16, table64};
 
-            /// The kernel.
             #[inline(never)]
+            #[doc = concat!("# Safety\nThe CPU must support ", $features, ".")]
             #[target_feature(enable = $features)]
             pub(in super::super) fn block(input: &[u8], start: usize, carry: Carry) -> Block {
                 let (bytes, before) = (&input[start..], block::before(input, start));
@@ -225,6 +193,7 @@ macro_rules! kernel {
             }
 
             #[inline]
+            #[doc = concat!("# Safety\nThe CPU must support ", $features, ".")]
             #[target_feature(enable = $features)]
             fn classify(bytes: &[u8], before: u32) -> Classes {
                 let quarters = match bytes.first_chunk() {
@@ -240,7 +209,10 @@ macro_rules! kernel {
                         })
                     }
                 };
-                let (whitespace, structural) = (load16::<0, 16>(&simd::WHITESPACE), load16::<0, 16>(&simd::STRUCTURAL));
+                let (whitespace, structural) = (
+                    load16::<0, 16>(&simd::WHITESPACE),
+                    load16::<0, 16>(&simd::STRUCTURAL),
+                );
                 let nibble = vdupq_n_u8(0x0f);
                 let control = bits(quarters.map(|quarter| vcltq_u8(quarter, vdupq_n_u8(0x20))));
                 let curly = bits(quarters.map(|quarter| {
@@ -259,9 +231,8 @@ macro_rules! kernel {
                 }
             }
 
-            /// The bit of each byte of `lanes` that is all ones. Each byte keeps the bit of its
-            /// place in a group of 8, and three pairwise adds sum each group into one byte.
             #[inline]
+            #[doc = concat!("# Safety\nThe CPU must support ", $features, ".")]
             #[target_feature(enable = $features)]
             fn bits(lanes: [uint8x16_t; 4]) -> u64 {
                 const WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
@@ -271,8 +242,8 @@ macro_rules! kernel {
                 vgetq_lane_u64::<0>(vreinterpretq_u64_u8(vpaddq_u8(sums, sums)))
             }
 
-            /// The UTF-8 check of [`block::utf8_error_at`] on each byte of `quarters`.
             #[inline]
+            #[doc = concat!("# Safety\nThe CPU must support ", $features, ".")]
             #[target_feature(enable = $features)]
             fn utf8_error(quarters: [uint8x16_t; 4], before: u32) -> bool {
                 let [a, b, c, d] = quarters;
@@ -289,9 +260,8 @@ macro_rules! kernel {
                 vmaxvq_u8(error) != 0
             }
 
-            /// A byte that is not zero at each byte of `input` that ends an error, after the bytes
-            /// of `previous`.
             #[inline]
+            #[doc = concat!("# Safety\nThe CPU must support ", $features, ".")]
             #[target_feature(enable = $features)]
             fn check(
                 input: uint8x16_t,
@@ -310,24 +280,16 @@ macro_rules! kernel {
                     ),
                     vqtbl1q_u8(second_high, vshrq_n_u8::<4>(input)),
                 );
-                // Bit 7 is set where `second` is at least 0xe0 or `first` is at least 0xf0.
-                let continues = vorrq_u8(vqsubq_u8(second, vdupq_n_u8(0x60)), vqsubq_u8(first, vdupq_n_u8(0x70)));
+                let continues = vorrq_u8(
+                    vqsubq_u8(second, vdupq_n_u8(0x60)),
+                    vqsubq_u8(first, vdupq_n_u8(0x70)),
+                );
                 veorq_u8(vandq_u8(continues, vdupq_n_u8(0x80)), pair)
             }
         }
     };
 }
 
-kernel!(
-    /// The Neon kernel with PMULL.
-    pmull,
-    "neon,aes",
-    |bits| super::pmull_prefix_xor(bits)
-);
+kernel!(pmull, "neon,aes", |bits| super::pmull_prefix_xor(bits));
 
-kernel!(
-    /// The Neon kernel without PMULL.
-    shift,
-    "neon",
-    block::prefix_xor
-);
+kernel!(shift, "neon", block::prefix_xor);

@@ -116,10 +116,7 @@ pub fn read<'a, T>(
     read_with(Backend::chosen(), input, limits, profile, scratch, decode)
 }
 
-/// [`read`] on the kernel of `backend`.
-///
-/// It calls `decode` at one place. A call in each arm of a `match` on the kernel would give
-/// `decode` one caller for each kernel, and the compiler would not inline it into any of them.
+// Calling the decoder in each match arm duplicates its machine code for each kernel.
 #[inline(always)]
 fn read_with<'a, T>(
     backend: Backend,
@@ -157,7 +154,7 @@ pub fn visit<'a>(
     visit_with(Backend::chosen(), input, limits, profile, scratch, each)
 }
 
-/// Keep the length check local. Sharing reader construction here changed the generated code of typed decoders.
+// Sharing reader construction here changed the generated code of typed decoders.
 #[inline(always)]
 fn visit_with<'a>(
     backend: Backend,
@@ -177,39 +174,26 @@ fn visit_with<'a>(
     Reader::new(input, backend, *limits, profile, scratch).visit(each)
 }
 
-/// A kernel of the reader: its code that classifies one block, for one instruction set. The
-/// variants depend on the target architecture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kernel {
-    /// The 64-bit SWAR reference. It runs on each CPU.
     Swar,
     /// AVX-512 BW, VL, and VBMI2, with PCLMULQDQ, BMI1, and BMI2. VBMI2 marks the CPUs that keep
     /// their clock with AVX-512.
     #[cfg(target_arch = "x86_64")]
     Avx512,
-    /// AVX2, with PCLMULQDQ, BMI1, and BMI2.
     #[cfg(target_arch = "x86_64")]
     Avx2,
-    /// Neon, with PMULL for the string mask.
     #[cfg(target_arch = "aarch64")]
     NeonPmull,
-    /// Neon without PMULL.
     #[cfg(target_arch = "aarch64")]
     Neon,
-    /// WebAssembly SIMD. It exists only with `-C target-feature=+simd128`, because WebAssembly has
-    /// no run-time detection.
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     Simd128,
 }
 
-/// The function of a kernel: the block of the input at an offset under its length. The block has
-/// 64 bytes, with spaces after them when the input has fewer, after the 4 bytes before the offset
-/// and after the carry. A call needs the CPU features of the kernel. No
-/// kernel inlines: each block costs one call with plain values, so the reader stays in registers.
 type Classify = unsafe fn(&[u8], usize, Carry) -> Block;
 
 impl Kernel {
-    /// Each kernel of the target architecture, the fastest first.
     const ALL: &[Self] = &[
         #[cfg(target_arch = "x86_64")]
         Self::Avx512,
@@ -224,9 +208,6 @@ impl Kernel {
         Self::Swar,
     ];
 
-    /// The CPU features that the kernel needs, the features of its `#[target_feature]` functions,
-    /// and its timing class, which is public. The detection reports a feature only with each
-    /// feature that it implies.
     const fn needs(self) -> (Caps, Timing) {
         #[cfg(target_arch = "aarch64")]
         use crate::cpu::aarch64::{AES, NEON};
@@ -257,11 +238,6 @@ impl Kernel {
 
     crate::cpu::choice!(Swar);
 
-    /// The function of the kernel.
-    ///
-    /// The cursor takes the function, not the kernel. When the build fixes the kernel, the function
-    /// is a constant, each call of it is a direct call, and the kernel inlines into the reader. When
-    /// the CPU selects the kernel, the reader calls the function once for each block.
     #[inline(always)]
     fn function(self) -> Classify {
         match self {
@@ -280,16 +256,10 @@ impl Kernel {
     }
 }
 
-/// A kernel that this CPU runs.
-///
-/// Only [`Backend::chosen`] makes a `Backend`, and it checks the CPU first. Thus a `Backend` exists
-/// only for a kernel whose features the CPU has, and a cursor runs only such a kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Backend(Kernel);
 
 impl Backend {
-    /// The backend of the fastest kernel of this CPU. If the build does not fix it, the first call
-    /// chooses it, and each later call reads the choice.
     #[inline(always)]
     fn chosen() -> Self {
         Self(Kernel::chosen(Timing::Public))

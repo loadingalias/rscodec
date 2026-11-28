@@ -11,19 +11,14 @@ use crate::{
     random::Random,
 };
 
-/// The bytes of the private stack: far more than a call uses.
 const STACK: usize = 1 << 18;
 
-/// The paint of the private stack.
 const PAINT: u8 = 0xa5;
 
-/// The lengths of the data in bytes, after the short lengths 8 to 200.
 const LENGTHS: [usize; 6] = [255, 256, 257, 4095, 4096, 4097];
 
-/// The seed of the inputs.
 const SEED: u64 = 0x5ac4;
 
-/// The work of one call on the private stack.
 struct Job<'a> {
     case: &'a Case,
     dit: &'a Dit,
@@ -31,8 +26,6 @@ struct Job<'a> {
     out: &'a mut [u8],
 }
 
-/// Runs each secret case, or with `public` each public case, on the private stack, and searches
-/// the stack after it.
 pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     let class = match args.first().map(String::as_str) {
         Some("public") => Class::Public,
@@ -61,7 +54,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                             out: &mut out,
                         },
                     );
-                    // After a refusal, the output holds zeros, which are no secret.
                     let (data, text) = match case.direction {
                         Direction::Encode => (&input[..], &out[..]),
                         Direction::Decode if outcome == Outcome::Valid => (&out[..], &input[..]),
@@ -108,8 +100,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     }
 }
 
-/// The offset in `stack` of the first run of 8 bytes of `data` or of 16 characters of `text`. A
-/// run of one repeated byte is left out, because the paint or a cleared slot can hold it.
 fn residue(stack: &[u8], data: &[u8], text: &[u8]) -> Option<usize> {
     let mixed = |run: &[u8]| run.iter().any(|&byte| Some(&byte) != run.first());
     let data: HashSet<&[u8; 8]> = data.array_windows::<8>().filter(|run| mixed(&run[..])).collect();
@@ -119,7 +109,6 @@ fn residue(stack: &[u8], data: &[u8], text: &[u8]) -> Option<usize> {
     in_data.into_iter().chain(in_text).min()
 }
 
-/// The switch of the stack pointer to the private stack for one call.
 #[expect(
     unsafe_code,
     reason = "the asm moves the stack pointer to the top of an owned buffer for one C call, and restores it from a callee-saved register"
@@ -129,7 +118,6 @@ mod switch {
 
     use super::Job;
 
-    /// Runs `job` with the stack pointer at the top of `stack`, rounded down to 16 bytes.
     pub(super) fn run_on(stack: &mut [u8], job: &mut Job<'_>) {
         let end = stack.as_mut_ptr_range().end;
         let top = end.wrapping_sub(end.addr() % 16);
@@ -169,7 +157,6 @@ mod switch {
         }
     }
 
-    /// Runs the call of the job at `job`.
     extern "C" fn trampoline(job: *mut c_void) {
         // SAFETY: `run_on` passes a pointer to a live, exclusive `Job`.
         let job = unsafe { &mut *job.cast::<Job<'_>>() };

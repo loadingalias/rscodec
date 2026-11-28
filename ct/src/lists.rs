@@ -15,17 +15,14 @@
 //!   (`cpy`, `dup`, `fmov`, `index`, `mov`, `rev`, `trn1`, `trn2`, `uzp1`, `uzp2`, `zip1`, `zip2`)
 //!   are not in it: the scan passes them only with no data operand.
 
-/// Whether Intel lists `mnemonic`, in capitals, with data operand independent timing.
 pub(crate) fn doit(mnemonic: &str) -> bool {
     DOIT.split_ascii_whitespace().any(|name| name == mnemonic)
 }
 
-/// Whether Arm lists `mnemonic`, in lowercase, as a data-independent-time instruction.
 pub(crate) fn dit(mnemonic: &str) -> bool {
     DIT.split_ascii_whitespace().any(|name| name == mnemonic)
 }
 
-/// Whether Arm lists the SVE `mnemonic`, in lowercase, as a data-independent-time instruction.
 pub(crate) fn dit_sve(mnemonic: &str) -> bool {
     DIT_SVE.split_ascii_whitespace().any(|name| name == mnemonic)
 }

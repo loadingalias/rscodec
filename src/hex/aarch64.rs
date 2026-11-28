@@ -1,15 +1,3 @@
-//! The Neon kernels: `tbl` maps each nibble to its digit, and `zip1` and `zip2` put the two
-//! characters of each byte in order. The decoder splits the characters with `uzp1` and `uzp2`, and
-//! looks up the flag of each in a table of the 64 bytes from `0` (`tbl`): the nibble with bit 7
-//! set, or zero for a byte that is not a digit. It ANDs the flags of each block into one vector,
-//! and tests bit 7 once after the last block. An input of up to `SHORT_MAX` bytes runs inline in
-//! the caller, and a longer one runs in a function of its own.
-
-#![expect(
-    clippy::missing_safety_doc,
-    reason = "each function is safe; only its target feature makes a call from code without the feature unsafe"
-)]
-
 use core::arch::aarch64::*;
 
 use super::encode_steps;
@@ -19,11 +7,8 @@ use crate::{
     vector::aarch64::{all_valid, load16, store_first, store16, table64},
 };
 
-/// The digit of each nibble.
 const DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-/// The flag of each byte from `0`: the nibble with bit 7 set for a digit, and zero for another
-/// byte.
 const FLAGS: [u8; 64] = {
     let mut flags = [0; 64];
     let mut nibble: u8 = 0;
@@ -34,8 +19,9 @@ const FLAGS: [u8; 64] = {
     flags
 };
 
-/// Encodes `bytes` into `out`. A short input runs inline in the caller.
 #[inline(always)]
+/// # Safety
+/// The CPU must support Neon.
 #[target_feature(enable = "neon")]
 pub(super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
     let digits = load16::<0, _>(&DIGITS);
@@ -48,8 +34,9 @@ pub(super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
     );
 }
 
-/// Encodes a long input in blocks of 64 bytes.
 #[inline(never)]
+/// # Safety
+/// The CPU must support Neon.
 #[target_feature(enable = "neon")]
 fn encode_long(digits: uint8x16_t, bytes: &[u8], out: &mut [u8]) {
     overlapping::<64, 128>(bytes, out, |src, dst| {
@@ -59,8 +46,9 @@ fn encode_long(digits: uint8x16_t, bytes: &[u8], out: &mut [u8]) {
     });
 }
 
-/// The 32 characters of 16 bytes.
 #[inline]
+/// # Safety
+/// The CPU must support Neon.
 #[target_feature(enable = "neon")]
 fn encode_block(digits: uint8x16_t, src: &[u8; 16], dst: &mut [u8; 32]) {
     let src = load16::<0, _>(src);
@@ -70,9 +58,9 @@ fn encode_block(digits: uint8x16_t, src: &[u8; 16], dst: &mut [u8; 32]) {
     store16::<16, _>(dst, vzip2q_u8(hi, lo));
 }
 
-/// Decodes `text` into `out`, and gives whether each character is a digit. A short input runs
-/// inline in the caller.
 #[inline(always)]
+/// # Safety
+/// The CPU must support Neon.
 #[target_feature(enable = "neon")]
 pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
     let flags = table64::<0, _>(&FLAGS);
@@ -109,8 +97,9 @@ pub(super) fn decode(class: impl Class, text: &[u8], out: &mut [u8]) -> bool {
     all_valid(valid)
 }
 
-/// Decodes a long input in blocks of 128 characters, and gives the AND of the flags.
 #[inline(never)]
+/// # Safety
+/// The CPU must support Neon.
 #[target_feature(enable = "neon")]
 fn decode_long(flags: uint8x16x4_t, text: &[u8], out: &mut [u8]) -> uint8x16_t {
     let mut valid = vdupq_n_u8(0xff);
@@ -122,16 +111,17 @@ fn decode_long(flags: uint8x16x4_t, text: &[u8], out: &mut [u8]) -> uint8x16_t {
     valid
 }
 
-/// The flag of each of 16 characters.
 #[inline]
+/// # Safety
+/// The CPU must support Neon.
 #[target_feature(enable = "neon")]
 fn flag(flags: uint8x16x4_t, chars: uint8x16_t) -> uint8x16_t {
     vqtbl4q_u8(flags, vsubq_u8(chars, vdupq_n_u8(b'0')))
 }
 
-/// The 16 bytes of 32 characters, and the AND of their flags. `sli` keeps only the low nibble of
-/// the second flag of each byte, so bit 7 leaves no trace in the bytes.
 #[inline]
+/// # Safety
+/// The CPU must support Neon.
 #[target_feature(enable = "neon")]
 fn decode_block(flags: uint8x16x4_t, src: &[u8; 32], dst: &mut [u8; 16]) -> uint8x16_t {
     let (first, second) = (load16::<0, _>(src), load16::<16, _>(src));

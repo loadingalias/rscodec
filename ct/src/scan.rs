@@ -19,28 +19,21 @@ use std::{
 
 use crate::{Failure, lists};
 
-/// The prefix of the names of the entries of the harness.
 const ENTRY: &str = "rscodec_ct::cases::entry::";
 
-/// The entries of the harness.
 const ENTRIES: usize = 19;
 
-/// The code that the scan does not follow: the panics of `core`, which a length check reaches and
-/// which do not return. Each is reported.
 const PANICS: [&str; 3] = ["core::panicking::", "core::slice::index::", "core::option::"];
 
-/// The code of the secret entries that handles only public data, and the reason.
 const PUBLIC: [(&str, &str); 1] = [(
     "rscodec::cpu::",
     "the detection of the CPU reads only the state of the CPU",
 )];
 
-/// The instructions with no data operand: control, hints, barriers, and moves of an immediate.
 const NO_DATA_X86: &str = "JMP CALL RET NOP ENDBR64 UD2 INT3 LFENCE";
 const NO_DATA_A64: &str = "b bl ret cbz cbnz tbz tbnz nop hint bti paciasp autiasp pacibsp autibsp adr adrp movz \
                            movn movk movi mvni brk udf sb dsb isb";
 
-/// The instructions that set the flags from their operands, and the instructions that read them.
 const SETS_FLAGS_X86: &str = "cmp test add sub and or xor adc sbb inc dec neg shl shr sar rol ror bt bts btr btc \
                               ptest vptest bsf bsr tzcnt lzcnt popcnt imul mul comiss comisd ucomiss ucomisd \
                               kortestb kortestw kortestd kortestq ktestb ktestw ktestd ktestq";
@@ -48,7 +41,6 @@ const SETS_FLAGS_A64: &str = "cmp cmn tst subs adds ands bics ccmp ccmn fcmp fcm
 const READS_FLAGS_X86: &str = "adc sbb rcl rcr";
 const READS_FLAGS_A64: &str = "csel csinc csinv csneg cset csetm cinc cinv cneg ccmp ccmn adc adcs sbc sbcs ngc ngcs";
 
-/// One instruction of the listing.
 #[derive(Debug)]
 struct Instruction {
     address: u64,
@@ -56,21 +48,16 @@ struct Instruction {
     operands: String,
 }
 
-/// The instruction sets of the scan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Isa {
     X86,
     A64,
 }
 
-/// Whether the code of `name` handles only public data.
 fn public(name: &str) -> bool {
     PUBLIC.iter().any(|(prefix, _)| name.starts_with(prefix))
 }
 
-/// Scans the disassembly of `args[0]`, or of this binary, of the instruction set `args[1]`
-/// (`x86_64` or `aarch64`), or of this host. With `args[2]`, it also prints the facts before each
-/// instruction of the function of that name, for the review of a finding.
 pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     let binary = match args.first() {
         Some(path) => PathBuf::from(path),
@@ -176,16 +163,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     }
 }
 
-/// The function address in each slot of the GOT of `binary`, from its relocations of the form
-/// `R_X86_64_RELATIVE`. A binary with no dynamic relocations, which `objdump -R` refuses, has none.
 fn got(binary: &Path) -> Result<BTreeMap<u64, u64>, Failure> {
     let output = Command::new("objdump")
         .arg("-R")
         .arg(binary)
         .output()
         .map_err(|error| Failure::Host(format!("objdump -R: {error}")))?;
-    // A slot of a binary with no dynamic relocations stays unknown, so each call through it in the
-    // secret code is a finding.
     let listing = String::from_utf8_lossy(&output.stdout);
     Ok(listing
         .lines()
@@ -200,15 +183,11 @@ fn got(binary: &Path) -> Result<BTreeMap<u64, u64>, Failure> {
         .collect())
 }
 
-/// The address and the name of the function that a line of `objdump -d` starts, as
-/// `000000000006be00 <name>:`.
 fn header(line: &str) -> Option<(u64, &str)> {
     let (address, name) = line.strip_suffix(">:")?.split_once(" <")?;
     Some((u64::from_str_radix(address, 16).ok()?, name))
 }
 
-/// The functions of a listing of `objdump -d`, by name. A call or jump through a slot of `slots`
-/// becomes a direct call or jump to the function that the slot holds.
 fn parse(isa: Isa, listing: &str, slots: &BTreeMap<u64, u64>) -> BTreeMap<String, Vec<Instruction>> {
     let starts: BTreeMap<u64, String> = listing
         .lines()
@@ -281,7 +260,6 @@ fn parse(isa: Isa, listing: &str, slots: &BTreeMap<u64, u64>) -> BTreeMap<String
     functions
 }
 
-/// A demangled name without its hash and without the underscore of Mach-O.
 fn symbol(name: &str) -> String {
     let name = name
         .strip_prefix('_')
@@ -294,7 +272,6 @@ fn symbol(name: &str) -> String {
     name.to_owned()
 }
 
-/// The function that an operand names, as in `4a3b0 <name+0x10>`.
 fn target(operands: &str) -> Option<String> {
     let start = operands.find('<')?;
     let end = operands.rfind('>')?;
@@ -306,7 +283,6 @@ fn target(operands: &str) -> Option<String> {
     Some(symbol(name))
 }
 
-/// Whether the instruction is a direct branch, a call, or a jump.
 fn branches(isa: Isa, mnemonic: &str) -> bool {
     match isa {
         Isa::X86 => mnemonic == "call" || mnemonic.starts_with('j'),
@@ -314,15 +290,12 @@ fn branches(isa: Isa, mnemonic: &str) -> bool {
     }
 }
 
-/// Whether the operands of a branch end with its address, as `4a3b0 <name>`.
 fn direct(operands: &str) -> bool {
     let last = operands.rsplit(',').next().unwrap_or_default();
     last.split_once('<')
         .is_some_and(|(address, _)| u64::from_str_radix(address.trim().trim_start_matches("0x"), 16).is_ok())
 }
 
-/// The names of the functions that `entry` runs, by each direct call and jump to another function,
-/// and each call of a caller out of the code of the binary.
 fn closure(
     isa: Isa,
     functions: &BTreeMap<String, Vec<Instruction>>,
@@ -358,7 +331,6 @@ fn closure(
     (code, external)
 }
 
-/// The registers inside the first `[...]` of `operands`: the base, and the index if it has one.
 fn address(isa: Isa, operands: &str) -> Option<(Option<String>, Option<String>)> {
     let inside = operands.get(operands.find('[')? + 1..operands.find(']')?)?;
     match isa {
@@ -393,7 +365,6 @@ fn address(isa: Isa, operands: &str) -> Option<(Option<String>, Option<String>)>
     }
 }
 
-/// The 64-bit register of a general register name: `eax` and `al` are `rax`, `w8` is `x8`.
 fn family(register: &str) -> String {
     let register = register.trim().to_ascii_lowercase();
     let x86 = [
@@ -425,7 +396,6 @@ fn family(register: &str) -> String {
     register
 }
 
-/// Whether a register name is a general register of the scan.
 fn general(isa: Isa, register: &str) -> bool {
     let family = family(register);
     let numbered = |prefix: char| {
@@ -439,8 +409,6 @@ fn general(isa: Isa, register: &str) -> bool {
     }
 }
 
-/// The vector, mask, or predicate register of a name: `v3` for `xmm3`, `zmm3`, `s3`, `v3.16b`, or
-/// `z3.b`, and `k1` or `p1` for a mask or a predicate.
 fn lanes(isa: Isa, register: &str) -> Option<String> {
     let register = register.trim().to_ascii_lowercase();
     let register = register.split(['.', '[', '/']).next()?;
@@ -464,8 +432,6 @@ fn lanes(isa: Isa, register: &str) -> Option<String> {
     }
 }
 
-/// The operands outside the brackets of a memory operand, split at commas and spaces. The registers
-/// of a list in braces, as `{ v0.16b, v1.16b }` or the mask `{k1}`, are operands too.
 fn words(operands: &str) -> Vec<&str> {
     let mut words = Vec::new();
     let mut depth = 0_u32;
@@ -497,27 +463,18 @@ fn words(operands: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The facts of the scan at one point of a function.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct State {
-    /// The registers that hold the address of constant data, from `lea reg, [rip+...]` or `adrp`.
     constant: BTreeSet<String>,
-    /// The general registers that hold data.
     data: BTreeSet<String>,
-    /// The vector, mask, and predicate registers that hold no data.
     clean: BTreeSet<String>,
-    /// Whether the flags come from data.
     flags: bool,
-    /// The slots of the stack that hold data, by their operand.
     slots: BTreeSet<String>,
-    /// The data of each value on the stack of x86 `push`, the last on top.
     pushed: Vec<bool>,
-    /// The register that holds the environment of a closure, whose general loads give pointers.
     environment: Option<String>,
 }
 
 impl State {
-    /// The facts at a join of two paths: data from either path, the facts of no data from both.
     fn join(&mut self, other: &Self) -> bool {
         let before = self.clone();
         self.constant = self.constant.intersection(&other.constant).cloned().collect();
@@ -536,7 +493,6 @@ impl State {
         *self != before
     }
 
-    /// Whether the register of `word` holds data. A word that is no register holds none.
     fn holds(&self, isa: Isa, word: &str) -> bool {
         if let Some(lanes) = lanes(isa, word) {
             return !self.clean.contains(&lanes);
@@ -545,7 +501,6 @@ impl State {
     }
 }
 
-/// Prints the facts before each instruction of `function`.
 fn trace(isa: Isa, name: &str, function: &[Instruction]) {
     for (state, code) in states(isa, name, function, true).iter().zip(function) {
         let Some(state) = state else {
@@ -567,7 +522,6 @@ fn trace(isa: Isa, name: &str, function: &[Instruction]) {
     }
 }
 
-/// Records each finding of the dataflow of a function. See the module for the rules.
 fn addresses(isa: Isa, name: &str, function: &[Instruction], secret: bool, findings: &mut BTreeSet<String>) {
     for (state, code) in states(isa, name, function, secret).iter().zip(function) {
         if let Some(state) = state {
@@ -576,15 +530,12 @@ fn addresses(isa: Isa, name: &str, function: &[Instruction], secret: bool, findi
     }
 }
 
-/// The facts before each instruction of `function` at the fixed point, or `None` for an
-/// instruction that no path reaches.
 fn states(isa: Isa, name: &str, function: &[Instruction], secret: bool) -> Vec<Option<State>> {
     let index_of: BTreeMap<u64, usize> = function
         .iter()
         .enumerate()
         .map(|(at, code)| (code.address, at))
         .collect();
-    // The targets of the direct branches in the function.
     let targets: BTreeSet<usize> = function
         .iter()
         .filter(|code| branches(isa, &code.mnemonic) && code.mnemonic != "call" && code.mnemonic != "bl")
@@ -594,8 +545,6 @@ fn states(isa: Isa, name: &str, function: &[Instruction], secret: bool) -> Vec<O
             index_of.get(&destination).copied()
         })
         .collect();
-    // The instructions that only an indirect jump can reach: after an unconditional transfer, and
-    // the target of no direct branch.
     let unreached: Vec<usize> = function
         .windows(2)
         .enumerate()
@@ -608,7 +557,6 @@ fn states(isa: Isa, name: &str, function: &[Instruction], secret: bool) -> Vec<O
         .map(|(at, _)| at + 1)
         .filter(|at| !targets.contains(at))
         .collect();
-    // The successors of each instruction in the function.
     let successors = |at: usize| -> Vec<usize> {
         let Some(code) = function.get(at) else {
             return Vec::new();
@@ -631,8 +579,6 @@ fn states(isa: Isa, name: &str, function: &[Instruction], secret: bool) -> Vec<O
         if !matches!(mnemonic, "jmp" | "b" | "ret" | "br" | "ud2" | "brk" | "udf") {
             next.push(at + 1);
         }
-        // An indirect jump, as of a jump table, reaches each instruction after an unconditional
-        // transfer: the start of each block that only a jump can reach.
         if (mnemonic == "jmp" && !direct(&code.operands)) || mnemonic == "br" {
             next.extend(unreached.iter().copied());
         }
@@ -674,8 +620,6 @@ fn states(isa: Isa, name: &str, function: &[Instruction], secret: bool) -> Vec<O
     states
 }
 
-/// Whether the secret code may run `mnemonic`, from the list of its owner or as an instruction with
-/// no data operand by its kind.
 fn listed(isa: Isa, mnemonic: &str, sve: bool) -> bool {
     match isa {
         Isa::X86 => {
@@ -695,7 +639,6 @@ fn listed(isa: Isa, mnemonic: &str, sve: bool) -> bool {
     }
 }
 
-/// The facts after one instruction, and its findings.
 fn step(
     isa: Isa,
     name: &str,
@@ -754,8 +697,6 @@ fn step(
     }
     let mut loaded = false;
     if let Some((base, index)) = &memory {
-        // The address of a table can be in either register: GNU writes `[rcx+rax*1]` for the
-        // table in `rax` and the index in `rcx`.
         let constant_base = base
             .iter()
             .chain(index)
@@ -763,7 +704,6 @@ fn step(
         let absolute = isa == Isa::X86 && base.is_none() && index.is_some();
         let from_data = base.iter().chain(index).any(|register| state.data.contains(register));
         if lea {
-            // `lea` computes an address and reads no memory.
         } else if from_data {
             findings.insert(format!("{name}: an address from the data, {mnemonic} {operands}"));
         } else if index.is_some() && (constant_base || absolute) {
@@ -795,7 +735,6 @@ fn step(
                 && !mnemonic.starts_with("vpbroadcast")
                 && (all.len() < 3 || (operands.contains("{k") && !operands.contains("{z}")))
         }
-        // A64 overwrites its destination, except the inserts and the accumulates.
         Isa::A64 => {
             [
                 "movk", "bfi", "bfxil", "bfm", "bfc", "ins", "mla", "mls", "bsl", "bif", "bit", "sli", "sri", "tbx",
@@ -827,7 +766,6 @@ fn step(
             || (reads_flags && state.flags)
             || all.iter().skip(skip).any(|word| state.holds(isa, word))
             || (isa == Isa::X86 && mnemonic == "pop" && state.pushed.last().copied().unwrap_or(false)));
-    // The list of the owner, for the secret code.
     if secret {
         let sve = isa == Isa::A64
             && all
@@ -849,7 +787,6 @@ fn step(
             }
         }
     }
-    // The facts after the instruction.
     if stores
         && let (Some(slot), Some((Some(base), _))) = (&slot, &memory)
         && stack(base)
@@ -884,13 +821,11 @@ fn step(
         state.flags = !zeroing && (loaded || all.iter().any(|word| state.holds(isa, word)));
     }
     let made_constant = match isa {
-        // `lea reg, [rip+...]`, and the load of the address of a static from the GOT.
         Isa::X86 => {
             // GNU writes `QWORD PTR`, and LLVM `qword ptr`.
             let operands = operands.to_ascii_lowercase();
             (mnemonic == "lea" || (mnemonic == "mov" && operands.contains("qword ptr"))) && operands.contains("[rip")
         }
-        // `add x8, x8, #:lo12:table`, and the load of the address of a static from the GOT.
         Isa::A64 => {
             let source = match mnemonic {
                 "add" => operands.split(',').nth(1).map(family),
@@ -922,7 +857,6 @@ fn step(
         }
         return;
     }
-    // A64 `ldp` writes two registers.
     let mut targets: Vec<&str> = destination.iter().map(|_| first).collect();
     if isa == Isa::A64 && mnemonic.starts_with("ldp") {
         targets.extend(all.get(1).copied());
@@ -956,7 +890,6 @@ fn step(
     }
 }
 
-/// The register that an instruction writes as its first operand, if it writes one.
 fn written(isa: Isa, instruction: &Instruction) -> Option<String> {
     let first = instruction.operands.split(',').next()?.trim();
     if first.contains('[') {
@@ -984,7 +917,6 @@ fn written(isa: Isa, instruction: &Instruction) -> Option<String> {
     (!reads_only).then(|| family(first.trim_start_matches('{')))
 }
 
-/// The mnemonic of an x86 instruction as the DOIT list names it, with its prefixes.
 fn doit_name(instruction: &Instruction) -> String {
     const PREFIXES: [&str; 12] = [
         "rep", "repz", "repe", "repnz", "repne", "lock", "notrack", "bnd", "data16", "cs", "ds", "addr32",
@@ -1042,7 +974,6 @@ fn doit_name(instruction: &Instruction) -> String {
             return format!("{stem}{canonical}");
         }
     }
-    // The compares of AVX-512 with a predicate in the name, as `vpcmpnltub`.
     if let Some(rest) = upper.strip_prefix("VPCMP") {
         for predicate in ["EQ", "LT", "LE", "FALSE", "NEQ", "NLT", "NLE", "TRUE"] {
             if let Some(kind) = rest.strip_prefix(predicate)
@@ -1056,14 +987,11 @@ fn doit_name(instruction: &Instruction) -> String {
     upper
 }
 
-/// Whether the instruction writes `PSTATE.DIT`.
 fn writes_dit(instruction: &Instruction) -> bool {
     let operands = instruction.operands.to_ascii_lowercase();
     instruction.mnemonic == "msr" && (operands.starts_with("dit") || operands.starts_with("s3_3_c4_c2_5"))
 }
 
-/// Checks that each write that sets `PSTATE.DIT` is followed by its barrier on each path, and gives
-/// the number of such writes. A write sets DIT when its register holds `1 << 24`, the bit of DIT.
 fn barriers(functions: &BTreeMap<String, Vec<Instruction>>, findings: &mut BTreeSet<String>) -> usize {
     /// The instructions that a path from the write may run before its barrier: the detection of
     /// the CPU that chooses the barrier takes about 15 on Linux.
@@ -1092,7 +1020,6 @@ fn barriers(functions: &BTreeMap<String, Vec<Instruction>>, findings: &mut BTree
                 continue;
             }
             sets += 1;
-            // A walk of each path from the write, with the branch targets in the function.
             let mut paths = vec![(at + 1, 0_usize, false)];
             while let Some((index, steps, dsb)) = paths.pop() {
                 let Some(next) = function.get(index) else {
@@ -1106,10 +1033,6 @@ fn barriers(functions: &BTreeMap<String, Vec<Instruction>>, findings: &mut BTree
                 if mnemonic == "sb" || (dsb && mnemonic == "isb") {
                     continue;
                 }
-                // The detection of the CPU, which chooses the barrier, can come first: its loads, its
-                // stores of the cache of the features, and its call, which returns to the path. The
-                // asm of DIT clobbers memory, so no access of the call that holds DIT moves before
-                // the barrier: the path ends at the next other call or return.
                 let detection = mnemonic == "bl" && target(&next.operands).is_some_and(|callee| public(&callee));
                 let touches = !detection && ["bl", "blr", "br", "ret"].contains(&mnemonic);
                 if touches || steps >= REACH {
@@ -1152,7 +1075,6 @@ mod tests {
 
     #[test]
     fn a_reduction_of_secret_bytes_keeps_its_data_operand() {
-        // The old hex decoder transferred all bits of the minimum before testing its high bit.
         let listing = "0 <decode>:\n0: ldr q0, [x0]\n4: uminv b0, v0.16b\n8: fmov w8, s0\n\
                        c: movi v1.16b, #0\n10: fmov w9, s1\n14: ret";
         let functions = parse(Isa::A64, listing, &BTreeMap::new());

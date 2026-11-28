@@ -1,7 +1,3 @@
-//! The reader on the block cursor: one push loop of the grammar, and the strict walk on it. No
-//! code recurses. The scratch of the caller holds each open container and the keys of each open
-//! object.
-
 #[cfg(test)]
 pub(super) mod tests;
 
@@ -13,7 +9,6 @@ use super::{
     string::{self, Str},
 };
 
-/// Check short objects for duplicates as each key arrives. Sort longer objects at close or on error.
 const LINEAR_KEYS_MAX: u32 = 16;
 
 /// A token of the input, which [`visit`](super::visit) gives. Each borrows the input.
@@ -56,24 +51,16 @@ pub enum Kind {
     Null,
 }
 
-/// What the grammar allows next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
-    /// A value: at the start of the document, after a `:`, or after a `,` in an array.
     Value,
-    /// After `[`, a value or `]`. After `{`, a key or `}`.
     First,
-    /// A key, after a `,` in an object.
     Key,
-    /// After a value: a `,` or the end of its container, or the end of the input.
     After,
-    /// After the end of the input.
     Done,
-    /// After an error, which each later call gives.
     Failed(Error),
 }
 
-/// The next item of the input that the reader did not take, at its offset.
 #[derive(Clone, Copy, Debug)]
 enum Item {
     Value(usize, Kind),
@@ -90,9 +77,7 @@ enum Item {
 pub struct Reader<'a, 's> {
     cursor: Cursor<'a>,
     slots: &'s mut [Slot],
-    /// The number of slots in use.
     top: usize,
-    /// The innermost open container. Its parent is in the slot before its base.
     frame: Frame,
     depth: u16,
     state: State,
@@ -100,8 +85,6 @@ pub struct Reader<'a, 's> {
     limits: Limits,
 }
 
-/// The offset or the length `value` in a slot. [`read`](super::read) refuses an input of more
-/// than `u32::MAX` bytes, and it uses at most `u32::MAX` slots, so each fits.
 #[inline(always)]
 #[expect(
     clippy::cast_possible_truncation,
@@ -111,10 +94,6 @@ pub(super) const fn index(value: usize) -> u32 {
     value as u32
 }
 
-/// The error of the byte at `at`, which the grammar does not allow there: the end of the input,
-/// or the UTF-8 error if the bytes from `at` start no character. At one offset, the UTF-8 error
-/// takes precedence over a syntax error. A byte that
-/// the reader reaches before the cursor checked its block can be such a byte.
 #[cold]
 pub(super) fn unexpected(input: &[u8], at: usize) -> Error {
     let Some(&byte) = input.get(at) else {
@@ -125,15 +104,12 @@ pub(super) fn unexpected(input: &[u8], at: usize) -> Error {
     Error::new(if invalid { ErrorKind::Utf8 } else { ErrorKind::Syntax }, at)
 }
 
-/// Gives the refusal `$error` of the input from the function of the reader `$reader`, after
-/// [`Reader::fail`].
 macro_rules! refuse {
     ($reader:ident, $error:expr) => {
         return Err($reader.fail($error))
     };
 }
 
-/// The value of `$result`, or its refusal of the input, as [`refuse!`] gives it.
 macro_rules! input {
     ($reader:ident, $result:expr) => {
         match $result {
@@ -143,8 +119,6 @@ macro_rules! input {
     };
 }
 
-/// The offset of the next token of the cursor of `$reader`, which the cursor keeps. The input must
-/// not end there.
 macro_rules! peek {
     ($reader:ident) => {
         match $reader.cursor.peek() {
@@ -177,8 +151,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The next token, or `None` after the end of the document: one item of the walk. A `,`, a `:`,
-    /// and whitespace are no tokens.
     #[inline(always)]
     fn token(&mut self) -> Result<Option<Token<'a>>, Error> {
         let token = match self.item()? {
@@ -196,23 +168,18 @@ impl<'a, 's> Reader<'a, 's> {
         Value(self)
     }
 
-    /// Reads the document from its start and gives each token to `emit`, with the push loop that
-    /// has no number run.
     #[inline(always)]
     pub(super) fn visit(&mut self, emit: impl FnMut(Token<'a>) -> Result<(), Error>) -> Result<(), Error> {
         self.run::<false>(emit)
     }
 
-    /// Use the typed walk to finish validation. Duplicating the push loop slowed typed decoders by 2–15%.
+    // Duplicating the token loop slowed typed decoders by 2–15%.
     #[inline(always)]
     pub(super) fn finish(&mut self) -> Result<(), Error> {
         while self.token()?.is_some() {}
         Ok(())
     }
 
-    /// Emit tokens from the start of the document. Control flow encodes the grammar state.
-    /// Input errors pass through [`Reader::fail`]. Callback errors return directly.
-    /// `NUMBER_RUN` enables the fast path for arrays of numbers.
     #[inline(always)]
     fn run<const NUMBER_RUN: bool>(
         &mut self,
@@ -220,9 +187,6 @@ impl<'a, 's> Reader<'a, 's> {
     ) -> Result<(), Error> {
         let input = self.cursor.input();
         'value: loop {
-            // One match on the byte, and one call of `emit` for each kind of token, so the match
-            // of `emit` on the token goes at each call. The count of the element comes after the
-            // check of the byte, as in `Reader::take`.
             let at = peek!(self);
             match input[at] {
                 b'"' => {
@@ -230,8 +194,6 @@ impl<'a, 's> Reader<'a, 's> {
                     emit(Token::Str(input!(self, self.string(at))))?;
                 }
                 b'-' | b'0'..=b'9' if NUMBER_RUN => {
-                    // One call of `emit` gives each number, also each number of the number run,
-                    // so the loop holds one copy of the work of the consumer for a number.
                     let mut at = at;
                     loop {
                         input!(self, self.element(at));
@@ -287,7 +249,6 @@ impl<'a, 's> Reader<'a, 's> {
                 }
                 _ => refuse!(self, unexpected(input, at)),
             }
-            // After a value.
             loop {
                 let at = match self.cursor.peek() {
                     Ok(Some(at)) => at,
@@ -319,9 +280,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// Keeps `error` for each later call, and gives it. It inlines, as each method of the reader
-    /// does, and no closure that the compiler can leave as a call takes the reader: a call that
-    /// takes the reader keeps the reader in memory, not in registers.
     #[inline(always)]
     fn fail(&mut self, error: Error) -> Error {
         if let State::Failed(first) = self.state {
@@ -340,8 +298,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// Continue an array after the number ending at `end`. Consume commas and array delimiters
-    /// directly. Resume the cursor at the first other byte and discard only tokens before it.
     #[inline(always)]
     fn number_run(
         &mut self,
@@ -350,7 +306,6 @@ impl<'a, 's> Reader<'a, 's> {
     ) -> Result<Run, Error> {
         let input = self.cursor.input();
         loop {
-            // After a value, at `end`. A `]` can close the last array of the run.
             if self.frame.container != Container::Array {
                 self.cursor.resume(end);
                 return Ok(Run::After);
@@ -367,7 +322,6 @@ impl<'a, 's> Reader<'a, 's> {
                     return Ok(Run::After);
                 }
             };
-            // At a value of an array, after a `,` or a `[`.
             let mut opened = false;
             loop {
                 match input.get(value) {
@@ -379,14 +333,11 @@ impl<'a, 's> Reader<'a, 's> {
                         value += 1;
                         opened = true;
                     }
-                    // An empty array: the `]` after a value closes it, at one place.
                     Some(b']') if opened => {
                         end = value;
                         break;
                     }
                     _ => {
-                        // The cursor reads the rest from `value`. After a `[`, a `]` can come
-                        // after whitespace.
                         self.cursor.resume(value);
                         if opened && input[peek!(self)] == b']' {
                             emit(input!(self, self.close()))?;
@@ -399,10 +350,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The next item, which it does not take. It takes each `,` before it.
-    ///
-    /// After a `,`, it reads the next item in the arm of its container, so the branches of the
-    /// common sequences, a value, a `,`, and a key, are each at their own place in the code.
     #[inline(always)]
     fn item(&mut self) -> Result<Item, Error> {
         let Some(at) = self.peek()? else {
@@ -456,7 +403,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The offset of the next token of the cursor, which it does not take.
     #[inline(always)]
     fn peek(&mut self) -> Result<Option<usize>, Error> {
         match self.cursor.peek() {
@@ -465,7 +411,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The end of the input.
     #[inline(always)]
     fn end(&mut self) -> Result<Item, Error> {
         match self.state {
@@ -479,8 +424,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The next item, which must be a value. Otherwise the reader takes nothing, and it gives
-    /// [`ErrorKind::Type`].
     #[inline(always)]
     fn next_value(&mut self) -> Result<(usize, Kind), Error> {
         match self.item()? {
@@ -490,8 +433,6 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The next item, which must be a value of `kind`. Otherwise the reader takes nothing, and it
-    /// gives [`ErrorKind::Type`].
     #[inline(always)]
     fn expect(&mut self, kind: Kind) -> Result<usize, Error> {
         match self.next_value()? {
@@ -500,20 +441,17 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// Counts the value at `at` in its array.
     #[inline(always)]
     fn element(&mut self, at: usize) -> Result<(), Error> {
         if self.frame.container == Container::Array {
             if self.frame.count >= self.limits.elements_max {
                 return Err(Error::new(ErrorKind::Limit(Limit::Elements), at));
             }
-            // An input of at most `u32::MAX` bytes has fewer elements.
             self.frame.count += 1;
         }
         Ok(())
     }
 
-    /// Takes the value at `at` of `kind`.
     #[inline(always)]
     fn take(&mut self, at: usize, kind: Kind) -> Result<Token<'a>, Error> {
         self.element(at)?;
@@ -538,7 +476,6 @@ impl<'a, 's> Reader<'a, 's> {
         Ok(token)
     }
 
-    /// Opens the container at `at`.
     #[inline(always)]
     fn open(&mut self, at: usize, container: Container) -> Result<(), Error> {
         if self.depth >= self.limits.depth_max {
@@ -561,8 +498,6 @@ impl<'a, 's> Reader<'a, 's> {
         Ok(())
     }
 
-    /// Closes the innermost container at its end. A key of an object with more than
-    /// [`LINEAR_KEYS_MAX`] members can equal an earlier key that no comparison checked yet.
     #[inline(always)]
     fn close(&mut self) -> Result<Token<'a>, Error> {
         let base = self.frame.base as usize;
@@ -576,7 +511,6 @@ impl<'a, 's> Reader<'a, 's> {
         } else {
             Token::ArrayEnd
         };
-        // The parent of each container is in the slot before its base.
         self.top = base - 1;
         self.frame = Frame::load(self.slots[self.top]);
         self.depth -= 1;
@@ -585,7 +519,6 @@ impl<'a, 's> Reader<'a, 's> {
         Ok(token)
     }
 
-    /// Takes the key at `at` and its `:`.
     #[inline(always)]
     fn key(&mut self, at: usize) -> Result<Str<'a>, Error> {
         if self.frame.count >= self.limits.members_max {
@@ -595,13 +528,11 @@ impl<'a, 's> Reader<'a, 's> {
             return Err(Error::new(ErrorKind::Scratch, at));
         }
         let key = self.string(at)?;
-        // An input of at most `u32::MAX` bytes has fewer members.
         self.frame.count += 1;
         let input = self.cursor.input();
         let raw = key.raw().as_bytes();
         let new = Key::new(index(at), raw, index(raw.len()), index(key.len()));
         if self.frame.count <= LINEAR_KEYS_MAX {
-            // Only a key whose bit of the filter is set already can equal an earlier key.
             let bit = new.bit();
             let base = self.frame.base as usize;
             if self.frame.keys & bit != 0 && new.in_keys(&self.slots[base..self.top], input) {
@@ -621,19 +552,11 @@ impl<'a, 's> Reader<'a, 's> {
         Ok(key)
     }
 
-    /// Takes the string whose opening quote is at `open`. It checks each escape, each byte under
-    /// 0x20, the length, and in [`Profile::IJson`], each noncharacter.
-    ///
-    /// Most strings have no escape and no byte under 0x20, so their next token is their closing
-    /// quote, and this method reads them. [`escaped`] reads each other string out of line, with the
-    /// cursor by value, so the loop of the caller stays small and in registers.
     #[inline(always)]
     fn string(&mut self, open: usize) -> Result<Str<'a>, Error> {
         self.cursor.take();
         let input = self.cursor.input();
         let start = open + 1;
-        // The first offset past the limit. A byte of the string there passes the limit, and the
-        // error of the limit comes before each error after it.
         let limit = start.saturating_add(self.limits.string_bytes_max as usize);
         let ijson = self.profile == Profile::IJson;
         if let Ok(Some(at)) = self.cursor.peek()
@@ -649,7 +572,6 @@ impl<'a, 's> Reader<'a, 's> {
         string
     }
 
-    /// Takes the number at `at`.
     #[inline(always)]
     fn number(&mut self, at: usize) -> Result<Number<'a>, Error> {
         self.cursor.take();
@@ -661,8 +583,6 @@ impl<'a, 's> Reader<'a, 's> {
         Ok(number)
     }
 
-    /// Takes the literal `true`, `false`, or `null` at `at`, and gives whether it is `true`. Each
-    /// literal is one compare of 4 bytes, and `false` one more byte.
     #[inline(always)]
     fn literal(&mut self, at: usize) -> Result<bool, Error> {
         self.cursor.take();
@@ -681,14 +601,8 @@ impl<'a, 's> Reader<'a, 's> {
     }
 }
 
-/// The documents that the number run reads: at least this many bytes. A shorter document has too
-/// few numbers for the run to pay.
 const NUMBER_RUN_BYTES_MIN: usize = 4096;
 
-/// Whether the push loop takes the number run for `input`: a document of at least
-/// [`NUMBER_RUN_BYTES_MIN`] bytes whose 64 bytes at its middle are each a byte of a number, `,`,
-/// `[`, or `]`, as in an array of numbers with no whitespace. The test reads at most 64 bytes, and
-/// it changes the speed of the read, not its result.
 #[inline(always)]
 pub(super) fn numbers_dense(input: &[u8]) -> bool {
     input.len() >= NUMBER_RUN_BYTES_MIN
@@ -700,8 +614,7 @@ pub(super) fn numbers_dense(input: &[u8]) -> bool {
         })
 }
 
-/// Keep the number loop separate. Inlining it slowed other documents by 2–9% on Xeon.
-/// Construct the reader here so the compiler can keep its state in registers.
+// Inlining the number loop slowed other documents by 2–9% on the Xeon.
 #[inline(never)]
 pub(super) fn visit_numbers<'a>(
     input: &'a [u8],
@@ -714,19 +627,13 @@ pub(super) fn visit_numbers<'a>(
     Reader::new(input, backend, limits, profile, scratch).run::<true>(emit)
 }
 
-/// Where the push loop goes on after a step of the number run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Run {
-    /// The number at this offset, which the run reached with no cursor.
     Number(usize),
-    /// After a value. The cursor resumed after it.
     After,
-    /// At a value of an array, after a `,` or a `[`. The cursor resumed at it.
     Value,
 }
 
-/// The error of the literal at `at` whose bytes are not `true`, `false`, or `null`: the first byte
-/// that differs from the literal of its first byte, or the end of the input.
 #[cold]
 fn literal_error(input: &[u8], at: usize) -> Error {
     let text: &[u8] = match input[at] {
@@ -742,18 +649,12 @@ fn literal_error(input: &[u8], at: usize) -> Error {
     )
 }
 
-/// [`Reader::string`] of a string whose next token is not its closing quote: a string with an
-/// escape, a byte under 0x20, a noncharacter in [`Profile::IJson`], a byte past the limit, or no
-/// end. `start` is the offset after its opening quote, and `limit` the first offset past the limit.
-/// It takes the cursor at the next token of the string and gives it back after the string. It does
-/// not inline: the cursor is a value, so the reader of the caller stays in registers.
 #[inline(never)]
 fn escaped(mut cursor: Cursor<'_>, start: usize, limit: usize, ijson: bool) -> (Cursor<'_>, Result<Str<'_>, Error>) {
     let string = escaped_string(&mut cursor, start, limit, ijson);
     (cursor, string)
 }
 
-/// The string of [`escaped`].
 #[inline(always)]
 fn escaped_string<'a>(cursor: &mut Cursor<'a>, start: usize, limit: usize, ijson: bool) -> Result<Str<'a>, Error> {
     let input = cursor.input();
@@ -764,11 +665,8 @@ fn escaped_string<'a>(cursor: &mut Cursor<'a>, start: usize, limit: usize, ijson
             error
         }
     };
-    // The bytes that unescape removes.
     let mut shrink = 0;
-    // The start of the text after the last escape.
     let mut from = start;
-    // A high surrogate escape, at its offset, before its low surrogate escape.
     let mut high: Option<(usize, u32)> = None;
     loop {
         let (at, end) = match cursor.next() {
@@ -828,7 +726,6 @@ fn escaped_string<'a>(cursor: &mut Cursor<'a>, start: usize, limit: usize, ijson
                             return Err(past(Error::new(ErrorKind::Noncharacter, surrogate)));
                         }
                         high = None;
-                        // 12 bytes of escapes give 4 bytes of UTF-8.
                         shrink += 8;
                     }
                     (Some((surrogate, _)), _) => {
@@ -856,7 +753,6 @@ fn escaped_string<'a>(cursor: &mut Cursor<'a>, start: usize, limit: usize, ijson
     }
 }
 
-/// The text of `input` from `start` to `end`: a string between its quotes, or a number.
 #[inline(always)]
 #[expect(
     unsafe_code,
@@ -871,12 +767,6 @@ pub(super) fn text(input: &[u8], start: usize, end: usize) -> &str {
     unsafe { core::str::from_utf8_unchecked(bytes) }
 }
 
-/// `error`, or the first duplicate key of an open object before it. An object of more than
-/// [`LINEAR_KEYS_MAX`] members checks its later keys only when it ends, so an error inside the
-/// object can come first. The keys of each open object are in the scratch, from the innermost
-/// object at `frame` and `top` to the root. Thus the errors come in the order of their offsets,
-/// and a valid document pays nothing. The reader stops after the error, so the order of the keys
-/// in the scratch can change.
 #[cold]
 fn earlier_duplicate(slots: &mut [Slot], mut frame: Frame, mut top: usize, input: &[u8], error: Error) -> Error {
     let mut first = error;
@@ -892,13 +782,11 @@ fn earlier_duplicate(slots: &mut [Slot], mut frame: Frame, mut top: usize, input
         if frame.container == Container::Root {
             return first;
         }
-        // The parent of each container is in the slot before its base.
         top = base - 1;
         frame = Frame::load(slots[top]);
     }
 }
 
-/// The kind of the value that starts with `byte`.
 #[inline(always)]
 const fn kind(byte: u8) -> Option<Kind> {
     Some(match byte {
@@ -912,9 +800,6 @@ const fn kind(byte: u8) -> Option<Kind> {
     })
 }
 
-/// Takes the scalar value of `$kind` with the method `$take` of `$reader`. It is a macro and not a
-/// function with a closure, so that the method inlines: a closure that the compiler leaves as a
-/// call takes the reader, which then stays in memory.
 macro_rules! scalar {
     ($reader:expr, $kind:expr, $take:ident) => {{
         let reader = $reader;
@@ -1028,7 +913,6 @@ impl<'r, 'a, 's> Value<'r, 'a, 's> {
         self.open(Kind::Array).map(|reader| Elements(Walk::new(reader)))
     }
 
-    /// Takes the start of the container of `kind`.
     #[inline(always)]
     fn open(self, kind: Kind) -> Result<&'r mut Reader<'a, 's>, Error> {
         let reader = self.0;
@@ -1039,7 +923,6 @@ impl<'r, 'a, 's> Value<'r, 'a, 's> {
     }
 }
 
-/// The walk of one open container, at its depth.
 #[derive(Debug)]
 struct Walk<'r, 'a, 's> {
     reader: &'r mut Reader<'a, 's>,
@@ -1053,10 +936,6 @@ impl<'a, 's> Walk<'_, 'a, 's> {
         Walk { reader, depth }
     }
 
-    /// The reader at the next item of the container, or `None` after its end. It takes the rest of
-    /// the item before, which the loop did not read: a value that it left, or the rest of a
-    /// container that it opened. Each skip gets each check of the profile. A key or the end of an
-    /// object is the token of the reader that it gives, so it gives that token.
     #[inline(always)]
     fn next(&mut self) -> Result<Option<(&mut Reader<'a, 's>, Option<Token<'a>>)>, Error> {
         let reader = &mut *self.reader;
@@ -1064,8 +943,6 @@ impl<'a, 's> Walk<'_, 'a, 's> {
             if reader.depth < self.depth {
                 return Ok(None);
             }
-            // The walk gives an item in `State::Value`, so a value in that state is one that the
-            // loop left.
             let item = reader.depth == self.depth && reader.state != State::Value;
             if item && reader.frame.container == Container::Array {
                 return Ok(Some((reader, None)));
@@ -1096,7 +973,6 @@ impl<'a, 's> Members<'_, 'a, 's> {
         reason = "each value borrows the walk until the next call, which `Iterator` cannot express"
     )]
     pub fn next(&mut self) -> Result<Option<(Str<'a>, Value<'_, 'a, 's>)>, Error> {
-        // After `{` or a member, the grammar gives only a key or the end of the object.
         Ok(match self.0.next()? {
             Some((reader, Some(Token::Key(key)))) => Some((key, Value(reader))),
             _ => None,
@@ -1124,9 +1000,7 @@ impl<'a, 's> Elements<'_, 'a, 's> {
         let Some((reader, _)) = self.0.next()? else {
             return Ok(None);
         };
-        // In an array, the grammar gives only a value or the end of the array.
         if let Item::Value(..) = reader.item()? {
-            // After `[`, the state allows a `]` too. A value comes, so it allows only a value.
             reader.state = State::Value;
             return Ok(Some(Value(reader)));
         }

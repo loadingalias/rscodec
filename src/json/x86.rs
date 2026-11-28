@@ -1,11 +1,3 @@
-//! The x86_64 kernels, AVX2 and AVX-512. Nibble tables classify the bytes and check UTF-8, and a
-//! carry-less multiply builds the string mask.
-
-#![expect(
-    clippy::missing_safety_doc,
-    reason = "each function is safe; only its target feature makes a call from code without the feature unsafe"
-)]
-
 use core::arch::x86_64::*;
 
 use super::{
@@ -14,8 +6,9 @@ use super::{
 };
 use crate::vector::x86::{load_masked, load16, load32};
 
-/// The AVX2 kernel.
 #[inline(never)]
+/// # Safety
+/// The CPU must support AVX2, BMI1, BMI2, PCLMULQDQ.
 #[target_feature(enable = "avx2,bmi1,bmi2,pclmulqdq")]
 pub(super) fn avx2(input: &[u8], start: usize, carry: Carry) -> Block {
     let (bytes, before) = (&input[start..], block::before(input, start));
@@ -45,7 +38,6 @@ pub(super) fn avx2(input: &[u8], start: usize, carry: Carry) -> Block {
         control,
         utf8_error: utf8_error_avx2(halves, before),
     };
-    // The XOR of bits `0..=i` in each bit `i`: the carry-less product with all ones.
     let prefix_xor = |bits: u64| {
         let product = _mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(bits.cast_signed()), _mm_set1_epi8(-1));
         _mm_cvtsi128_si64(product).cast_unsigned()
@@ -53,12 +45,12 @@ pub(super) fn avx2(input: &[u8], start: usize, carry: Carry) -> Block {
     simd::scan(classes, carry, prefix_xor)
 }
 
-/// The AVX-512 kernel.
 #[inline(never)]
+/// # Safety
+/// The CPU must support AVX512BW, AVX512VL, AVX512VBMI2, PCLMULQDQ, BMI1, BMI2.
 #[target_feature(enable = "avx512bw,avx512vl,avx512vbmi2,pclmulqdq,bmi1,bmi2")]
 pub(super) fn avx512(input: &[u8], start: usize, carry: Carry) -> Block {
     let (bytes, before) = (&input[start..], block::before(input, start));
-    // The first 64 bytes, with spaces after them when `bytes` has fewer.
     let input = load_masked(bytes, _mm512_set1_epi8(b' '.cast_signed()));
     let table = |table: &[u8; 16]| _mm512_broadcast_i32x4(load16::<0, 16>(table));
     let set = |byte: u8| _mm512_set1_epi8(byte.cast_signed());
@@ -67,9 +59,6 @@ pub(super) fn avx512(input: &[u8], start: usize, carry: Carry) -> Block {
         _mm512_cmpeq_epi8_mask(input, set(b'"')),
         _mm512_cmpeq_epi8_mask(input, set(b'\\')),
     );
-    // A block in a string with no quote, `\`, byte under 0x20, or byte of 0x80 or more stays in the
-    // string and has no token, as the full scan gives. Its UTF-8 is valid if no sequence before it
-    // needs more bytes. A long string, as in a JWKS, is mostly such blocks.
     if carry.in_plain_string()
         && control | quote | backslash | _mm512_movepi8_mask(input) == 0
         && !block::ends_incomplete(before)
@@ -88,7 +77,6 @@ pub(super) fn avx512(input: &[u8], start: usize, carry: Carry) -> Block {
         control,
         utf8_error: utf8_error_avx512(input, before),
     };
-    // The XOR of bits `0..=i` in each bit `i`: the carry-less product with all ones.
     let prefix_xor = |bits: u64| {
         let product = _mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(bits.cast_signed()), _mm_set1_epi8(-1));
         _mm_cvtsi128_si64(product).cast_unsigned()
@@ -96,16 +84,18 @@ pub(super) fn avx512(input: &[u8], start: usize, carry: Carry) -> Block {
     simd::scan(classes, carry, prefix_xor)
 }
 
-/// The bit of each byte of `halves` that `test` sets to all ones.
 #[inline]
+/// # Safety
+/// The CPU must support AVX2, BMI1, BMI2, PCLMULQDQ.
 #[target_feature(enable = "avx2,bmi1,bmi2,pclmulqdq")]
 fn bits(halves: [__m256i; 2], test: impl Fn(__m256i) -> __m256i) -> u64 {
     let [low, high] = halves.map(|half| _mm256_movemask_epi8(test(half)).cast_unsigned());
     u64::from(low) | u64::from(high) << 32
 }
 
-/// The UTF-8 check of [`block::utf8_error_at`] on each byte of `halves`.
 #[inline]
+/// # Safety
+/// The CPU must support AVX2, BMI1, BMI2, PCLMULQDQ.
 #[target_feature(enable = "avx2,bmi1,bmi2,pclmulqdq")]
 fn utf8_error_avx2(halves: [__m256i; 2], before: u32) -> bool {
     let [low, high] = halves;
@@ -119,12 +109,11 @@ fn utf8_error_avx2(halves: [__m256i; 2], before: u32) -> bool {
     _mm256_testz_si256(error, error) == 0
 }
 
-/// A byte that is not zero at each byte of `input` that ends an error, after the bytes of
-/// `previous`.
 #[inline]
+/// # Safety
+/// The CPU must support AVX2, BMI1, BMI2, PCLMULQDQ.
 #[target_feature(enable = "avx2,bmi1,bmi2,pclmulqdq")]
 fn check_avx2(input: __m256i, previous: __m256i, [first_high, first_low, second_high]: [__m256i; 3]) -> __m256i {
-    // The 16 bytes before each 16-byte lane of `input`.
     let before = _mm256_permute2x128_si256::<0x21>(previous, input);
     let (first, second, third) = (
         _mm256_alignr_epi8::<13>(input, before),
@@ -140,7 +129,6 @@ fn check_avx2(input: __m256i, previous: __m256i, [first_high, first_low, second_
         ),
         _mm256_shuffle_epi8(second_high, high(input)),
     );
-    // Bit 7 is set where `second` is at least 0xe0 or `first` is at least 0xf0.
     let continues = _mm256_or_si256(
         _mm256_subs_epu8(second, _mm256_set1_epi8(0x60)),
         _mm256_subs_epu8(first, _mm256_set1_epi8(0x70)),
@@ -148,8 +136,9 @@ fn check_avx2(input: __m256i, previous: __m256i, [first_high, first_low, second_
     _mm256_xor_si256(_mm256_and_si256(continues, _mm256_set1_epi8(i8::MIN)), pair)
 }
 
-/// The UTF-8 check of [`block::utf8_error_at`] on each byte of `input`.
 #[inline]
+/// # Safety
+/// The CPU must support AVX512BW, AVX512VL, AVX512VBMI2, PCLMULQDQ, BMI1, BMI2.
 #[target_feature(enable = "avx512bw,avx512vl,avx512vbmi2,pclmulqdq,bmi1,bmi2")]
 fn utf8_error_avx512(input: __m512i, before: u32) -> bool {
     if _mm512_movepi8_mask(input) == 0 {
@@ -158,7 +147,6 @@ fn utf8_error_avx512(input: __m512i, before: u32) -> bool {
     let [first_high, first_low, second_high] = [block::FIRST_HIGH, block::FIRST_LOW, block::SECOND_HIGH]
         .map(|table| _mm512_broadcast_i32x4(load16::<0, 16>(&table)));
     let previous = _mm512_set_epi32(before.cast_signed(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    // The 16 bytes before each 16-byte lane of `input`.
     let before = _mm512_alignr_epi64::<6>(input, previous);
     let (first, second, third) = (
         _mm512_alignr_epi8::<13>(input, before),
@@ -182,26 +170,20 @@ fn utf8_error_avx512(input: __m512i, before: u32) -> bool {
     _mm512_test_epi8_mask(error, error) != 0
 }
 
-/// The scan of the writer for the bytes that a JSON string escapes, with SSE2, which each x86_64
-/// CPU has, so the build fixes the kernel.
 #[expect(unsafe_code, reason = "each x86_64 CPU has SSE2")]
 pub(super) mod escape {
     use core::arch::x86_64::{
         __m128i, _mm_cmpeq_epi8, _mm_min_epu8, _mm_movemask_epi8, _mm_or_si128, _mm_set_epi64x, _mm_set1_epi8,
     };
 
-    /// The bits of a mask for each byte of [`escapes`].
     pub(in super::super) const BITS: u32 = 1;
 
-    /// A mask with [`BITS`] bits for each byte of `block` that a JSON string escapes: `"`, `\\`,
-    /// or a byte under 0x20, the first byte in the low bits.
     #[inline(always)]
     pub(in super::super) fn escapes(block: &[u8; 16]) -> u64 {
         // SAFETY: each x86_64 CPU has SSE2, the feature of `scan`.
         unsafe { scan(crate::vector::x86::load16::<0, 16>(block)) }
     }
 
-    /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`, with no load.
     #[inline(always)]
     pub(in super::super) fn escapes_of_words(low: u64, high: u64) -> u64 {
         // SAFETY: each x86_64 CPU has SSE2, the feature of `_mm_set_epi64x` and `scan`.
@@ -209,17 +191,17 @@ pub(super) mod escape {
     }
 
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support SSE2.
     #[target_feature(enable = "sse2")]
     fn scan(bytes: __m128i) -> u64 {
         let quote = _mm_cmpeq_epi8(bytes, _mm_set1_epi8(b'"'.cast_signed()));
         let backslash = _mm_cmpeq_epi8(bytes, _mm_set1_epi8(b'\\'.cast_signed()));
-        // A byte is under 0x20 exactly when its unsigned minimum with 0x1f is the byte.
         let control = _mm_cmpeq_epi8(_mm_min_epu8(bytes, _mm_set1_epi8(0x1f)), bytes);
         u64::from(_mm_movemask_epi8(_mm_or_si128(_mm_or_si128(quote, backslash), control)).cast_unsigned())
     }
 }
 
-/// The digits of the printers, with SSE2, which each x86_64 CPU has, so the build fixes the kernel.
 #[expect(unsafe_code, reason = "each x86_64 CPU has SSE2")]
 pub(super) mod digits {
     use core::arch::x86_64::{
@@ -231,17 +213,12 @@ pub(super) mod digits {
 
     use super::super::float::insert;
 
-    /// [`super::super::integer::eight_digits`] of the two halves of `value`, under 10^16, high
-    /// first.
     #[inline(always)]
     pub(in super::super) fn sixteen(value: u64) -> (u64, u64) {
         // SAFETY: each x86_64 CPU has SSE2, the feature of `split` and `words`.
         unsafe { words(split(value)) }
     }
 
-    /// [`super::super::float::mantissa`]. The digits go to `dest` from their register with one
-    /// store, one place after their own, and the word with the point goes over them from a
-    /// general register.
     #[inline(always)]
     pub(in super::super) fn mantissa(digits: u64, extra: u8, whole: usize, dest: &mut [u8]) -> usize {
         // SAFETY: each x86_64 CPU has SSE2, the feature of `text`, `store`, and `words`.
@@ -270,7 +247,6 @@ pub(super) mod digits {
         count
     }
 
-    /// [`super::super::float::plain`].
     #[inline(always)]
     pub(in super::super) fn plain(digits: u64, extra: u8, at: usize, dest: &mut [u8]) -> usize {
         // SAFETY: each x86_64 CPU has SSE2, the feature of `text` and `store`.
@@ -281,22 +257,20 @@ pub(super) mod digits {
         count
     }
 
-    /// The 16 digits of `digits`, from 10^15 up and under 10^16, as text, the first in byte 0,
-    /// and their count without the zeros after the last one, or 17 when `extra` is not 0.
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support SSE2.
     #[target_feature(enable = "sse2")]
     fn text(digits: u64, extra: u8) -> (__m128i, usize) {
         let values = split(digits);
-        // One bit for each digit that is not 0. The first digit is not 0, so the mask is not 0.
         let nonzero = _mm_movemask_epi8(_mm_cmpgt_epi8(values, _mm_setzero_si128())).cast_unsigned();
-        // The count with no branch, because it varies from value to value: a 17th digit sets bit
-        // 16.
         let count = 32 - (nonzero | u32::from(extra != 0) << 16).leading_zeros() as usize;
         (_mm_or_si128(values, _mm_set1_epi8(b'0'.cast_signed())), count)
     }
 
-    /// The low and the high 8 bytes of `bytes`.
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support SSE2.
     #[target_feature(enable = "sse2")]
     fn words(bytes: __m128i) -> (u64, u64) {
         (
@@ -305,9 +279,9 @@ pub(super) mod digits {
         )
     }
 
-    /// Stores `bytes` into `dest` from `at`. The offsets of the callers leave 16 bytes, so the
-    /// store always runs.
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support SSE2.
     #[target_feature(enable = "sse2")]
     fn store(dest: &mut [u8], at: usize, bytes: __m128i) {
         if let Some(dest) = dest.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<16>) {
@@ -321,20 +295,18 @@ pub(super) mod digits {
     /// `(x × 5_243) >> 19` for `x < 10^4`, and `x / 10` is `(x × 6_554) >> 16` for `x < 100`:
     /// the digit values of `value`, under 10^16, the first in byte 0.
     #[inline(always)]
+    /// # Safety
+    /// The CPU must support SSE2.
     #[target_feature(enable = "sse2")]
     fn split(value: u64) -> __m128i {
         let (high, low) = (value / 100_000_000, value % 100_000_000);
         let halves = _mm_set_epi64x(low.cast_signed(), high.cast_signed());
         let quotients = _mm_srli_epi64::<40>(_mm_mul_epu32(halves, _mm_set1_epi64x(109_951_163)));
-        // `x + q × (2^32 − 10^4)` is the remainder in the low half and the quotient in the high
-        // half, and the shuffle swaps the halves.
         let fourths = _mm_add_epi64(halves, _mm_mul_epu32(quotients, _mm_set1_epi64x((1 << 32) - 10_000)));
         let fourths = _mm_shuffle_epi32::<0b10_11_00_01>(fourths);
-        // The high 16 bits of each 32-bit lane are 0, so their products are 0.
         let hundreds = _mm_srli_epi16::<3>(_mm_mulhi_epu16(fourths, _mm_set1_epi16(5_243)));
         let remainders = _mm_sub_epi16(fourths, _mm_mullo_epi16(hundreds, _mm_set1_epi16(100)));
         let pairs = _mm_or_si128(hundreds, _mm_slli_epi32::<16>(remainders));
-        // `t | (x − 10t) << 8` is `(x << 8) − t × (10 × 2^8 − 1)` for the tens `t` of `x`.
         let tens = _mm_mulhi_epu16(pairs, _mm_set1_epi16(6_554));
         _mm_sub_epi16(_mm_slli_epi16::<8>(pairs), _mm_mullo_epi16(tens, _mm_set1_epi16(2_559)))
     }

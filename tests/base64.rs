@@ -17,7 +17,6 @@ fn alphabet(profile: Profile) -> &'static [u8; 64] {
     }
 }
 
-/// The text of `bytes` from data-encoding, an independent implementation.
 fn oracle(profile: Profile, bytes: &[u8]) -> Vec<u8> {
     match profile {
         Profile::Url => data_encoding::BASE64URL_NOPAD.encode(bytes),
@@ -26,7 +25,6 @@ fn oracle(profile: Profile, bytes: &[u8]) -> Vec<u8> {
     .into_bytes()
 }
 
-/// A call of the codec: on a backend, or a function of a timing class, with no backend argument.
 #[derive(Clone, Copy, Debug)]
 enum Call {
     With(Backend),
@@ -34,8 +32,6 @@ enum Call {
     Secret,
 }
 
-/// Each backend that this CPU runs, then the functions of each timing class. A build that makes no
-/// proof has no call of the secret class.
 fn calls() -> Vec<Call> {
     let backends = Kernel::ALL.iter().filter_map(|&kernel| Backend::new(kernel));
     backends
@@ -45,12 +41,10 @@ fn calls() -> Vec<Call> {
         .collect()
 }
 
-/// The portable backend, the reference of each other call.
 fn portable() -> Call {
     Call::With(Backend::new(Kernel::Portable).unwrap())
 }
 
-/// Encodes `bytes` into `out` with `call`, and gives the length of the text.
 fn encode_into(profile: Profile, call: Call, bytes: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     match call {
         Call::With(backend) => profile.encode_with(backend, bytes, out),
@@ -60,7 +54,6 @@ fn encode_into(profile: Profile, call: Call, bytes: &[u8], out: &mut [u8]) -> Re
     .map(|text| text.len())
 }
 
-/// Decodes `text` into `out` with `call`, and gives the length of the bytes.
 fn decode_into(profile: Profile, call: Call, text: &[u8], out: &mut [u8]) -> Result<usize, Error> {
     match call {
         Call::With(backend) => profile.decode_with(backend, text, out),
@@ -77,15 +70,12 @@ fn encode(profile: Profile, call: Call, bytes: &[u8]) -> Vec<u8> {
 }
 
 fn decode(profile: Profile, call: Call, text: &[u8]) -> Result<Vec<u8>, Error> {
-    // Room for more than the result, so that a decoder that writes past it fails the comparison.
     let mut out = vec![0x5a; text.len()];
     let len = decode_into(profile, call, text, &mut out)?;
     assert_eq!(Ok(len), profile.decoded_len(text));
     Ok(out[..len].to_vec())
 }
 
-/// The error that a strict decoder gives for `text`, from the rules of the profile: the length,
-/// then the first byte outside the alphabet, then the trailing bits.
 fn expected_error(profile: Profile, text: &[u8]) -> Option<Error> {
     let error = |kind, offset| Some(Error::new(kind, offset));
     let symbols = match profile {
@@ -136,20 +126,13 @@ fn rfc_4648_vectors() {
     }
 }
 
-/// Each input of 0 to 3 bytes round-trips, in one text and in a call of its own. Each change to
-/// the text of a short input, which replaces one character with any byte or removes or adds the
-/// padding, decodes only if it is the canonical text of other bytes, and refuses with its offset
-/// if not.
 #[test]
 fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
     let calls = calls();
     for profile in PROFILES {
-        // Each input of 3 bytes in one text: the 3 bytes of each value are one quantum of 4
-        // characters, which an encoder or a decoder maps on its own.
         let all: Vec<u8> = (0..1_u32 << 24)
             .flat_map(|value| <[u8; 3]>::try_from(&value.to_le_bytes()[..3]).unwrap())
             .collect();
-        // data-encoding takes at most `usize::MAX / 512` bytes in one call: 8 MiB on wasm32.
         let text: Vec<u8> = all.chunks(3 << 20).flat_map(|chunk| oracle(profile, chunk)).collect();
         for &call in &calls {
             assert_eq!(encode(profile, call, &all), text, "{profile:?} {call:?}");
@@ -168,7 +151,6 @@ fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
                     assert_eq!(encode(profile, call, &bytes), text);
                     assert_eq!(decode(profile, call, &text).unwrap(), bytes);
                 }
-                // The changes of each text of one byte, and of a sample of the longer texts.
                 if len > 1 && value % 257 != 0 {
                     continue;
                 }
@@ -198,10 +180,6 @@ fn short_inputs_round_trip_and_each_noncanonical_form_refuses() {
     }
 }
 
-/// Each text of 2 or 3 symbols of any byte, with its padding in the standard profile, decodes only
-/// if it is the canonical text of its bytes, and refuses with the error of the rules if not. Thus
-/// each noncanonical form of a short text refuses: each quantum of 4 symbols of the alphabet is the
-/// text of one input of 3 bytes, and the decoder takes each quantum on its own.
 #[test]
 fn each_short_text_decodes_only_if_it_is_canonical() {
     let calls = calls();
@@ -229,14 +207,10 @@ fn each_short_text_decodes_only_if_it_is_canonical() {
     }
 }
 
-/// Without `std`, the crate detects no CPU, so a backend exists exactly for each kernel whose CPU
-/// features the build turns on. A backend of another kernel runs instructions that the CPU of the
-/// user can lack. `cargo xtask test` runs this build after the build with `std`.
 #[cfg(not(feature = "std"))]
 #[test]
 fn without_std_a_backend_exists_exactly_for_each_kernel_of_the_build() {
     let avx512bw = cfg!(all(target_feature = "avx512f", target_feature = "avx512bw"));
-    // The name of each kernel, the fastest first, and whether the build has its CPU features.
     let kernels = [
         ("Avx512Vbmi", avx512bw && cfg!(target_feature = "avx512vbmi")),
         ("Avx512Bw", avx512bw),
@@ -258,9 +232,6 @@ fn without_std_a_backend_exists_exactly_for_each_kernel_of_the_build() {
     assert_eq!(backends, built);
 }
 
-/// Each backend and each timing class gives the result and the error of the portable backend: on
-/// random inputs of each length to 96 bytes, past the short path of 64 bytes, on each byte at each
-/// place of their texts, and on random inputs to 1 MiB.
 #[test]
 fn each_backend_equals_the_portable_backend() {
     let portable = portable();
@@ -272,8 +243,6 @@ fn each_backend_equals_the_portable_backend() {
             let text = encode(profile, portable, &bytes);
             let mut texts = vec![text.clone()];
             for place in 0..text.len() {
-                // Each byte value at a seventh of the places of each length, so that over the
-                // lengths each place meets each byte. A random byte at the other places.
                 let small = len <= 96 && place % 7 == len % 7;
                 for byte in if small { 0..=255 } else { 0..=0 } {
                     let mut changed = text.clone();
@@ -298,8 +267,6 @@ fn each_backend_equals_the_portable_backend() {
     }
 }
 
-/// A short output slice refuses with the length of the result, and the decoder checks the length
-/// first.
 #[test]
 fn a_short_output_refuses_with_the_length() {
     let error = |kind, offset| Err(Error::new(kind, offset));
@@ -328,12 +295,8 @@ fn a_short_output_refuses_with_the_length() {
     }
 }
 
-/// After `decode_secret` refuses a text for a symbol or for its trailing bits, each byte of the
-/// result, which it wrote, is zero, and it wrote no other byte. A refusal for the length or the
-/// output writes no byte.
 #[test]
 fn decode_secret_wipes_its_output_after_a_refusal() {
-    // A build that makes no proof has no secret call.
     if !proof() {
         return;
     }
@@ -342,7 +305,6 @@ fn decode_secret_wipes_its_output_after_a_refusal() {
         let mut rng = Rng::new(0x0000_7769_7065);
         for profile in PROFILES {
             let value = |byte| alphabet(profile).iter().position(|&c| c == byte).unwrap();
-            // The lengths of each tail and of whole blocks of each kernel.
             for len in 1..=200 {
                 let bytes = rng.bytes(len);
                 let text = oracle(profile, &bytes);
@@ -352,13 +314,10 @@ fn decode_secret_wipes_its_output_after_a_refusal() {
                     changed[at] = byte;
                     changed
                 };
-                // `*` is in neither alphabet.
                 let mut refusals = vec![
                     (symbol(0, b'*'), ErrorKind::Symbol, 0),
                     (symbol(last, b'*'), ErrorKind::Symbol, last),
                 ];
-                // The last character holds bits after the last byte unless the bytes fill 3n bytes.
-                // Bit 0 is one of them.
                 if len % 3 != 0 {
                     let odd = alphabet(profile)[value(text[last]) | 1];
                     refusals.push((symbol(last, odd), ErrorKind::TrailingBits, last));

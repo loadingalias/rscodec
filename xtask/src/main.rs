@@ -36,28 +36,16 @@ alone, on wasm32v1-none without and with simd128, and with `std` on the host.
 rustdoc documents each codec.
 ";
 
-/// A target with no `std`, which rust-toolchain.toml names. A build for it
-/// fails at each use of `std`, also at a use that is outside its `cfg`.
 const NO_STD_TARGET: &str = "wasm32v1-none";
 
-/// The Cargo configuration that builds `NO_STD_TARGET` with simd128, whose
-/// kernels the build selects: the lint of the plain build does not see them.
 const SIMD128: &str = r#"target.wasm32v1-none.rustflags=["-C", "target-feature=+simd128"]"#;
 
-/// The package whose library builds without `std`.
 const NO_STD_PACKAGE: &str = "rscodec";
 
-/// The leaf features of the codecs of `NO_STD_PACKAGE`. The lint without `std` selects each, and
-/// the tests and the benchmarks select each through the dev-dependency of the package on itself.
 const LEAVES: &str = "base64,hex,json";
 
-/// The selection of the whole workspace.
 const WORKSPACE: &[&str] = &["--workspace"];
 
-/// Environment variables that change compilation without notice. Each command
-/// removes them, so only the checked-in configuration applies. Each variable
-/// that starts with `CARGO_BUILD_`, `CARGO_PROFILE_`, or `CARGO_TARGET_` is
-/// also removed.
 const SCRUBBED: &[&str] = &[
     "CARGO",
     "CARGO_ENCODED_RUSTDOCFLAGS",
@@ -96,7 +84,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// The workspace root and the toolchain channel that it pins.
 struct Repo {
     root: PathBuf,
     channel: String,
@@ -119,9 +106,6 @@ impl Repo {
         Ok(Self { root, channel })
     }
 
-    /// A Cargo command from the pinned toolchain. It runs in the workspace
-    /// root, with no compiler wrapper and no ambient compiler overrides. A
-    /// missing toolchain or component fails; nothing is installed.
     fn cargo(&self, args: &[&str]) -> Command {
         let mut command = Command::new("rustup");
         command
@@ -140,9 +124,7 @@ impl Repo {
         command
     }
 
-    /// Applies the machine-applicable Clippy fixes, then formats the code.
-    /// `clippy --fix` reports each lint that it cannot fix as a warning and
-    /// still succeeds. Thus a last pass that changes nothing fails on them.
+    // Clippy reports unfixed lints as warnings during --fix. Run lint again to enforce the workspace levels.
     fn fix(&self, args: &[String]) -> Result<(), Failure> {
         let scope = scope(args, WORKSPACE);
         step(
@@ -166,15 +148,6 @@ impl Repo {
         self.clippy_no_std(&scope)
     }
 
-    /// Lints `NO_STD_PACKAGE` with no default feature: its library on
-    /// `NO_STD_TARGET` without and with simd128, and all of its targets on the
-    /// host, so that a test that uses `std` outside the `std` feature also
-    /// fails. Then it lints the library with each leaf alone, on
-    /// `NO_STD_TARGET` without and with simd128, and with `std` on the host, so
-    /// that a build that selects one codec also builds. It runs only
-    /// when `scope` is the whole workspace, and it says when it does not run.
-    /// It takes no argument of the caller: a feature or target argument applies
-    /// to the other steps.
     fn clippy_no_std(&self, scope: &[&str]) -> Result<(), Failure> {
         if !scope.contains(&"--workspace") {
             eprintln!("── clippy without std\n   not run: the arguments select packages; run with no -p or --package");
@@ -255,7 +228,6 @@ impl Repo {
         Ok(())
     }
 
-    /// Checks formatting, lints, and rustdoc. It changes no file.
     fn check(&self, args: &[String]) -> Result<(), Failure> {
         let scope = scope(args, WORKSPACE);
         step("fmt --check", &mut self.cargo(&["fmt", "--all", "--check"]))?;
@@ -272,11 +244,6 @@ impl Repo {
         )
     }
 
-    /// Runs the tests with Nextest, in the whole workspace unless the
-    /// arguments select packages. With no arguments, it then runs the tests
-    /// of `NO_STD_PACKAGE` with no default feature: without `std`, the crate
-    /// detects no CPU, and each kernel comes from the build. Then it runs the
-    /// doctests, which Nextest does not run.
     fn test(&self, args: &[String]) -> Result<(), Failure> {
         step(
             "nextest",
@@ -303,7 +270,6 @@ impl Repo {
     }
 }
 
-/// Whether the environment variable `name` changes compilation without notice.
 fn scrubbed(name: &OsStr) -> bool {
     let name = name.to_string_lossy().to_ascii_uppercase();
     SCRUBBED.contains(&name.as_str())
@@ -312,10 +278,6 @@ fn scrubbed(name: &OsStr) -> bool {
             .any(|prefix| name.starts_with(prefix))
 }
 
-/// The Cargo or Nextest arguments of the caller, after the selection `default`
-/// unless they select packages. With no selection, Cargo takes only the root
-/// package. With `--workspace`, Cargo ignores `-p`, and a second `--workspace`
-/// is an error.
 fn scope<'a>(args: &'a [String], default: &[&'a str]) -> Vec<&'a str> {
     let selects = args
         .iter()
@@ -324,7 +286,6 @@ fn scope<'a>(args: &'a [String], default: &[&'a str]) -> Vec<&'a str> {
     default.iter().copied().chain(args.iter().map(String::as_str)).collect()
 }
 
-/// Runs `command` as the step `name`. A failure keeps the exit code of the command.
 fn step(name: &str, command: &mut Command) -> Result<(), Failure> {
     eprintln!("── {name}");
     let started = Instant::now();
@@ -349,7 +310,6 @@ fn step(name: &str, command: &mut Command) -> Result<(), Failure> {
     })
 }
 
-/// A failed command: the message to report and the exit code of the process.
 struct Failure {
     message: String,
     code: u8,
@@ -367,11 +327,6 @@ mod tests {
 
     use super::{WORKSPACE, scope};
 
-    /// A feature, target, or filter argument keeps the whole workspace:
-    /// without `--workspace`, `cargo xtask check --all-features`, a test run
-    /// on wasm32-wasip1, and a named test cover only the root package, and the
-    /// lint without `std` does not run. Each package flag keeps its own
-    /// selection.
     #[test]
     fn only_package_flags_narrow_the_scope() {
         let joined =

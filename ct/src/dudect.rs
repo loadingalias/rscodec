@@ -21,37 +21,26 @@ use crate::{
     random::Random,
 };
 
-/// The largest |t| that passes.
 const THRESHOLD: f64 = 8.0;
 
-/// The part of the threshold at which a pass needs a second measurement.
 const REVIEW: f64 = 0.75;
 
-/// The samples of the second measurement, as a multiple of the first.
 const CONFIRM: usize = 4;
 
-/// The least median of the timer ticks of one sample. At 100 ticks, one tick is at most 1% of it.
 const TICKS_MIN: u64 = 100;
 
-/// The samples of one batch, whose inputs are in one buffer in the order of the samples.
 const BATCH: usize = 1024;
 
-/// The crops of the slow samples.
 const PERCENTILES: usize = 100;
 
-/// The least samples of each class in a test that counts.
 const ENOUGH: f64 = 10_000.0;
 
-/// The lengths of the data in bytes.
 const LENGTHS: [usize; 4] = [16, 32, 64, 4096];
 
-/// The length of the data of the refusals.
 const REFUSAL_BYTES: usize = 64;
 
-/// The samples of each measurement, unless the command line gives a number.
 const SAMPLES: usize = 10_000_000;
 
-/// The seed of the first measurement.
 const SEED: u64 = 0xd0de;
 
 #[derive(Clone, Copy)]
@@ -60,7 +49,6 @@ enum Calls {
     Exact { count: usize, warmups: usize },
 }
 
-/// Welch's t-test of two classes, with Welford's sums.
 #[derive(Clone, Copy, Debug, Default)]
 struct Test {
     n: [f64; 2],
@@ -77,13 +65,11 @@ impl Test {
         self.m2[class] += delta * (x - self.mean[class]);
     }
 
-    /// The standard error of the difference of the means.
     fn error(&self) -> f64 {
         let variance = |class: usize| self.m2[class] / (self.n[class] - 1.0);
         (variance(0) / self.n[0] + variance(1) / self.n[1]).sqrt()
     }
 
-    /// |t|, or zero if a class has too few samples.
     fn t(&self) -> f64 {
         if self.n[0] < ENOUGH || self.n[1] < ENOUGH {
             return 0.0;
@@ -92,22 +78,17 @@ impl Test {
     }
 }
 
-/// The result of one measurement.
 #[derive(Debug)]
 struct Measure {
     t: f64,
-    /// The test that gave the largest absolute t value.
     test: &'static str,
     samples: usize,
     calls: usize,
     median: u64,
-    /// The mean ticks per call in each class, before any crop.
     means: [f64; 2],
-    /// The difference of the mean ticks of one call that gives the threshold.
     detectable: f64,
 }
 
-/// Runs DudeCT on each secret function.
 pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
     let number = |index: usize, name: &str| {
         args.get(index)
@@ -172,7 +153,6 @@ pub(crate) fn run(args: &[String]) -> Result<(), Failure> {
                 let pass = if first.t > THRESHOLD {
                     false
                 } else if first.t >= REVIEW * THRESHOLD {
-                    // A new seed gives new inputs and a new order of the classes.
                     let second = measure(
                         &case,
                         dit,
@@ -227,7 +207,6 @@ fn report(name: &str, bytes: usize, outcome: Outcome, measure: &Measure) -> Stri
     )
 }
 
-/// Generates and copies each input before the batch is timed.
 fn fill_batch<'a>(
     random: &mut Random,
     fixed: Option<(Fill, u64)>,
@@ -237,7 +216,6 @@ fn fill_batch<'a>(
 ) -> Result<(), Failure> {
     for (slot, class) in slots.zip(classes) {
         *class = usize::from(random.next() & 1 == 1);
-        // Draw both words for every slot. A/A keeps the class order and the class-one inputs.
         let fresh = (Fill::Random, random.next());
         let (fill, seed) = if *class == 0 { fixed.unwrap_or(fresh) } else { fresh };
         slot.copy_from_slice(&input(fill, seed)?);
@@ -245,7 +223,6 @@ fn fill_batch<'a>(
     Ok(())
 }
 
-/// One DudeCT measurement of `case`.
 fn measure(
     case: &Case,
     dit: &Dit,
@@ -253,10 +230,8 @@ fn measure(
     (samples, sampling): (usize, Calls),
     seed: u64,
 ) -> Result<Measure, Failure> {
-    // The schedule and the fixed input start from different generator states.
     let mut random = Random::new(Random::new(seed).next());
     let fixed = fixed.map(|fill| (fill, seed));
-    // A refusal keeps its bad character at one offset: its time may depend on the offset.
     let at = Some(bytes);
     let input = |fill, seed| {
         case.input(bytes, outcome, fill, at, &mut Random::new(seed))?
@@ -284,7 +259,6 @@ fn measure(
             *slot = timer::ticks().wrapping_sub(start);
         }
     };
-    // The calls of one sample: the least power of two whose median sample spans twice the floor.
     fill_batch(&mut random, fixed, inputs.chunks_exact_mut(len), &mut classes, input)?;
     let median = loop {
         time(calls, &inputs, &mut ticks);
@@ -422,7 +396,6 @@ mod tests {
 
     #[test]
     fn the_timing_report_gives_the_observed_difference_when_the_second_order_test_wins() {
-        // Four calls per sample. The sample means differ by four ticks. The variances are 4 and 16.
         let all = Test {
             n: [20_000.0; 2],
             mean: [200.0, 204.0],
@@ -444,7 +417,6 @@ mod tests {
     }
 }
 
-/// The timer of the CPU: the time-stamp counter of x86_64, and the virtual counter of aarch64.
 #[expect(
     unsafe_code,
     reason = "each asm reads a counter of the CPU that user code may read, and writes only its outputs"
@@ -452,7 +424,6 @@ mod tests {
 mod timer {
     use std::arch::asm;
 
-    /// The counter, with a barrier before it, so that the instructions before it complete first.
     #[inline(always)]
     pub(super) fn ticks() -> u64 {
         #[cfg(target_arch = "x86_64")]

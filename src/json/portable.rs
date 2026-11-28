@@ -1,16 +1,8 @@
-//! The 64-bit SWAR kernel: the reference of the SIMD kernels, and the kernel of a CPU with no SIMD
-//! kernel. It finds the escapes by a walk over the `\` bytes, not by the subtraction of the SIMD
-//! kernels, so the two methods check each other.
-
 use super::block::{self, Block, Carry, Classes, Escapes};
 
-/// 0x01 in each byte.
 const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
-/// 0x80 in each byte.
 const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
 
-/// The block of `input` at `start`: its 64 bytes, with spaces after them when the input has fewer,
-/// after the 4 bytes before `start` and after `carry`.
 #[inline(never)]
 pub(super) fn block(input: &[u8], start: usize, carry: Carry) -> Block {
     let (bytes, before) = (&input[start..], block::before(input, start));
@@ -22,13 +14,11 @@ pub(super) fn block(input: &[u8], start: usize, carry: Carry) -> Block {
     classes.block(escapes(classes.backslash, carry.escaped()), carry, block::prefix_xor)
 }
 
-/// The classes of the little-endian `words`.
 #[inline]
 fn classify(words: [u64; 8], before: u32) -> Classes {
     let mut classes = Classes::default();
     for (index, word) in words.into_iter().enumerate() {
         let equal = |byte: u8| zeros(word ^ (ONES * u64::from(byte)));
-        // `|` 0x20 makes `[` and `]` into `{` and `}`, and no other byte.
         let curly = |byte: u8| zeros((word | (ONES * 0x20)) ^ (ONES * u64::from(byte)));
         let set = |mask: &mut u64, bytes: u64| *mask |= pack(bytes) << (8 * index);
         set(
@@ -47,22 +37,16 @@ fn classify(words: [u64; 8], before: u32) -> Classes {
     classes
 }
 
-/// 0x80 in each byte of `word` that is zero, and zero in each other byte. No carry passes from one
-/// byte to the next.
 #[inline]
 const fn zeros(word: u64) -> u64 {
     !(((word & !HIGH) + !HIGH) | word) & HIGH
 }
 
-/// The bit 7 of each byte of `bytes` in bits 0 to 7 of the result, from byte 0. The product puts
-/// each bit in a different place, so no carry changes a bit of the result.
 #[inline]
 const fn pack(bytes: u64) -> u64 {
     (bytes >> 7).wrapping_mul(0x0102_0408_1020_4080) >> 56
 }
 
-/// The UTF-8 check of each byte of `words`. In a block of ASCII, only the first three bytes can
-/// end an error, and they end one exactly when `before` ends incomplete.
 #[inline]
 fn utf8_error(words: [u64; 8], before: u32) -> bool {
     if words.iter().fold(0, |any, word| any | word) & HIGH == 0 {
@@ -77,8 +61,6 @@ fn utf8_error(words: [u64; 8], before: u32) -> bool {
     error
 }
 
-/// The escapes of `backslash`, after a first byte that is escaped if `escaped` is 1, by a walk from
-/// its lowest `\`. A `\` that is not escaped starts an escape, and it escapes the next byte.
 #[inline]
 fn escapes(backslash: u64, escaped: u64) -> Escapes {
     let mut escapes = Escapes { escaped, starts: 0 };

@@ -44,15 +44,11 @@ cfg_select! {
 
 use std::{env, process::ExitCode};
 
-/// The usage of the harness.
 const USAGE: &str = "usage: rscodec-ct paths [case] | scan [binary] [isa] | stack [public] | dudect [samples] [random|zero|aa] [case] [bytes] [calls] [warm|unwarmed] [codec|buffers]";
 
-/// Why a command did not pass.
 #[derive(Debug)]
 enum Failure {
-    /// A check found a defect, or a fact that a person must review.
     Check(String),
-    /// This host cannot run the check, for example with no CPU counters.
     Host(String),
 }
 

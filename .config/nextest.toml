@@ -1,6 +1,3 @@
-# cargo-nextest runs the unit and integration tests. `cargo xtask test` runs
-# the doctests separately. Retries stay at zero: a flaky test is a defect. A
-# test that does not return fails at its slow timeout.
 nextest-version = { required = "0.9.150", recommended = "0.9.150" }
 
 [profile.default]
@@ -9,10 +6,8 @@ flaky-result = "fail"
 success-output = "never"
 failure-output = "immediate-final"
 fail-fast = true
-# A test that runs for three periods of 10 s ends as a failure.
 slow-timeout = { period = "10s", terminate-after = 3 }
 
-# The CI gate: the same test semantics, reporting every failure.
 [profile.ci]
 inherits = "default"
 fail-fast = false
@@ -24,7 +19,6 @@ store-failure-output = true
 report-skipped = "none"
 flaky-fail-status = "failure"
 
-# The named float sweep runs only when selected (`--run-ignored only`), and for minutes.
 [[profile.default.overrides]]
 filter = "test(float_sweep)"
 slow-timeout = { period = "60s", terminate-after = 60 }

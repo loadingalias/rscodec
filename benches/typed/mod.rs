@@ -1,9 +1,3 @@
-//! The typed decode of profile A: one struct for each class, which serde derives for each
-//! competitor, and the hand-written decoder of rscodec into the same struct.
-//!
-//! Each string is a [`Text`], which borrows the document when the string has no escape, in serde
-//! too. Thus each crate gives the same struct with the fewest copies.
-
 use std::{borrow::Cow, fmt};
 
 use rscodec::json::{self, ErrorKind, Kind, Limits, Profile, Slot, Str, Value};
@@ -12,7 +6,6 @@ use serde::{
     de::{self, SeqAccess, Visitor},
 };
 
-/// The limits of the typed decode: those of a server that reads authentication documents.
 const LIMITS: Limits = Limits {
     input_bytes_max: 1 << 16,
     depth_max: 16,
@@ -22,7 +15,6 @@ const LIMITS: Limits = Limits {
     number_digits_max: 32,
 };
 
-/// A string of a document. It borrows the document if it can.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Text<'a>(Cow<'a, str>);
 
@@ -88,7 +80,6 @@ impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
     }
 }
 
-/// clientDataJSON (WebAuthn Level 3, section 5.8.1).
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(bound(deserialize = "'de: 'a"))]
 pub(crate) struct ClientData<'a> {
@@ -147,7 +138,6 @@ pub(crate) struct Header<'a> {
     epk: Option<Jwk<'a>>,
 }
 
-/// The address claim (OpenID Connect Core 1.0 section 5.1.1).
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(bound(deserialize = "'de: 'a"))]
 pub(crate) struct Address<'a> {
@@ -185,8 +175,6 @@ pub(crate) struct Claims<'a> {
     address: Option<Address<'a>>,
 }
 
-/// The members of an OpenID Provider Metadata document (OpenID Connect Discovery 1.0 section 3)
-/// that a relying party reads.
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(bound(deserialize = "'de: 'a"))]
 pub(crate) struct Discovery<'a> {
@@ -211,19 +199,14 @@ pub(crate) struct Discovery<'a> {
     require_pushed_authorization_requests: Option<bool>,
 }
 
-/// A class of profile A and its struct, which rscodec decodes by hand.
 pub(crate) trait Typed {
-    type Of<'a>: Deserialize<'a> + PartialEq + fmt::Debug;
+    type Of<'a>: Deserialize<'a> + PartialEq;
 
-    /// The decoder of rscodec, with a scratch of the caller.
     fn rscodec<'a>(document: &'a [u8], scratch: &mut [Slot]) -> Result<Self::Of<'a>, json::Error>;
 }
 
-/// The refusal of a document that lacks a member that its struct needs.
 const MISSING: json::Error = json::Error::new(ErrorKind::Type, 0);
 
-/// The name of a key, which an escaped key decodes into `buf`. A key that `buf` cannot hold is
-/// longer than the name of each member of the structs, so it matches none.
 #[inline(always)]
 fn name<'k, 'a: 'k>(key: Str<'a>, buf: &'k mut [u8; 64]) -> &'k str {
     key.decode(buf).unwrap_or("")

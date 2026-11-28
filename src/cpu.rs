@@ -1,40 +1,28 @@
-//! Compile-time CPU features and cached runtime detection.
-//! Each kernel specifies its required features and timing class. Detection checks all implied features
-//! before dispatch can call a function with `#[target_feature]`.
-
 use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
-/// A set of CPU features. Each constant of `x86`, `aarch64`, and `wasm32` holds one feature. A
-/// build has the features of one architecture, so each architecture numbers its features from bit 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Caps(u32);
 
 impl Caps {
-    /// No feature.
     pub(crate) const NONE: Self = Self(0);
 
-    /// Each feature: the set of a CPU that has all of them.
     pub(crate) const ALL: Self = Self(u32::MAX >> 1);
 
-    /// The feature of bit `bit`. Bit 31 is not a feature, so that [`caps`] can mark its cache.
     const fn bit(bit: u8) -> Self {
         assert!(bit < 31);
         Self(1 << bit)
     }
 
-    /// Whether the set holds each feature of `required`.
     #[inline(always)]
     pub(crate) const fn has(self, required: Self) -> bool {
         self.0 & required.0 == required.0
     }
 
-    /// The features of either set.
     #[inline(always)]
     pub(crate) const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
-    /// The features of the set that are not in `other`. Only the detection removes features.
     #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
     #[inline(always)]
     pub(crate) const fn difference(self, other: Self) -> Self {
@@ -42,87 +30,58 @@ impl Caps {
     }
 }
 
-/// The features of x86_64.
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86 {
     use super::Caps;
 
-    /// SSSE3: `pshufb` and `pmaddubsw` on 16-byte vectors.
     pub(crate) const SSSE3: Caps = Caps::bit(0);
-    /// AVX2: the integer operations on 32-byte vectors.
     pub(crate) const AVX2: Caps = Caps::bit(1);
-    /// BMI1: `blsr` and `tzcnt`.
     pub(crate) const BMI1: Caps = Caps::bit(2);
-    /// BMI2: `pdep` and `pext`.
     pub(crate) const BMI2: Caps = Caps::bit(3);
-    /// PCLMULQDQ: the carry-less multiply.
     pub(crate) const PCLMULQDQ: Caps = Caps::bit(4);
-    /// AVX-512F: the foundation of AVX-512, with 64-byte vectors.
     pub(crate) const AVX512F: Caps = Caps::bit(5);
-    /// AVX-512BW: the byte and word operations.
     pub(crate) const AVX512BW: Caps = Caps::bit(6);
-    /// AVX-512VL: the AVX-512 operations on 16-byte and 32-byte vectors.
     pub(crate) const AVX512VL: Caps = Caps::bit(7);
-    /// AVX-512 VBMI: the byte permutes `vpermb` and `vpermi2b`, and `vpmultishiftqb`.
     pub(crate) const AVX512VBMI: Caps = Caps::bit(8);
-    /// AVX-512 VBMI2: `vpcompressb` and the double shifts.
     pub(crate) const AVX512VBMI2: Caps = Caps::bit(9);
-    /// SSE3, which SSSE3 implies.
     pub(crate) const SSE3: Caps = Caps::bit(10);
-    /// SSE4.1, which SSE4.2 implies.
     pub(crate) const SSE41: Caps = Caps::bit(11);
-    /// SSE4.2, which AVX implies.
     pub(crate) const SSE42: Caps = Caps::bit(12);
-    /// AVX: the floating-point operations on 32-byte vectors, which AVX2 implies.
     pub(crate) const AVX: Caps = Caps::bit(13);
-    /// FMA: the fused multiply-add, which AVX-512F implies.
     pub(crate) const FMA: Caps = Caps::bit(14);
-    /// F16C: the conversions of half-precision floats, which AVX-512F implies.
     pub(crate) const F16C: Caps = Caps::bit(15);
 }
 
-/// The features of aarch64.
 #[cfg(target_arch = "aarch64")]
 pub(crate) mod aarch64 {
     use super::Caps;
 
-    /// Neon (Advanced SIMD).
     pub(crate) const NEON: Caps = Caps::bit(0);
     /// FEAT_AES and FEAT_PMULL, which the `aes` feature of Rust holds together.
     pub(crate) const AES: Caps = Caps::bit(1);
-    /// FEAT_DIT: data independent timing, with `PSTATE.DIT`.
     pub(crate) const DIT: Caps = Caps::bit(2);
     /// FEAT_SB: the speculation barrier `sb`, which follows each write that sets DIT.
     pub(crate) const SB: Caps = Caps::bit(3);
 }
 
-/// The features of WebAssembly. WebAssembly has no run-time detection, so each feature is a
-/// feature of the build.
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod wasm32 {
     use super::Caps;
 
-    /// WebAssembly SIMD, with 16-byte vectors.
     pub(crate) const SIMD128: Caps = Caps::bit(0);
 }
 
-/// Defines [`caps_static`] from one list: the name of each feature in `-C target-feature`, and its
-/// constant. With the name of the detection macro of `std::arch`, it also defines `detect` for
-/// `std`.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "wasm32"))]
 macro_rules! features {
     ($detected:ident: $($name:tt => $feature:expr),+ $(,)?) => {
         features!($($name => $feature),+);
 
-        /// The features that `std::arch` detects on this CPU.
         #[cfg(feature = "std")]
         fn detect() -> Caps {
             Caps::NONE $(.union(if std::arch::$detected!($name) { $feature } else { Caps::NONE }))+
         }
     };
     ($($name:tt => $feature:expr),+) => {
-        /// The features that `-C target-feature` turns on. The compiler can use them in each
-        /// function, so each CPU that runs the program has them.
         #[inline(always)]
         pub(crate) const fn caps_static() -> Caps {
             Caps::NONE $(.union(if cfg!(target_feature = $name) { $feature } else { Caps::NONE }))+
@@ -161,29 +120,22 @@ features!(is_aarch64_feature_detected:
 #[cfg(target_arch = "wasm32")]
 features!("simd128" => wasm32::SIMD128);
 
-/// No feature: rscodec has no kernel for the other architectures.
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "wasm32")))]
 #[inline(always)]
 pub(crate) const fn caps_static() -> Caps {
     Caps::NONE
 }
 
-/// Whether [`caps`] can hold more than [`caps_static`]: with `std`, on a target with run-time
-/// detection. If not, the choice of each kernel is a constant.
 pub(crate) const DETECTS: bool = cfg!(all(
     feature = "std",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ));
 
-/// The features of the CPU that runs the process. It includes [`caps_static`]. With `std`, the
-/// first call detects them, and each later call reads the result.
 #[inline]
 pub(crate) fn caps() -> Caps {
     cfg_select! {
         all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")) => {
             use core::sync::atomic::AtomicU32;
-            /// The features with bit 31 set, or zero before the first call. Each call that stores
-            /// it stores the same value.
             static DETECTED: AtomicU32 = AtomicU32::new(0);
             const KNOWN: u32 = 1 << 31;
             let detected = DETECTED.load(Relaxed);
@@ -241,8 +193,6 @@ pub(crate) fn close_implications(caps: Caps) -> Caps {
         .fold(caps, |closed, &(feature, _)| closed.difference(feature))
 }
 
-/// Whether the CPU has each feature of `required`. The compiler folds the check of a feature of
-/// [`caps_static`], with no load.
 #[cfg(any(feature = "base64", feature = "hex"))]
 #[inline(always)]
 pub(crate) fn has(required: Caps) -> bool {
@@ -290,24 +240,15 @@ fn runnable(detected: Caps) -> Caps {
     }
 }
 
-/// The detected features. Only x86 has a rule that removes a detected feature.
 #[cfg(all(feature = "std", target_arch = "aarch64"))]
 #[inline(always)]
 const fn runnable(detected: Caps) -> Caps {
     detected
 }
 
-/// Base64 and hex distinguish public and secret operations. JSON kernels handle public structure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Timing {
-    /// For public data, for example a digest or a signature. A function of the class runs the
-    /// fastest kernel of the CPU. A kernel of the class can use an instruction whose time can
-    /// depend on its operands, for example a byte permute of AVX-512 VBMI, which Intel does not
-    /// list with data operand independent timing (DOIT).
     Public,
-    /// For secret data, for example a key or a bearer token. A kernel of the class uses only the
-    /// instructions that Intel lists with DOIT and Arm lists with data independent timing (DIT). A
-    /// function of the class runs only these kernels, with `PSTATE.DIT` set on aarch64.
     #[cfg_attr(
         not(any(feature = "base64", feature = "hex")),
         expect(dead_code, reason = "a build with only the JSON codec has no secret class")
@@ -316,15 +257,12 @@ pub(crate) enum Timing {
 }
 
 impl Timing {
-    /// Whether a function of this class can run a kernel of class `kernel`.
     #[inline(always)]
     pub(crate) const fn runs(self, kernel: Self) -> bool {
         matches!((self, kernel), (Self::Public, _) | (Self::Secret, Self::Secret))
     }
 }
 
-/// The kernel that a codec chose for one timing class, kept for the process: one more than the
-/// index of the kernel in the table of the codec, or zero before the first call.
 #[derive(Debug)]
 pub(crate) struct Kept(AtomicU8);
 
@@ -333,22 +271,17 @@ impl Kept {
         Self(AtomicU8::new(0))
     }
 
-    /// Whether the first call chose `index`: one load and one compare. A codec asks this first for
-    /// the fastest kernel of the target, and then it calls that kernel with no table.
     #[inline(always)]
     pub(crate) fn holds(&self, index: usize) -> bool {
         usize::from(self.0.load(Relaxed)) == index + 1
     }
 
-    /// The index that the first call chose with `choose`. Each racing first call chooses and
-    /// stores the same index.
     #[inline]
     pub(crate) fn index(&self, choose: impl FnOnce() -> usize) -> usize {
         if let Some(index) = usize::from(self.0.load(Relaxed)).checked_sub(1) {
             return index;
         }
         let index = choose();
-        // A table has fewer than 255 kernels, so the index fits.
         if let Ok(kept) = u8::try_from(index + 1) {
             self.0.store(kept, Relaxed);
         }
@@ -356,14 +289,8 @@ impl Kept {
     }
 }
 
-/// The choice of the kernel of each timing class, as the items `fastest`, `fixed`, `chosen`, and
-/// `detected` of the `Kernel` of a codec. The codec gives `ALL`, its kernels from the fastest to
-/// `$reference`, which runs on each CPU, and `needs`, the features and the class of a kernel. A
-/// constant cannot call a method of a trait, so a macro gives each codec the one rule.
 macro_rules! choice {
     ($reference:ident) => {
-        /// The index in `ALL` of the fastest kernel that a CPU with `caps` runs in a function of
-        /// `class`. The last kernel, the reference, runs on each CPU and in each class.
         const fn fastest(caps: $crate::cpu::Caps, class: $crate::cpu::Timing) -> usize {
             let mut index = 0;
             while index + 1 < Self::ALL.len() {
@@ -376,8 +303,6 @@ macro_rules! choice {
             index
         }
 
-        /// The index of the kernel of `class` that the build fixes: if the build has no run-time
-        /// detection, or if `caps_static()` holds the features of the fastest kernel of the class.
         const fn fixed(class: $crate::cpu::Timing) -> Option<usize> {
             let index = Self::fastest($crate::cpu::caps_static(), class);
             if !$crate::cpu::DETECTS || index == Self::fastest($crate::cpu::Caps::ALL, class) {
@@ -387,8 +312,6 @@ macro_rules! choice {
             }
         }
 
-        /// The kernel of the functions of `class` with no backend argument. If the build does not
-        /// fix it, the first call chooses it, and each later call reads the choice.
         #[inline(always)]
         fn chosen(class: $crate::cpu::Timing) -> Self {
             use $crate::cpu::{Caps, Kept, Timing};
@@ -407,16 +330,12 @@ macro_rules! choice {
             };
             let index = match fixed {
                 Some(index) => index,
-                // The fastest kernel of the target first: one load and one compare, and then the
-                // caller calls it with no table.
                 None if kept.holds(top) => return Self::ALL[top],
                 None => kept.index(|| Self::detected(class)),
             };
             Self::ALL.get(index).copied().unwrap_or(Self::$reference)
         }
 
-        /// The index of the fastest kernel of `class` that this CPU runs. Only the first call of a
-        /// class runs it. It stays out of line, so the detection takes no register of the caller.
         #[cold]
         #[inline(never)]
         fn detected(class: $crate::cpu::Timing) -> usize {
@@ -514,14 +433,9 @@ mod dit {
 
     use super::{aarch64, has};
 
-    /// The bit of DIT in its register.
     const ON: u64 = 1 << 24;
 
-    /// Runs `call` with `PSTATE.DIT` set, then restores its earlier value. If DIT is set already,
-    /// it writes nothing. The caller checks that the CPU has DIT.
-    ///
-    /// The asm can read and write memory for the compiler, so no load of an input moves before the
-    /// write of DIT, and no store of an output moves after its restore.
+    // The assembly must order input loads and output stores with respect to changes to PSTATE.DIT.
     #[inline]
     pub(super) fn hold<T>(call: impl FnOnce() -> T) -> T {
         let earlier: u64;
@@ -554,9 +468,6 @@ mod dit {
 mod tests {
     use super::{Caps, close_implications};
 
-    /// A feature without one of the features that it implies is not reported, because a
-    /// `#[target_feature]` function of the feature can run the implied feature. The implications
-    /// are those of rustc on the pinned toolchain.
     #[test]
     fn a_feature_without_a_feature_that_it_implies_is_not_reported() {
         let without = |missing: Caps| close_implications(Caps::ALL.difference(missing));
@@ -567,7 +478,6 @@ mod tests {
                 AVX, AVX2, AVX512BW, AVX512F, AVX512VBMI, AVX512VBMI2, AVX512VL, BMI1, BMI2, F16C, FMA, PCLMULQDQ,
                 SSE3, SSE41, SSE42, SSSE3,
             };
-            // AVX-512F implies AVX2, FMA, and F16C, and each other AVX-512 feature implies AVX-512F.
             for missing in [AVX2, FMA, F16C] {
                 let caps = without(missing);
                 for avx512 in [AVX512F, AVX512BW, AVX512VL, AVX512VBMI, AVX512VBMI2] {
@@ -576,7 +486,6 @@ mod tests {
             }
             assert!(!without(AVX512BW).has(AVX512VBMI2));
             assert!(without(AVX512VBMI).has(AVX512VBMI2));
-            // Each vector feature implies SSE3, and one pass removes each of them.
             let caps = without(SSE3);
             for vector in [
                 SSSE3,

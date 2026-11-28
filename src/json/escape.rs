@@ -1,14 +1,10 @@
-//! The JSON string of a text: the scan for the bytes that need an escape, 16 bytes at a time, and
-//! the escapes of RFC 8785, which are also valid RFC 8259: `\"`, `\\`, the short forms `\b`, `\f`,
-//! `\n`, `\r`, and `\t`, and `\u00xx` with lowercase hex digits for each other byte under 0x20.
+//! RFC 8785 uses lowercase hex escapes and the short escapes for backspace, tab, newline, form feed, and carriage return.
 
 #[cfg(test)]
 mod tests;
 
-/// The bytes of one step of the scan.
 const BLOCK: usize = 16;
 
-// The scan of the build: the build fixes it, so it inlines into each string.
 cfg_select! {
     target_arch = "x86_64" => {
         use super::x86::escape::{BITS, escapes, escapes_of_words};
@@ -20,27 +16,19 @@ cfg_select! {
         use super::wasm32::{BITS, escapes, escapes_of_words};
     }
     _ => {
-        /// The bits of a mask for each byte of [`escapes`].
         const BITS: u32 = 1;
 
-        /// A mask with one bit for each byte of `block` that a JSON string escapes, the first byte
-        /// in bit 0, from two 64-bit words.
         #[inline(always)]
         fn escapes(block: &[u8; BLOCK]) -> u64 {
             let (words, _) = block.as_chunks::<8>();
             escapes_of_words(u64::from_le_bytes(words[0]), u64::from_le_bytes(words[1]))
         }
 
-        /// [`escapes`] of the 16 bytes of the little-endian words `low` and `high`.
         #[inline(always)]
         fn escapes_of_words(low: u64, high: u64) -> u64 {
-            /// 0x01 and 0x80 in each byte.
             const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
             const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
-            // Bit 7 of each zero byte of `word`, with no carry between the bytes.
             let zeros = |word: u64| !(((word & !HIGH) + !HIGH) | word) & HIGH;
-            // Bit 7 of each byte, in bits 0 to 7 from byte 0: the product puts each bit in its own
-            // place, so no carry changes a bit of the result.
             let pack = |bytes: u64| (bytes >> 7).wrapping_mul(0x0102_0408_1020_4080) >> 56;
             let escapes = |word: u64| {
                 let (quote, backslash, high_bits) = (ONES * u64::from(b'"'), ONES * u64::from(b'\\'), ONES * 0xe0);
@@ -51,21 +39,17 @@ cfg_select! {
     }
 }
 
-/// The index of the first byte of a mask of [`escapes`] that is not 0.
 #[inline(always)]
 const fn first(mask: u64) -> usize {
     (mask.trailing_zeros() / BITS) as usize
 }
 
-/// The second byte of the short escape of each byte under 0x20, or 0 where the escape is `\u00xx`.
 const SHORT: [u8; 32] = {
     let mut short = [0; 32];
     (short[0x08], short[0x09], short[0x0a], short[0x0c], short[0x0d]) = (b'b', b't', b'n', b'f', b'r');
     short
 };
 
-/// The escape of `byte`, a byte that [`first_escape`] finds, in the first bytes of an array, and
-/// its length: 2 or 6.
 #[inline]
 fn escape(byte: u8) -> ([u8; 8], usize) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -79,14 +63,10 @@ fn escape(byte: u8) -> ([u8; 8], usize) {
     }
 }
 
-/// The bytes of `text`, which has fewer than 16, and spaces after them, as two little-endian
-/// words. A space needs no escape.
 #[inline(always)]
 fn tail(text: &[u8]) -> (u64, u64) {
-    /// A space in each byte.
     const SPACES: u64 = u64::from_ne_bytes([b' '; 8]);
     let len = text.len();
-    // Two loads of 8 or 4 bytes, one from each end, which overlap when the text is short.
     let bits = |count: usize| u32::try_from(8 * count).unwrap_or(u32::MAX);
     if let (Some(first), Some(last)) = (text.first_chunk::<8>(), text.last_chunk::<8>()) {
         let last = u64::from_le_bytes(*last).unbounded_shr(bits(BLOCK - len));
@@ -101,9 +81,6 @@ fn tail(text: &[u8]) -> (u64, u64) {
     }
 }
 
-/// The mask of [`escapes`] of the next block of `text`, from its first 16 bytes or from all of them
-/// and spaces after them, and the count of its bytes of `text`. It stores the block into `out` from
-/// `at` if 16 bytes fit there.
 #[inline(always)]
 fn step(text: &[u8], out: &mut [u8], at: usize) -> (u64, usize) {
     let dest = out.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<BLOCK>);
@@ -121,12 +98,6 @@ fn step(text: &[u8], out: &mut [u8], at: usize) -> (u64, usize) {
     (escapes_of_words(low, high), text.len())
 }
 
-/// Writes the JSON string of `text`, quotes included, into `out` from `at`, and returns the
-/// index after it, or `None` if `out` ends first. The bytes of `out` from `at` are unspecified
-/// after `None`, and after the returned index otherwise.
-///
-/// A text of fewer than 16 bytes with no byte to escape, for example most keys, takes no call:
-/// one step stores it.
 #[inline(always)]
 pub(super) fn write(out: &mut [u8], at: usize, text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
@@ -145,7 +116,6 @@ pub(super) fn write(out: &mut [u8], at: usize, text: &str) -> Option<usize> {
     write_scanned(out, at, text)
 }
 
-/// [`write`] of each text, a block at a time.
 fn write_scanned(out: &mut [u8], mut at: usize, text: &str) -> Option<usize> {
     *out.get_mut(at)? = b'"';
     at += 1;
@@ -154,7 +124,6 @@ fn write_scanned(out: &mut [u8], mut at: usize, text: &str) -> Option<usize> {
         let room = out.len().saturating_sub(at);
         let (mut copied, mut escaped) = (0, false);
         if rest.len() >= BLOCK && room >= BLOCK {
-            // The whole blocks that fit in `out`, up to the first escape, with no other check.
             let blocks = rest.len().min(room) / BLOCK;
             let (texts, _) = rest.as_chunks::<BLOCK>();
             let (dests, _) = out.get_mut(at..)?.as_chunks_mut::<BLOCK>();
@@ -168,9 +137,6 @@ fn write_scanned(out: &mut [u8], mut at: usize, text: &str) -> Option<usize> {
                 copied += BLOCK;
             }
         } else {
-            // The tail, or a block where `out` has no room for 16 bytes. The step stores the whole
-            // block when 16 bytes fit, and else copies only the bytes before the escape or the end
-            // of the text.
             let (mask, len) = step(rest, out, at);
             (copied, escaped) = if mask == 0 { (len, false) } else { (first(mask), true) };
             if room < BLOCK {
@@ -183,7 +149,6 @@ fn write_scanned(out: &mut [u8], mut at: usize, text: &str) -> Option<usize> {
         }
         at += copied;
         rest = &rest[copied..];
-        // The spaces after the tail need no escape, so a block with an escape has it in the text.
         let Some((&byte, after)) = rest.split_first().filter(|_| escaped) else {
             continue;
         };

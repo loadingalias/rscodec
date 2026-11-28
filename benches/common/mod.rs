@@ -1,5 +1,3 @@
-//! Warm each row, measure heap use on one call, check the result, then time the operation.
-
 use core::{
     alloc::{GlobalAlloc, Layout},
     hint::black_box,
@@ -10,8 +8,6 @@ use std::alloc::System;
 
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 
-/// Runs `targets` with the measurement plan of each run. A command-line option of Criterion, for
-/// example `--measurement-time`, changes the plan.
 pub(crate) fn run(targets: &[fn(&mut Criterion)]) {
     let mut criterion = Criterion::default()
         .sample_size(50)
@@ -25,7 +21,6 @@ pub(crate) fn run(targets: &[fn(&mut Criterion)]) {
     criterion.final_summary();
 }
 
-/// A Criterion group whose rows check their output and report their heap use.
 pub(crate) struct Group<'c> {
     name: String,
     group: BenchmarkGroup<'c, WallTime>,
@@ -39,14 +34,10 @@ impl<'c> Group<'c> {
         }
     }
 
-    /// Sets the throughput of the next rows, for example the bytes of one input.
     pub(crate) fn throughput(&mut self, throughput: Throughput) {
         self.group.throughput(throughput);
     }
 
-    /// Registers `operation` of `codec` on `input`. Each call gets `state`, for example an output
-    /// buffer that the row reuses. `check` gets the output of the second call and must reject a
-    /// wrong output.
     pub(crate) fn row<S, T>(
         &mut self,
         codec: &str,
@@ -70,8 +61,6 @@ impl<'c> Group<'c> {
     }
 }
 
-/// The heap use of one call: the allocations and reallocations, the bytes that they requested, and
-/// the peak of the bytes that the call added to the heap.
 struct HeapUse {
     allocations: u64,
     bytes: u64,
@@ -113,8 +102,6 @@ fn report(id: &str, heap: HeapUse) {
     );
 }
 
-/// Records a new block of `added` bytes, or a reallocation from `removed` to `added` bytes, while
-/// [`heap_use`] counts.
 fn record(added: usize, removed: usize) {
     if !COUNTING.load(Relaxed) {
         return;
@@ -127,8 +114,6 @@ fn record(added: usize, removed: usize) {
     PEAK_BYTES.fetch_max(live, Relaxed);
 }
 
-/// The allocator of each benchmark binary: the system allocator, with counters that only
-/// [`heap_use`] turns on. Outside it, each call adds one relaxed load.
 struct Counting;
 
 #[global_allocator]

@@ -1,6 +1,3 @@
-//! The writer against references: the escapes of RFC 8259 and RFC 8785 byte by byte, `core::fmt`
-//! for numbers, and the reader of this crate for each written text.
-
 extern crate std;
 
 use std::{format, fs, string::String, vec, vec::Vec};
@@ -30,7 +27,6 @@ fn reference(text: &str) -> String {
     out
 }
 
-/// Writes `tree` at `place`. A number writes as `u64`, as `i64`, or as `f64`, in this order.
 fn put(place: Place<'_>, tree: &Tree) -> Result<(), Error> {
     match tree {
         Tree::Null => place.null(),
@@ -54,7 +50,6 @@ fn put(place: Place<'_>, tree: &Tree) -> Result<(), Error> {
     }
 }
 
-/// The text that `fill` writes into a slice of `len` bytes.
 fn written(len: usize, fill: impl FnOnce(Place<'_>) -> Result<(), Error>) -> Result<Vec<u8>, Error> {
     let mut out = vec![0; len];
     let len = write(&mut out, fill)?;
@@ -62,7 +57,6 @@ fn written(len: usize, fill: impl FnOnce(Place<'_>) -> Result<(), Error>) -> Res
     Ok(out)
 }
 
-/// Each document of `benches/data/json` and of the fetched corpora. A missing fetched file fails.
 fn corpora() -> Vec<Tree> {
     let mut files = Vec::new();
     for class in fs::read_dir("benches/data/json").unwrap() {
@@ -93,7 +87,6 @@ fn corpora() -> Vec<Tree> {
     documents
 }
 
-/// Each string of `tree`, keys included.
 fn strings<'t>(tree: &'t Tree, out: &mut Vec<&'t str>) {
     match tree {
         Tree::String(text) => out.push(text),
@@ -114,8 +107,6 @@ fn each_corpus_document_writes_text_that_the_reader_reads_as_its_tree() {
     }
 }
 
-/// Each corpus string after 0 to 15 bytes, so that each string ends at each place of the last block
-/// of the scan, and each escape falls at each place of a block.
 #[test]
 fn each_corpus_string_at_each_tail_length_writes_its_reference_escape_and_its_exact_length() {
     let documents = corpora();
@@ -138,7 +129,6 @@ fn each_corpus_string_at_each_tail_length_writes_its_reference_escape_and_its_ex
     }
 }
 
-/// A member that exceeds capacity preserves the logical length. Later members can still fit.
 #[test]
 fn a_write_past_the_end_of_the_slice_refuses_and_keeps_the_written_length() {
     let members: [(&str, Tree); 6] = [
@@ -186,7 +176,6 @@ fn a_write_past_the_end_of_the_slice_refuses_and_keeps_the_written_length() {
         let Ok(Tree::Object(read)) = tree(&text, Profile::Rfc8259) else {
             panic!("the text of a slice of {len} bytes is not an object");
         };
-        // Each member that fits, whole.
         assert!(
             read.iter()
                 .all(|(key, value)| members.iter().any(|(name, member)| name == key && member == value))
@@ -198,15 +187,12 @@ fn a_write_past_the_end_of_the_slice_refuses_and_keeps_the_written_length() {
         );
         for refusal in refusals {
             assert_eq!(refusal.kind(), ErrorKind::Full);
-            // The written length at a refusal ends a member, or is the length after `{`.
             assert!(refusal.offset() == 1 || matches!(text.get(refusal.offset()), Some(b',' | b'}')));
         }
         assert_eq!(len == full.len(), text == full);
     }
 }
 
-/// Writes the options of a WebAuthn registration at `place`: a public member, then the member
-/// `challenge` that `challenge` writes.
 #[cfg(feature = "base64")]
 fn options(place: Place<'_>, challenge: impl FnOnce(Place<'_>) -> Result<(), Error>) -> Result<(), Error> {
     place.object(|options| {
@@ -215,20 +201,15 @@ fn options(place: Place<'_>, challenge: impl FnOnce(Place<'_>) -> Result<(), Err
     })
 }
 
-/// The text of [`options`] with the challenge `bytes`, from data-encoding, an independent
-/// implementation of base64url.
 #[cfg(feature = "base64")]
 fn options_text(bytes: &[u8]) -> Vec<u8> {
     let challenge = data_encoding::BASE64URL_NOPAD.encode(bytes);
     format!(r#"{{"type":"public-key","challenge":"{challenge}"}}"#).into_bytes()
 }
 
-/// Each base64url member, public and secret, writes the text of RFC 4648 into a slice of exactly
-/// its length, at each length of up to 96 bytes and at random lengths to 1 MiB.
 #[cfg(feature = "base64")]
 #[test]
 fn each_base64url_member_writes_the_text_of_rfc_4648_in_each_timing_class() {
-    // xorshift64*: a fixed seed gives the same values on each run.
     let mut state = 0x5eed_0220_u64;
     let mut bits = core::iter::repeat_with(|| {
         state ^= state << 13;
@@ -247,7 +228,6 @@ fn each_base64url_member_writes_the_text_of_rfc_4648_in_each_timing_class() {
             options(place, |challenge| challenge.base64url(&bytes))
         });
         assert_eq!(public.as_ref(), Ok(&expected), "the public member at {len} bytes");
-        // A build that makes no proof has no secret call: `with_dit` refuses and runs no scope.
         if let Ok(secret) = crate::with_dit(|dit| {
             written(expected.len(), |place| {
                 options(place, |challenge| challenge.base64url_secret(dit, &bytes))
@@ -258,16 +238,12 @@ fn each_base64url_member_writes_the_text_of_rfc_4648_in_each_timing_class() {
     }
 }
 
-/// A secret challenge that does not fit refuses at the written length before it, and no byte of
-/// the slice depends on it, also when only its closing quote does not fit. The two challenges
-/// are complements, so their texts differ in each character.
 #[cfg(feature = "base64")]
 #[test]
 fn a_secret_base64url_that_does_not_fit_refuses_and_writes_no_character_of_the_secret() {
     let challenges = [[0x9f; 32], [0x60; 32]];
     let full = options_text(&challenges[0]);
     let without = br#"{"type":"public-key"}"#;
-    // A build that makes no proof has no secret call: `with_dit` refuses and runs no scope.
     let Ok(()) = crate::with_dit(|dit| {
         for len in 0..full.len() {
             let slices = challenges.map(|challenge| {
@@ -285,7 +261,6 @@ fn a_secret_base64url_that_does_not_fit_refuses_and_writes_no_character_of_the_s
                 } else {
                     assert_eq!(result, Ok(without.len()));
                     assert_eq!(&out[..without.len()], without);
-                    // The written length after the public member, before its `}`.
                     assert_eq!(refusal, Some(Error::new(ErrorKind::Full, without.len() - 1)));
                 }
                 out
@@ -324,8 +299,6 @@ fn each_integer_writes_the_digits_of_core_fmt() {
     }
 }
 
-/// The printer against `core::fmt` is in the tests of `float`. Here each layout is a number of
-/// RFC 8259 that the reader reads, and its text reads back to the same bits, −0 included.
 #[test]
 fn each_float_of_a_fixed_seed_sample_writes_a_number_that_reads_back() {
     let mut state = 0x5eed_0005_u64;
@@ -373,7 +346,6 @@ fn each_float_of_a_fixed_seed_sample_writes_a_number_that_reads_back() {
 fn nan_and_infinity_refuse_and_a_closure_that_writes_no_value_refuses() {
     let refused = |kind, offset| Err(Error::new(kind, offset));
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        // A refused member writes nothing and keeps the written length, here after `{"a":1`.
         let mut refusal = None;
         let text = written(64, |place| {
             place.object(|object| {
@@ -384,18 +356,12 @@ fn nan_and_infinity_refuse_and_a_closure_that_writes_no_value_refuses() {
         });
         assert_eq!(text.as_deref(), Ok(br#"{"a":1}"#.as_slice()));
         assert_eq!(refusal, Some(Error::new(ErrorKind::NonFinite, 6)));
-        // An array that its closure fails writes nothing, so the offset is its start.
         let result = written(64, |place| place.array(|array| array.item().f64(value)));
         assert_eq!(result, refused(ErrorKind::NonFinite, 0));
     }
     assert_eq!(written(64, |_| Ok(())), refused(ErrorKind::Type, 0));
 }
 
-/// The exhaustive float sweep: each finite f32
-/// value as an f64, and 10^9 random finite f64 values, print the digits of `core::fmt`, and
-/// `Number::to_f64` reads each text back to its value. It runs once for each change to the printer
-/// or to the reader of numbers, with `--run-ignored only`, and its result goes to the evidence of
-/// the task.
 #[test]
 #[ignore = "the named float sweep runs for minutes, once for each change to the printer or to the reader of numbers"]
 fn float_sweep() {
@@ -421,7 +387,6 @@ fn float_sweep() {
         for thread in 0..threads {
             scope.spawn(move || {
                 let mut out = [0; 32];
-                // Each finite f32, as the f64 of the same value.
                 let f32_bits = (0..=u32::MAX).filter(|bits| u64::from(*bits) % threads == thread);
                 for value in f32_bits
                     .map(f32::from_bits)
