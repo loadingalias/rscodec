@@ -204,10 +204,7 @@ pub(super) mod avx2 {
         _mm256_min_epu8(digit, letter)
     }
 
-    /// Decodes 32 to 63 characters with one 32-byte vector at each end, and gives whether each is a
-    /// digit. `vptest` gives the validity in the flags: the masked vector of the AVX-512BW kernel
-    /// moved its mask to a general register, and took 1.32 times as long as faster-hex at 32
-    /// characters (C109).
+    /// Decode 32–63 characters with one vector at each end. `vptest` leaves validity in the flags.
     #[inline]
     #[target_feature(enable = "avx2")]
     pub(super) fn decode_32(text: &[u8], out: &mut [u8]) -> bool {
@@ -285,10 +282,7 @@ pub(super) mod avx2 {
 pub(super) mod avx512bw {
     use super::*;
 
-    /// The shortest input that the encoder runs in 32-byte vectors. The loop of a longer input waits
-    /// for the L2 cache, and 64-byte vectors lower the clock: at 65536 bytes, 32-byte vectors took
-    /// 0.98 times as long as 64-byte vectors (0.97 native). At 16384 bytes, 64-byte vectors took
-    /// 0.84 times as long as 32-byte vectors (0.86 native), so the switch is at 64 KiB (C109 probe 3).
+    /// At 64 KiB, narrower vectors avoid AVX-512 clock reduction. At 16 KiB, the wider vectors won.
     const WIDE_MIN: usize = 64 * 1024;
 
     /// The nibbles of 64 characters, and the mask of the lanes that are digits.
@@ -347,10 +341,7 @@ pub(super) mod avx512bw {
     #[target_feature(enable = "avx512bw")]
     pub(in super::super) fn encode(class: impl Class, bytes: &[u8], out: &mut [u8]) {
         let digits = digits();
-        // Below 32 bytes, one masked vector. From 32 to 64 bytes, one vector at each end, with no
-        // loop. A path with 32-byte vectors took 1.04 to 1.14 times as long from 32 to 64 bytes,
-        // although it kept the clock of the CPU higher (C109). The function stays small, so that a
-        // build with the feature runs it inline.
+        // Use a masked vector below 32 bytes and overlapping end blocks through 64 bytes.
         if bytes.len() < 32 {
             let src = _mm512_castsi512_si256(load_masked(bytes, _mm512_setzero_si512()));
             return store_masked(out, encode_half(digits, src));

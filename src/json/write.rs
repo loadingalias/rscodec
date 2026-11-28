@@ -5,77 +5,25 @@ use super::{Error, ErrorKind, escape, float, integer};
 #[cfg(test)]
 mod tests;
 
-/// Writes one JSON value into the start of `out` with `value`, and returns the length of the
-/// text. The bytes of `out` after that length are unspecified.
-///
-/// The text is compact RFC 8259 JSON. The writer writes each `,`, `:`, quote, and escape, and it
-/// allocates no memory. This closure writes the options of a WebAuthn registration ceremony. The
-/// challenge is a secret during the ceremony, so the secret encoder writes it in the scope of
-/// [`with_dit`](crate::with_dit):
+/// Writes one compact JSON value and returns its byte length. Use only the returned prefix.
+/// A failed write can leave bytes in the output buffer.
 ///
 /// ```
-/// use rscodec::{
-///     Dit,
-///     json::{self, ErrorKind},
-/// };
+/// use rscodec::json::{self, ErrorKind};
 ///
-/// let (user_id, challenge) = (b"user-4711", [0x9f; 16]);
-/// let options = |dit: &Dit, out: &mut [u8]| {
-///     json::write(out, |options| {
-///         options.object(|options| {
-///             options.member("rp").object(|rp| {
-///                 rp.member("id").str("example.com")?;
-///                 rp.member("name").str("Example")
-///             })?;
-///             options.member("user").object(|user| {
-///                 user.member("id").base64url(user_id)?;
-///                 user.member("name").str("alice@example.com")?;
-///                 user.member("displayName").str("Alice \"Al\" Smith")
-///             })?;
-///             options.member("challenge").base64url_secret(dit, &challenge)?;
-///             options.member("pubKeyCredParams").array(|params| {
-///                 // ES256 and RS256.
-///                 for alg in [-7, -257] {
-///                     params.item().object(|param| {
-///                         param.member("type").str("public-key")?;
-///                         param.member("alg").i64(alg)
-///                     })?;
-///                 }
-///                 Ok(())
-///             })?;
-///             options.member("timeout").u64(60_000)?;
-///             options.member("attestation").str("none")
-///         })
-///     })
-/// };
-/// let mut out = [0; 512];
-/// # // A build that makes no proof has no secret call: `with_dit` gives `DitUnknown`.
-/// # if rscodec::with_dit(|_| ()).is_err() { return Ok(()); }
-/// let len = rscodec::with_dit(|dit| options(dit, &mut out))??;
-/// assert_eq!(
-///     &out[..len],
-///     concat!(
-///         r#"{"rp":{"id":"example.com","name":"Example"},"#,
-///         r#""user":{"id":"dXNlci00NzEx","name":"alice@example.com","displayName":"Alice \"Al\" Smith"},"#,
-///         r#""challenge":"n5-fn5-fn5-fn5-fn5-fnw","#,
-///         r#""pubKeyCredParams":[{"type":"public-key","alg":-7},{"type":"public-key","alg":-257}],"#,
-///         r#""timeout":60000,"attestation":"none"}"#,
-///     )
-///     .as_bytes(),
-/// );
+/// let mut out = [0; 16];
+/// let len = json::write(&mut out, |root| root.object(|o| o.member("n").u64(3)))?;
+/// assert_eq!(&out[..len], br#"{"n":3}"#);
 ///
-/// // A slice that is too short refuses, and the text that fits stays valid. Here the object does
-/// // not fit, so nothing is written.
-/// let error = rscodec::with_dit(|dit| options(dit, &mut out[..len - 1]))?.unwrap_err();
+/// let error = json::write(&mut out[..3], |root| root.str("ab")).unwrap_err();
 /// assert_eq!((error.kind(), error.offset()), (ErrorKind::Full, 0));
-/// # Ok::<(), Box<dyn core::error::Error>>(())
+/// # Ok::<(), json::Error>(())
 /// ```
 ///
 /// # Errors
 ///
-/// The first error of `value`, which the writer gives as [`ErrorKind::Full`] when `out` ends
-/// and as [`ErrorKind::NonFinite`] for NaN or an infinity. [`ErrorKind::Type`] at offset 0 if
-/// `value` writes no value.
+/// Returns the closure's error, [`ErrorKind::Full`] for insufficient space, or [`ErrorKind::NonFinite`] for NaN or infinity.
+/// A closure that writes no root value gives [`ErrorKind::Type`] at offset zero.
 #[inline]
 pub fn write(out: &mut [u8], value: impl FnOnce(Place<'_>) -> Result<(), Error>) -> Result<usize, Error> {
     let mut len = 0;
@@ -91,12 +39,9 @@ pub fn write(out: &mut [u8], value: impl FnOnce(Place<'_>) -> Result<(), Error>)
     Ok(len)
 }
 
-/// The place of one JSON value: the value of a [`write()`], an item of an [`Array`], or the value of
-/// a member of an [`Object`]. Each method writes the value, after its `,` and its key, and takes
-/// the place, so each place gets at most one value. A dropped place writes nothing.
-///
-/// Each method writes all of its bytes, or none: after an error, the written length is the length
-/// before the call.
+/// A single JSON value at the root, in an [`Array`], or in an [`Object`].
+/// Writing consumes the place. Dropping it omits the value.
+/// A failed write preserves the logical length. Bytes beyond that length are unspecified.
 #[derive(Debug)]
 pub struct Place<'w> {
     out: &'w mut [u8],
@@ -266,8 +211,7 @@ impl Place<'_> {
     ///
     /// # Errors
     ///
-    /// The first error of `members`, or [`ErrorKind::Full`] if the slice ends. Either way the
-    /// object writes no byte, and the offset of the error is the written length before it.
+    /// Returns the closure's error kind or [`ErrorKind::Full`] at the logical length before the object.
     #[inline]
     pub fn object(self, members: impl FnOnce(&mut Object<'_>) -> Result<(), Error>) -> Result<(), Error> {
         self.container(b'{', b'}', |out, len| {
@@ -281,8 +225,7 @@ impl Place<'_> {
     ///
     /// # Errors
     ///
-    /// The first error of `items`, or [`ErrorKind::Full`] if the slice ends. Either way the
-    /// array writes no byte, and the offset of the error is the written length before it.
+    /// Returns the closure's error kind or [`ErrorKind::Full`] at the logical length before the array.
     #[inline]
     pub fn array(self, items: impl FnOnce(&mut Array<'_>) -> Result<(), Error>) -> Result<(), Error> {
         self.container(b'[', b']', |out, len| {
@@ -307,7 +250,7 @@ impl Place<'_> {
         let at = self.begin().ok_or(full)?;
         let last = self.out.len().checked_sub(1).filter(|&last| at < last).ok_or(full)?;
         self.out[at] = open;
-        // The container writes nothing after an error, so the written length stays `start`.
+        // Commit the length only after the closing delimiter.
         let end = fill(&mut self.out[..last], at + 1).map_err(|error| Error::new(error.kind(), start))?;
         self.out[end] = close;
         *self.len = end + 1;

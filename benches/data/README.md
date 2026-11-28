@@ -1,28 +1,24 @@
 # Benchmark inputs
 
-`benches/json.rs` reads these files. Each directory in `json/` is one class of documents. Each line
-of a `.jsonl` file is one document.
+Each directory in `json/` is one input class for the JSON benchmarks. Each JSON Lines record is one document.
 
-## Generated files
+## Included inputs
 
-These files were written for this repository, under its license (Apache-2.0). Each value that looks
-random, for example a challenge, a key, or a checksum, comes from a fixed pseudo-random sequence. No
-value is a real key or a real account.
+Synthetic identifiers, keys, and accounts use fixed test values. The generated inputs use the repository's Apache-2.0 license.
 
 | Class | Files | Bytes for each document | Source of the shape |
 | --- | --- | --- | --- |
-| `a1-client-data` | 4 | 132–244 | clientDataJSON of WebAuthn Level 3, sections 5.8.1 and 5.8.1.1: the forms create, get, cross-origin, and `topOrigin`. `create.json` also has the extra member that Chrome adds. |
-| `a2-jose-header` | 8 | 15–195 | JOSE headers of RFC 7515 (appendices A.1, A.2, and A.3, and section 4.1.11 with `crit`), RFC 7516 appendix A.1, RFC 7518 appendix C, and RFC 7797 section 3. The two headers of RFC 7515 keep their CRLF line breaks. |
-| `a3-claims` | 3 | 300–1,518 | JWT and OIDC claims of RFC 7519 section 4 and OpenID Connect Core 1.0 sections 2, 5.1, 5.1.1, and 5.2: an ID token, a UserInfo response with an address and names with language tags, and an access token with group arrays. The names include non-ASCII text. |
-| `a4-oidc-discovery` | 4 | 2,184–6,997 | Discovery documents of OpenID Connect Discovery 1.0 section 4.2 and RFC 8414 section 2, from the example of the specification to a large provider document. |
-| `a5-jwks` | 3 | 758–4,750 | JWK sets of RFC 7517 appendices A.1 and A.2, RFC 7518 section 6, and RFC 8037 section 2: public keys, private keys, and a provider set with `x5c` chains. |
-| `b1-sparse-index` | 11 | 303–4,626 | Files of the Cargo sparse index, in the format of the Cargo Book, "Registry Index", section "Index Format". The files have from 1 to 200 lines, one line for each version. |
-| `b2-rustc-diagnostics` | 1 | 42–3,853 | The output of `cargo clippy --message-format=json-diagnostic-rendered-ansi -- -W clippy::pedantic -W clippy::nursery` on a scratch crate, with rustc 1.101.0-nightly (3e92e1a2d 2026-11-01): 200 diagnostics with ANSI-rendered text, the artifact message, and the build result. |
+| `a1-client-data` | 4 | 132–244 | WebAuthn Level 3 §5.8.1. Creation, authentication, cross-origin requests, and `topOrigin`. |
+| `a2-jose-header` | 8 | 15–195 | JOSE headers from RFCs 7515, 7516, 7518, and 7797. Two retain their original CRLF breaks. |
+| `a3-claims` | 3 | 300–1,518 | JWT and OIDC claims with nested addresses, language tags, and groups. |
+| `a4-oidc-discovery` | 4 | 2,184–6,997 | Provider metadata from OpenID Connect Discovery §4.2 and RFC 8414 §2. |
+| `a5-jwks` | 3 | 758–4,750 | JWK sets from RFCs 7517, 7518, and 8037, including certificate chains. |
+| `b1-sparse-index` | 11 | 303–4,626 | Cargo registry index format. Each file holds 1–200 version records. |
+| `b2-rustc-diagnostics` | 1 | 42–3,853 | Clippy JSON Lines output from Rust 1.101.0-nightly (`3e92e1a2d`), including 200 diagnostics. |
 
 ## Fetched files
 
-These standard corpora state no license, so the repository does not hold them. Fetch them into
-`fetched/`, which Git ignores, before the tests or a benchmark run:
+The upstream corpora have no stated license. Fetch the pinned files before tests or JSON benchmarks.
 
 ```sh
 cd benches/data

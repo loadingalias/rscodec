@@ -1,20 +1,11 @@
-//! Codecs for Rust. This release is an alpha: each alpha release can change the API.
+//! Allocation-free codecs for caller-owned buffers.
 //!
-//! Each codec is a leaf feature, so a build compiles only the codecs that it selects:
+//! Enable `base64` for padded base64 and unpadded base64url, `hex` for lowercase hex,
+//! or `json` for the JSON reader and writer. The default feature, `std`, enables runtime
+//! CPU detection. Without it, the crate uses only `core` and build-time target features.
 //!
-//! - `base64`: [`base64`], base64 with padding and base64url without padding.
-//! - `hex`: [`hex`], lowercase hex.
-//! - `json`: [`json`], a JSON reader and writer. This codec is in development.
-//!
-//! The `std` feature is on by default. Without it, the crate needs only `core`.
-//!
-//! Each codec writes into a slice that the caller lends, and it allocates no memory. Each codec has
-//! a portable kernel and SIMD kernels, and each kernel gives the same result and the same error for
-//! each input. A codec that can carry a secret has two timing classes: functions for public data,
-//! which run the fastest kernel of the CPU, and functions for secret data, which run only the
-//! kernels whose instructions have data independent timing. A secret function takes the proof
-//! [`Dit`], which only the scope of [`with_dit`] gives: the scope sets `PSTATE.DIT` on aarch64. On
-//! aarch64, a build that cannot tell whether the CPU has DIT gets [`DitUnknown`] in place of a scope.
+//! Base64 and hex provide separate functions for public and secret data.
+//! [Guides, examples, and platform support](https://github.com/loadingalias/rscodec#rscodec)
 
 #![no_std]
 

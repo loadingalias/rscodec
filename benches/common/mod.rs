@@ -1,9 +1,4 @@
-//! The harness of the codec benchmarks.
-//!
-//! [`Group::row`] registers one operation of one codec on one input. When Criterion first runs the
-//! row, the harness calls the operation once, then counts the heap use of a second call and gives
-//! that output to the check of the row. Only then does Criterion time the operation. A codec joins a
-//! benchmark with one more `row` call, and the harness does not change.
+//! Warm each row, measure heap use on one call, check the result, then time the operation.
 
 use core::{
     alloc::{GlobalAlloc, Layout},

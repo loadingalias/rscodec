@@ -1,321 +1,110 @@
-# Encode and decode base64, base64url, and hex
+# Encode and decode base64 and hex
 
-rscodec encodes and decodes three text forms of bytes:
-
-| Form | Module item | Standard | Characters |
-| --- | --- | --- | --- |
-| base64url without padding | `base64::Profile::Url` | RFC 4648, section 5 | `A`–`Z`, `a`–`z`, `0`–`9`, `-`, `_` |
-| base64 with padding | `base64::Profile::Standard` | RFC 4648, section 4 | `A`–`Z`, `a`–`z`, `0`–`9`, `+`, `/`, and `=` at the end |
-| lowercase hex | `hex` | RFC 4648, section 8 | `0`–`9`, `a`–`f` |
-
-Each function writes into a slice that you lend, and it allocates no memory.
-
-## Select the codecs
-
-Each codec is a feature. Select only the codecs that you use:
+Enable the codecs you need.
 
 ```toml
 [dependencies]
-rscodec = { git = "https://github.com/loadingalias/rscodec", features = ["base64", "hex"] }
+rscodec = { version = "0.1.0", features = ["base64", "hex"] }
 ```
 
-rscodec is in development, and each change can change the API. The crate needs Rust 1.101, which
-is a nightly toolchain today. The repository tests `nightly-2026-11-02`.
+| Format | API | Accepted text |
+| --- | --- | --- |
+| Base64 | `base64::Profile::Standard` | Standard alphabet (`+`, `/`), with required `=` padding |
+| Base64url | `base64::Profile::Url` | URL alphabet (`-`, `_`), without padding |
+| Hex | `hex` | Two lowercase hexadecimal digits per byte |
 
-The `std` feature is on by default. Without it (`default-features = false`), the crate needs only
-`core`, and it selects each kernel at compile time from `-C target-feature`.
-
-## Select the timing class
-
-Each operation has a function for public data and a function for secret data:
-
-| Data | Examples | base64 | hex |
-| --- | --- | --- | --- |
-| Public | A digest, a signature, a public key | `Profile::encode`, `Profile::decode` | `hex::encode`, `hex::decode` |
-| Secret | A private key, a bearer token, a session secret, a WebAuthn challenge during its ceremony | `Profile::encode_secret`, `Profile::decode_secret` | `hex::encode_secret`, `hex::decode_secret` |
-
-Both classes give the same result and the same error for each input. They differ in four ways:
-
-- **Kernel.** The public functions run the fastest kernel of the CPU. The secret functions run only
-  the kernels whose instructions on secret data Intel lists with data operand independent timing
-  (DOIT) and Arm lists with data independent timing (DIT). On x86_64 with AVX-512 VBMI, public
-  base64 runs the VBMI kernel, and secret base64 runs the AVX-512BW kernel. hex runs the same kernel
-  in each class.
-- **`PSTATE.DIT`.** A secret function takes `&Dit`, a proof that only `rscodec::with_dit` gives.
-  On aarch64, `with_dit` sets `PSTATE.DIT` for its scope, if the CPU has DIT, then runs a
-  speculation barrier (`sb`, or `dsb nsh` and `isb` on a CPU without SB), and at the end restores
-  `PSTATE.DIT`. The secret functions and the public functions do not read or write it.
-- **No proof without DIT.** On aarch64, a build that cannot tell whether the CPU has DIT gets
-  `DitUnknown` from `with_dit`, and the scope does not run. `std` reports DIT on Linux, Android,
-  and the Apple systems. Elsewhere, for example on Windows or without `std`, build with
-  `-C target-feature=+dit` for CPUs that have DIT.
-- **Output after a refusal.** After `decode_secret` refuses a text for a character or for trailing
-  bits, each byte that it wrote is zero. After `decode` refuses, the output is unspecified.
-- **Temporary copies.** Before a secret function returns, on a result or a refusal, it writes zero
-  to each temporary array that held input or result bytes, for example the last block of a SIMD
-  kernel. The public functions do not.
-
-The secret functions clear with volatile stores and a compiler fence. The clear does not cover the
-input that you own, the result in your output, or the copies in registers and in the stack slots
-where the compiler spills registers.
-
-The secret functions can be slower. On x86_64 with VBMI, the AVX-512BW kernel of base64 is slower
-than the VBMI kernel. On aarch64, a scope of `with_dit` writes `PSTATE.DIT` two times and runs one
-speculation barrier, which costs most for one short input. If you are not sure that the data is public, use the secret functions.
-
-## Timing evidence
-
-The harness `rscodec-ct` of the repository checks the compiled code of both classes, and of
-`json::Place::base64url_secret`, which writes a secret as a base64url string of JSON. It checks
-the shipped build (the default target features) on Linux on x86_64 (Xeon 6975P-C) and aarch64
-(Graviton4), and the build with `-C target-cpu=native` on aarch64.
-
-The path count and painted stack below ran at revision `1b483bc`. DudeCT ran at `28bdb86` on the six
-secret operations of base64 and hex.
-
-At `7074899`, the Arm scan accepted a general `FMOV` after a vector reduction. The reduced byte still
-held secret bits for valid hex and base64. The corrected scan found six such sites in that code.
-The decoders now transfer the byte with `UMOV`, which Arm lists for DIT.
-The timing effect of the earlier instruction has no hardware measurement.
-
-| Check | Result |
-| --- | --- |
-| Path count: the counters of the instructions and the branches of each call, on each kernel of the CPU, at each length up to 200 bytes and at 13 longer lengths, with random and fixed inputs | One count for each length and outcome |
-| Scan of all functions reachable from each entry | Zero findings across 19 entries in each corrected Linux build. AArch64 used GNU and musl, each with default features and with `-C target-cpu=neoverse-v2`. The x86_64 musl build used default features. |
-| Painted stack: each secret call on a private stack | No run of 8 secret bytes or 16 secret characters stays in the stack. On a local Linux ARM64 VM, the corrected build also passed 2,256 secret calls. The public control found residue in 40 of 6,171 calls. |
-| DudeCT compares a fixed input with random inputs of the same length | All six secret operations passed at 16, 32, 64, and 4096 decoded bytes in the three builds above. |
-
-At 4096 decoded bytes, the harness generated and copied each input before timing. Each operation ran for 10,000,384 samples per build.
-The timer used one or two calls per sample, with no warm-up. The largest absolute t statistic was 3.15. The limit was 8.
-Each build also detected one extra timed call in a control with random inputs in both classes.
-
-At `f03179a`, the shipped x86_64 hex code passed all four checks after the short decoder changed.
-DudeCT tested both operations at 16, 32, 64, and 4096 decoded bytes, plus a refusal at 64 bytes.
-The largest absolute t was 1.69 for fixed versus random inputs and 2.97 for two random classes. The extra-call control exceeded 1,200.
-
-The result that the caller sees is public, so the time can show it: the lengths, the validity of a
-text, the kind and the offset of a refusal, and the padding of base64.
-
-Limits:
-
-- A build whose target features add instructions off the DOIT list has no timing claim. With
-  `-C target-cpu=native` on a CPU with AVX-512 VBMI or AVX512-FP16, LLVM puts VBMI and FP16
-  instructions in the secret code.
-- WebAssembly has no timing claim. It has no list of instructions with data independent timing,
-  and the engine compiles the module again. Its kernels keep the rule of the source and the tests.
-- Earlier 4096-byte measurements exceeded the threshold on both shipped builds. Those runs copied a saved input for one class and generated inputs for the other.
-  The calibrated measurements with matched input preparation did not reproduce the earlier difference. Its cause remains open.
-- On Graviton4 with `-C target-cpu=native`, DudeCT of the secret standard base64 encoder at 4096 bytes does not pass in each run.
-  At revisions `7594f69` to `aac1649`, 35 runs on four instances compared a fixed input with random inputs. Two runs failed, on two of the instances:
-  one gave an absolute t of 9.09, and one gave 7.18 and then 17.04 with 40 million samples. Each of the 20 runs on the last instance passed.
-  Two random classes gave at most 2.93 in 11 runs. The shipped build passed in each of 12 runs, with at most 5.51.
-  The largest difference of the mean times was 0.017% of one call. The path count and the scan of the same code passed. The cause is open.
-- Intel guarantees the DOIT list only in DOIT mode (DOITM), which the operating system sets on a CPU
-  that has it. The tests did not set it.
-
-To scan a build with your target features, run the scan from the repository. It needs `objdump`,
-and it exits with 0 when it finds nothing and with 1 when it finds something:
-
-```sh
-RUSTFLAGS="-C target-cpu=native" cargo run --release -p rscodec-ct -- scan
-```
-
-The last line of its output gives the number of findings, for example `scan: 19 entries, 0
-findings`. The path count, `cargo run --release -p rscodec-ct -- paths`, needs the counters of
-Linux.
+Decoders reject whitespace, other alphabets, misplaced padding, and nonzero trailing bits.
+Both timing classes return the same bytes, error kind, and offset.
 
 ## Decode a base64url token into a stack buffer
 
-A SHA-256 digest is public, so `decode` reads it:
+Call `Profile::Url.decode(text, &mut out)` for a public identifier. The result borrows the bytes written to `out`.
+Run the [public identifier example](../../examples/base64url.rs) from the checkout.
 
-```rust
-use rscodec::base64::{Error, ErrorKind, Profile};
-
-fn main() -> Result<(), Error> {
-    // A SHA-256 digest: 32 bytes in base64url without padding.
-    let token = b"NI2kalLUY_EBIuNcW6yDtzD4K6bGemOZJL9NWqY_heQ";
-    let mut buffer = [0; 32];
-    let digest = Profile::Url.decode(token, &mut buffer)?;
-    assert_eq!(digest[..4], [0x34, 0x8d, 0xa4, 0x6a]);
-
-    // `/` is a character of base64, not of base64url, so the text refuses at the `/`.
-    let standard = b"NI2kalLUY/EBIuNcW6yDtzD4K6bGemOZJL9NWqY/heQ";
-    let refusal = Error::new(ErrorKind::Symbol, 9);
-    assert_eq!(Profile::Url.decode(standard, &mut buffer), Err(refusal));
-    Ok(())
-}
+```sh
+cargo run --locked --example base64url --features base64
 ```
 
-`decode` gives the decoded bytes, which are the start of the buffer. The buffer can be longer than
-the result.
+## Select the timing class
 
-## Decode a secret key
-
-A private key is secret, so `decode_secret` reads it in a scope of `with_dit`:
+Use `encode` and `decode` for public data, such as a signature or digest.
+Use `encode_secret` and `decode_secret` for private keys, bearer tokens, and other secrets.
 
 ```rust
-use rscodec::{base64::Profile, hex, with_dit};
+use rscodec::{hex, with_dit};
 
 fn main() -> Result<(), Box<dyn core::error::Error>> {
-    let mut key = [0; 32];
-    let text = b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    // The outer `?` is `DitUnknown`: this build cannot hold `PSTATE.DIT`.
-    with_dit(|dit| -> Result<(), Box<dyn core::error::Error>> {
-        assert_eq!(hex::decode_secret(dit, text, &mut key)?[31], 0x1f);
-
-        // A refusal leaves zero in each byte that the decoder wrote.
-        assert!(Profile::Url.decode_secret(dit, b"AAAA*AAA", &mut key).is_err());
-        Ok(())
-    })??;
-    assert_eq!(key[..6], [0; 6]);
+    let mut key = [0; 2];
+    with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key))??;
+    assert_eq!(key, [0xc0, 0xde]);
     Ok(())
 }
 ```
 
-The closure of `with_dit` gets `&Dit`. A `Dit` is neither `Send` nor `Sync`, and the reference is
-valid only in the closure, so a secret function runs only on the thread and in the scope that hold
-`PSTATE.DIT`.
+One `with_dit` scope can serve several secret calls on the same thread.
+On Arm CPUs with data independent timing (DIT), the scope sets `PSTATE.DIT` and restores its previous state.
+On a CPU known to lack DIT, the scope runs without that hardware guarantee.
+On AArch64, an unknown DIT capability gives `DitUnknown` before the closure runs.
+Enable `std` for detection on Linux, Android, and Apple systems. A build for known DIT hardware can use `-C target-feature=+dit`.
 
-## Hold DIT for a loop of secrets
-
-Hold one scope for the loop. The scope writes `PSTATE.DIT` at most two times, and the secret
-functions in it write nothing:
-
-```rust
-use rscodec::base64::{Error, Profile};
-use rscodec::with_dit;
-
-fn decode_keys(tokens: &[&[u8]], keys: &mut [[u8; 32]]) -> Result<(), Box<dyn core::error::Error>> {
-    with_dit(|dit| {
-        for (token, key) in tokens.iter().zip(keys.iter_mut()) {
-            Profile::Url.decode_secret(dit, token, key)?;
-        }
-        Ok::<(), Error>(())
-    })??;
-    Ok(())
-}
-```
-
-If `PSTATE.DIT` is set already, for example in an outer scope, `with_dit` writes nothing. On x86_64
-and WebAssembly, and on an aarch64 CPU without DIT, `with_dit` only calls the closure. Code in the
-scope must not clear `PSTATE.DIT`.
-
-The writes of DIT read and write memory for the compiler, so the loads and stores of each secret
-function stay in the scope. The proof covers the secret functions of rscodec. It does not cover
-other code in the scope that works only on values in registers.
-
-## Encode
-
-```rust
-use rscodec::{base64::Profile, hex};
-
-fn main() -> Result<(), Box<dyn core::error::Error>> {
-    let digest = [0xc0, 0xde, 0x01];
-    let mut text = [0; Profile::Standard.encoded_len(3).unwrap()];
-    assert_eq!(Profile::Standard.encode(&digest, &mut text)?, b"wN4B");
-    let mut digits = [0; 6];
-    assert_eq!(hex::encode(&digest, &mut digits)?, b"c0de01");
-    Ok(())
-}
-```
-
-The text is ASCII, so `core::str::from_utf8` on it cannot fail. `encode_secret` takes the same
-arguments after the `&Dit` of a scope of `with_dit`.
+Secret functions clear explicit temporary arrays that held input or output. The caller owns the input and output.
+Registers and stack slots that the compiler uses to spill registers fall outside this guarantee.
 
 ## Size the output
 
-| Function | Result |
-| --- | --- |
-| `Profile::encoded_len(len)` | The characters of the text of `len` bytes, or `None` if the number overflows `usize` |
-| `Profile::decoded_len(text)` | The bytes of `text`, from its length and its padding, or a `Length` error |
-| `hex::encoded_len(len)` | `2 * len`, or `None` if it overflows `usize` |
-| `hex::decoded_len(text)` | `text.len() / 2`, or a `Length` error for an odd length |
-
-`encoded_len` is a `const fn`, so it can give the length of an array, as the example of
-[Encode](#encode) shows.
-
-## Strict decoding
-
-Each byte string has one text, and the decoders take only that text:
-
-- Each profile has one alphabet. base64url refuses `+` and `/`, and base64 refuses `-` and `_`.
-- base64 has a length that is a multiple of 4, and `=` only in the last two places. base64url has
-  no `=`.
-- The bits of the last character after the last byte are zero.
-- No whitespace and no line breaks.
-- hex is lowercase. `A`–`F` refuse.
+`Profile::encoded_len(n)` and `hex::encoded_len(n)` return `None` if the required size exceeds `usize`.
+`Profile::decoded_len(text)` and `hex::decoded_len(text)` check the length. Call `decode` to validate the characters.
 
 ## Errors
 
-Each error has a kind, which `kind()` gives, and an offset, which `offset()` gives. It holds no byte
-of the input. `Error::new(kind, offset)` makes an error.
+Read `error.kind()` and `error.offset()`. Decoders check length, output capacity, then characters and trailing bits.
 
-| Kind | Cause | Offset | Recovery |
-| --- | --- | --- | --- |
-| `Length` | No text of the form has this length | The length of the text | Refuse the input |
-| `Output` | The output slice is too short | The length of the result | Give an output of that length |
-| `Symbol` | A byte is not a character of the alphabet | The first such byte | Refuse the input |
-| `TrailingBits` | base64 only: the last character has nonzero bits after the last byte | The last character before the padding | Refuse the input |
+| Error | Offset | Action |
+| --- | --- | --- |
+| `Length` | Input length | Correct the text length or padding. |
+| `Output` | Required output length | Retry with a buffer of that size. |
+| `Symbol` | First invalid byte | Reject the text. |
+| `TrailingBits` | Last character before padding | Reject the noncanonical base64 text. |
 
-The decoder checks the length first, then the output, then the characters. It reads all of the
-text before it refuses it for a character or for trailing bits.
-
-A refusal for the length or the output writes no byte. After a refusal for a character or for
-trailing bits, `decode` leaves unspecified bytes in the output, and `decode_secret` leaves zero in
-the bytes of the result.
+Length and capacity errors leave the buffer untouched. After a character or trailing-bit error, public output is unspecified.
+Secret decode clears the result region. Bytes beyond that region stay untouched.
 
 ## Kernels
 
-Each codec has a `Kernel` enum, `base64::Kernel` and `hex::Kernel`. `Backend::new(kernel)` of the
-same module gives the backend of a kernel, or `None` if the CPU does not have its features.
-`encode_with` and `decode_with` run the kernel of a backend, for example to compare the kernels.
-They are functions of the public class: they do not write `PSTATE.DIT`, and `decode_with` does not
-wipe its output.
+`Backend::new(kernel)` returns a backend when the CPU supports it.
+Use `encode_with` or `decode_with` to select a public backend explicitly.
+With `std`, dispatch can use CPU detection. Without it, dispatch uses build-time target features.
 
-```rust
-use rscodec::base64::{Backend, Kernel, Profile};
-
-fn main() -> Result<(), rscodec::base64::Error> {
-    let portable = Backend::new(Kernel::Portable).expect("each CPU runs the portable kernel");
-    let mut text = [0; 4];
-    assert_eq!(Profile::Url.encode_with(portable, b"\xfb\xff\xbf", &mut text)?, b"-_-_");
-    Ok(())
-}
-```
-
-`Kernel::ALL` lists the kernels of the target, the fastest first:
-
-| Target | `base64::Kernel` | `hex::Kernel` |
+| Target | Base64 | Hex |
 | --- | --- | --- |
-| x86_64 | `Avx512Vbmi` (public class only), `Avx512Bw`, `Avx2`, `Ssse3`, `Portable` | `Avx512Bw`, `Avx2`, `Ssse3`, `Portable` |
-| aarch64 | `Neon`, `Portable` | `Neon`, `Portable` |
-| wasm32 with `-C target-feature=+simd128` | `Simd128`, `Portable` | `Simd128`, `Portable` |
-| other targets | `Portable` | `Portable` |
+| x86_64 | AVX-512 VBMI (public), AVX-512BW, AVX2, SSSE3, portable | AVX-512BW, AVX2, SSSE3, portable |
+| AArch64 | Neon, portable | Neon, portable |
+| wasm32 | SIMD128 when enabled, portable | SIMD128 when enabled, portable |
 
-- With `std`, the crate detects the CPU one time for each process. When `-C target-feature` turns
-  on the features of the fastest kernel of a class, the choice is made at compile time.
-- Without `std`, a kernel is available only if `-C target-feature` turns on its features.
-- A short input runs inline in the caller, with no choice of kernel. On aarch64, the Neon kernel
-  runs inline up to 64 bytes, and the base64 encoder runs inline at each length. On x86_64, a hex
-  decode of up to 16 bytes of result runs inline on SSE2. A hex encode on x86_64 always calls the
-  chosen kernel. When `-C target-feature` fixes a SIMD kernel of a class, that kernel runs inline
-  at each length. `encode_with` and `decode_with` always run the kernel of their backend.
-- Each kernel runs whole blocks, then one last block that ends at the end of the input and writes
-  some bytes of the block before it again. Thus a tail needs no copy. Only an input shorter than
-  one vector runs on arrays on the stack, or on AVX-512 with masked loads and stores.
-- A hex encode of up to 64 bytes runs one block, or two, at each end of the input, with no loop.
-- The AVX-512 base64 kernels have an entry with no loop for up to 48 bytes.
-- The AVX-512BW hex kernel encodes fewer than 32 bytes in one masked vector, and 32 through 64
-  bytes with one 64-byte vector at each end. For an encode of 64 KiB or more, it uses 32-byte
-  vectors to keep the CPU clock higher.
-- The AVX-512BW hex kernel decodes fewer than 32 characters in one masked vector. The AVX2 and
-  AVX-512BW hex kernels decode 32 through 63 characters with one 32-byte vector at each end. For 32
-  through 127 decoded bytes, the AVX-512BW kernel processes one block, and a second overlapping
-  block only if a tail remains.
-- WebAssembly has no run-time detection, so `Simd128` exists only with `+simd128`.
-- On an Intel hybrid CPU (Alder Lake to Arrow Lake), the AVX-512 kernels do not run, also if CPUID
-  reports AVX-512. Its efficient cores do not have AVX-512.
+Other architectures use the portable code. [Platform test coverage](support.md)
 
-The source of each kernel has no branch and no table load that depends on the bytes or the
-characters. The time is to depend only on the lengths, and for an error, on its offset.
-[Timing evidence](#timing-evidence) gives the checks of the compiled code and their limits.
+## Timing evidence
+
+Secret kernels avoid branches and memory addresses derived from secret bytes. Length, padding, validity, error kind, and error offset are public.
+An instruction scan checks the compiled binary. Hardware counters, stack inspection, and timing samples test different properties.
+
+| Check | Recorded result |
+| --- | --- |
+| Arm instruction transfer | At `7074899`, the corrected scanner found six transfers through general `FMOV`. The decoders now use the DIT-listed byte transfer `UMOV`. The timing effect of the old instruction is unmeasured. |
+| Corrected instruction scan | Zero findings in 19 entries per Linux build. Arm GNU and musl each used default features and Neoverse V2. x86_64 musl used default features. |
+| Corrected Arm stack check | A Linux ARM64 VM found no residue in 2,256 secret calls. The public control found residue in 40 of 6,171 calls. The check searches for runs of eight decoded bytes or 16 encoded characters, excluding single-byte repetitions. |
+| Path counts at `e03f296` | For each tested length and outcome, instructions and branches had one count. Xeon tested 15,036 cases and Graviton4 tested 9,050. These runs preceded the transfer correction. |
+| Fixed versus random inputs at `28bdb86` | All six secret operations passed at 16, 32, 64, and 4,096 decoded bytes on default Xeon, default Graviton4, and native Graviton4. At 4,096 bytes the largest absolute t statistic was 3.15 against a threshold of 8. |
+
+Graviton4 native standard base64 encode at 4,096 bytes exceeded the timing threshold in two of 35 runs on four instances.
+The largest absolute t statistic was 17.04. All 12 default-build runs passed. The cause is unknown.
+Earlier tests prepared fixed and random inputs differently. Tests with matched preparation did not reproduce the earlier default-build result.
+
+Intel's hardware timing guarantee requires the operating system to enable data operand independent timing mode (DOITM). The tests did not set it.
+Native x86_64 builds that emit unlisted VBMI or FP16 instructions and WebAssembly engines have no timing claim.
+
+From the checkout, scan your Linux build with GNU `objdump` available.
+
+```sh
+cargo run --locked --release -p rscodec-ct -- scan
+```

@@ -13,8 +13,7 @@ use super::{
     string::{self, Str},
 };
 
-/// An object up to this number of members compares each new key with its earlier keys. A larger
-/// object sorts its keys when it ends (selected on 2026-11-18).
+/// Check short objects for duplicates as each key arrives. Sort longer objects at close or on error.
 const LINEAR_KEYS_MAX: u32 = 16;
 
 /// A token of the input, which [`visit`](super::visit) gives. Each borrows the input.
@@ -28,7 +27,7 @@ pub enum Token<'a> {
     ArrayStart,
     /// `]`.
     ArrayEnd,
-    /// The key of a member, with its `:`.
+    /// An object key. The reader has consumed its colon.
     Key(Str<'a>),
     /// A string value.
     Str(Str<'a>),
@@ -114,7 +113,7 @@ pub(super) const fn index(value: usize) -> u32 {
 
 /// The error of the byte at `at`, which the grammar does not allow there: the end of the input,
 /// or the UTF-8 error if the bytes from `at` start no character. At one offset, the UTF-8 error
-/// wins over the grammar ([CODEC JSON], "Errors come in the order of their offsets"). A byte that
+/// takes precedence over a syntax error. A byte that
 /// the reader reaches before the cursor checked its block can be such a byte.
 #[cold]
 pub(super) fn unexpected(input: &[u8], at: usize) -> Error {
@@ -204,19 +203,16 @@ impl<'a, 's> Reader<'a, 's> {
         self.run::<false>(emit)
     }
 
-    /// Reads each token to the end of the document. It takes one item at a time, as the walk does:
-    /// a copy of the push loop at each place of the walk made the typed decoders 2 to 15% slower
-    /// (C223).
+    /// Use the typed walk to finish validation. Duplicating the push loop slowed typed decoders by 2–15%.
     #[inline(always)]
     pub(super) fn finish(&mut self) -> Result<(), Error> {
         while self.token()?.is_some() {}
         Ok(())
     }
 
-    /// The push loop: it reads the document from its start and gives each token to `emit`. The
-    /// place in the code holds the state of the grammar, so the loop keeps no [`State`] (C223). Each
-    /// refusal of the input passes [`Reader::fail`], and an error of `emit` passes as it is. With
-    /// `NUMBER_RUN`, a number of an array starts the number run.
+    /// Emit tokens from the start of the document. Control flow encodes the grammar state.
+    /// Input errors pass through [`Reader::fail`]. Callback errors return directly.
+    /// `NUMBER_RUN` enables the fast path for arrays of numbers.
     #[inline(always)]
     fn run<const NUMBER_RUN: bool>(
         &mut self,
@@ -344,11 +340,8 @@ impl<'a, 's> Reader<'a, 's> {
         }
     }
 
-    /// The number run (C224) after the number of an array that ends at `end`: the push loop reads
-    /// each next `,`, `[`, and `]` with no cursor, and it gives the offset of the next number, which
-    /// the loop reads. At each other byte, the cursor resumes at that byte. Each helper takes at most
-    /// one token of the cursor for each token that the run passed, so the cursor drops only tokens
-    /// before the run, and the resume drops the rest.
+    /// Continue an array after the number ending at `end`. Consume commas and array delimiters
+    /// directly. Resume the cursor at the first other byte and discard only tokens before it.
     #[inline(always)]
     fn number_run(
         &mut self,
@@ -707,11 +700,8 @@ pub(super) fn numbers_dense(input: &[u8]) -> bool {
         })
 }
 
-/// [`Reader::visit`] of a document of numbers ([`numbers_dense`]), with the push loop that has the
-/// number run (C224). It does not inline, so the code of each loop is its own: in one function with
-/// the loop with no run, the loop with the run changed the code of the other loop, and in the loop
-/// itself the run made each document that does not run it 2 to 9% slower on the Xeon. It makes its
-/// own reader, which then stays in registers: a reader that it took by value stayed in memory.
+/// Keep the number loop separate. Inlining it slowed other documents by 2–9% on Xeon.
+/// Construct the reader here so the compiler can keep its state in registers.
 #[inline(never)]
 pub(super) fn visit_numbers<'a>(
     input: &'a [u8],

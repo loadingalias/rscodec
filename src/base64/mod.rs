@@ -1,42 +1,19 @@
-//! base64 ([RFC 4648, section 4]) with padding, and base64url ([RFC 4648, section 5]) without
-//! padding.
+//! Padded [base64](https://www.rfc-editor.org/rfc/rfc4648#section-4) and unpadded
+//! [base64url](https://www.rfc-editor.org/rfc/rfc4648#section-5).
 //!
-//! Each [`Profile`] decodes only the canonical text of its bytes, so each byte string has one text:
-//! only the characters of its alphabet, no whitespace, the padding of the profile, and zero bits
-//! after the last byte. The encoder writes that text.
-//!
-//! The functions have two timing classes:
-//!
-//! - [`Profile::encode`] and [`Profile::decode`] are for public data, for example a digest or a
-//!   signature. They run the fastest kernel of the CPU.
-//! - [`Profile::encode_secret`] and [`Profile::decode_secret`] are for secret data, for example a
-//!   key or a bearer token. They run only the kernels whose instructions have data independent
-//!   timing (see [`Kernel`]). They take the proof [`Dit`] of a scope that holds `PSTATE.DIT`. After a
-//!   refusal, `decode_secret` writes zero to each byte of the output that it wrote.
-//!
-//! The source of each kernel has no branch and no table load that depends on the bytes or the
-//! characters. The time is to depend only on the lengths, and for an error, on its offset. A check
-//! of the compiled code holds this rule in the shipped builds on x86_64 and aarch64 Linux. A build
-//! whose target features add AVX-512 VBMI or AVX512-FP16 has no such check, and neither has
-//! WebAssembly. An [`Error`] holds no byte of the input.
+//! Each [`Profile`] accepts only its alphabet, required padding, and zero trailing bits.
+//! Whitespace is an error. [`Profile::encode`] and [`Profile::decode`] handle public data.
+//! Use [`Profile::encode_secret`] and [`Profile::decode_secret`] for keys and bearer tokens.
+//! Secret decode clears the result region after a symbol or trailing-bit error.
+//! [Timing evidence and limits](https://github.com/loadingalias/rscodec/blob/main/docs/content/base64-and-hex.md#timing-evidence)
 //!
 //! ```
 //! use rscodec::base64::Profile;
 //!
-//! // A signature is public.
 //! let mut text = [0; 4];
 //! assert_eq!(Profile::Url.encode(&[0xfb, 0xff, 0xbf], &mut text)?, b"-_-_");
-//! // A key is secret.
-//! let mut key = [0; 3];
-//! # // A build that makes no proof has no secret call: `with_dit` gives `DitUnknown`.
-//! # if rscodec::with_dit(|_| ()).is_err() { return Ok(()); }
-//! rscodec::with_dit(|dit| Profile::Url.decode_secret(dit, b"-_-_", &mut key).map(|key| key.len()))??;
-//! assert_eq!(key, [0xfb, 0xff, 0xbf]);
-//! # Ok::<(), Box<dyn core::error::Error>>(())
+//! # Ok::<(), rscodec::base64::Error>(())
 //! ```
-//!
-//! [RFC 4648, section 4]: https://www.rfc-editor.org/rfc/rfc4648#section-4
-//! [RFC 4648, section 5]: https://www.rfc-editor.org/rfc/rfc4648#section-5
 
 use core::fmt;
 
@@ -186,27 +163,21 @@ impl Profile {
         }
     }
 
-    /// Encodes `bytes` into the start of `out`, and gives the text, which is ASCII. It runs the
-    /// fastest kernel of the CPU, for public bytes. Encode a secret with
-    /// [`Profile::encode_secret`].
+    /// Encode public bytes into the start of `out` and return the ASCII text. For keys, use [`Profile::encode_secret`].
     ///
     /// # Errors
     ///
-    /// Returns [`ErrorKind::Output`] if `out` is shorter than [`Profile::encoded_len`].
-    // The short path runs inline in the caller: a call costs more than its work.
+    /// [`ErrorKind::Output`] gives the required length if the buffer is too short.
     #[inline(always)]
     pub fn encode<'o>(self, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
         self.encode_by(Public, Backend(Kernel::chosen(Timing::Public)), bytes, out)
     }
 
-    /// [`Profile::encode`] for secret bytes, for example a key. It runs only the kernels whose
-    /// instructions have data independent timing. The proof [`Dit`] shows that the scope of
-    /// [`with_dit`](crate::with_dit) holds `PSTATE.DIT`, so the function itself writes no DIT.
+    /// Encode secret bytes inside [`with_dit`](crate::with_dit).
     ///
     /// # Errors
     ///
     /// As [`Profile::encode`].
-    // The short path runs inline in the caller: a call costs more than its work.
     #[inline(always)]
     pub fn encode_secret<'o>(self, _: &Dit, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
         self.encode_by(Secret, Backend(Kernel::chosen(Timing::Secret)), bytes, out)
@@ -217,7 +188,6 @@ impl Profile {
     /// # Errors
     ///
     /// As [`Profile::encode`].
-    // The short path runs inline in the caller: a call costs more than its work.
     #[inline(always)]
     pub fn encode_with<'o>(self, backend: Backend, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
         self.encode_by(Public, backend, bytes, out)
@@ -249,59 +219,35 @@ impl Profile {
         Ok(out)
     }
 
-    /// Decodes the canonical text `text` into the start of `out`, and gives the bytes. It runs the
-    /// fastest kernel of the CPU, for public text. Decode a secret with
-    /// [`Profile::decode_secret`].
-    ///
-    /// The bytes of `out` after the result, and all of `out` after an error, are unspecified.
+    /// Decode public text into the start of `out` and return the decoded bytes. Use [`Profile::decode_secret`] for secrets.
     ///
     /// # Errors
     ///
-    /// - [`ErrorKind::Length`] if no text of the profile has the length of `text`.
-    /// - [`ErrorKind::Output`] if `out` is shorter than [`Profile::decoded_len`].
-    /// - [`ErrorKind::Symbol`] at the first byte of `text` that is not a character of the alphabet.
-    /// - [`ErrorKind::TrailingBits`] if the last character before the padding has bits after the last
-    ///   byte that are not zero.
-    ///
-    /// The decoder reads all of `text` before it refuses it for a symbol or the trailing bits.
+    /// Length and capacity errors leave `out` untouched. A symbol error gives the first invalid byte offset.
+    /// [`ErrorKind::TrailingBits`] identifies a final character with nonzero unused bits.
+    /// After a character error, the result region is unspecified.
     ///
     /// # Examples
-    ///
-    /// Decode a token into a buffer on the stack:
     ///
     /// ```
     /// use rscodec::base64::{Error, ErrorKind, Profile};
     ///
-    /// // A SHA-256 digest: 32 bytes in base64url without padding.
-    /// let token = b"NI2kalLUY_EBIuNcW6yDtzD4K6bGemOZJL9NWqY_heQ";
-    /// let mut buffer = [0; 32];
-    /// let digest = Profile::Url.decode(token, &mut buffer)?;
-    /// assert_eq!(digest[..4], [0x34, 0x8d, 0xa4, 0x6a]);
-    ///
-    /// // `/` is a character of base64, not of base64url, so the text refuses at the `/`.
-    /// let standard = b"NI2kalLUY/EBIuNcW6yDtzD4K6bGemOZJL9NWqY/heQ";
-    /// let refusal = Error::new(ErrorKind::Symbol, 9);
-    /// assert_eq!(Profile::Url.decode(standard, &mut buffer), Err(refusal));
+    /// let mut out = [0; 3];
+    /// assert_eq!(Profile::Url.decode(b"-_-_", &mut out)?, [0xfb, 0xff, 0xbf]);
+    /// assert_eq!(Profile::Url.decode(b"+/+/", &mut out), Err(Error::new(ErrorKind::Symbol, 0)));
     /// # Ok::<(), Error>(())
     /// ```
-    // The short path runs inline in the caller: a call costs more than its work.
     #[inline(always)]
     pub fn decode<'o>(self, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
         self.decode_by(Public, Backend(Kernel::chosen(Timing::Public)), text, out)
     }
 
-    /// [`Profile::decode`] for secret text, for example a bearer token. It runs only the kernels
-    /// whose instructions have data independent timing, in the scope of the proof [`Dit`], as
-    /// [`Profile::encode_secret`].
-    ///
-    /// After a refusal for a symbol or for the trailing bits, each byte that it wrote to `out` is
-    /// zero: the first [`Profile::decoded_len`] bytes. After a refusal for the length or the
-    /// output, it wrote no byte.
+    /// Decode secret text inside [`with_dit`](crate::with_dit). A symbol or trailing-bit error clears the result region.
+    /// Length and capacity errors leave `out` untouched.
     ///
     /// # Errors
     ///
     /// As [`Profile::decode`].
-    // The short path runs inline in the caller: a call costs more than its work.
     #[inline(always)]
     pub fn decode_secret<'o>(self, _: &Dit, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
         self.decode_by(Secret, Backend(Kernel::chosen(Timing::Secret)), text, out)
@@ -312,7 +258,6 @@ impl Profile {
     /// # Errors
     ///
     /// As [`Profile::decode`].
-    // The short path runs inline in the caller: a call costs more than its work.
     #[inline(always)]
     pub fn decode_with<'o>(self, backend: Backend, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
         self.decode_by(Public, backend, text, out)
@@ -353,11 +298,8 @@ impl Profile {
         }
     }
 
-    /// The error of `symbols`, which have a byte outside the alphabet or nonzero trailing bits. Its
-    /// time depends only on the length. In the secret `class`, it writes zero to `out` first.
-    ///
-    /// It is cold and out of line, so that the decoder keeps its registers for the valid text: a
-    /// call on the hot path makes the caller save and load its vector registers (C109, Graviton4).
+    /// Report the first invalid symbol or nonzero trailing bits. Secret decode clears the output first.
+    /// Keep refusal out of line to avoid spills on the valid path.
     #[cold]
     #[inline(never)]
     fn refusal(self, class: impl Class, symbols: &[u8], out: &mut [u8]) -> Error {
@@ -376,13 +318,9 @@ const fn bytes_len(len: usize) -> usize {
     len / 4 * 3 + (len % 4).saturating_sub(1)
 }
 
-/// A kernel of the codec: its code for one instruction set. The variants depend on the target
-/// architecture.
-///
-/// Each kernel has a timing class. Each kernel but `Kernel::Avx512Vbmi` of x86_64 uses only the
-/// instructions that Intel lists with data operand independent timing (DOIT) and Arm lists with
-/// data independent timing (DIT), so [`Profile::encode_secret`] and [`Profile::decode_secret`]
-/// can run it. WebAssembly has no timing list, so its kernels keep only the rule of the source.
+/// A base64 implementation available on this architecture.
+/// AVX-512 VBMI handles public data only. Secret dispatch selects AVX-512BW on such CPUs.
+/// Timing guarantees depend on the compiled binary and hardware mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kernel {
     /// Scalar arithmetic with no table. It runs on each CPU.
@@ -648,7 +586,7 @@ fn encode_steps(
 /// put in place by `from_end`, with `A` after them. A text of fewer than 16 characters runs on
 /// arrays on the stack. Gives the byte after the result in the last block, from `byte_at`: the
 /// trailing bits, which are zero in a canonical text. A load of it from memory would wait for the
-/// store of the vector (C109, Graviton4).
+/// store of the vector on Graviton4.
 #[cfg(any(
     target_arch = "x86_64",
     target_arch = "aarch64",
@@ -858,12 +796,10 @@ mod tests {
         [Timing::Public, Timing::Secret].map(|class| Kernel::ALL[Kernel::fastest(caps, class)])
     }
 
-    /// On the CPU of the C001 x86 host, a Xeon 6975P-C, the public class runs VBMI and the secret
-    /// class runs AVX-512BW, because the VBMI permutes are not on the DOIT list of Intel. Without
-    /// VBMI, both classes run AVX-512BW ([CODEC Base-N]).
+    /// Intel's DOIT list excludes VBMI permutes. Secret dispatch must use AVX-512BW on a VBMI CPU.
     #[test]
     fn the_public_class_runs_vbmi_and_the_secret_class_runs_avx512bw() {
-        let c001 = [
+        let xeon = [
             SSSE3,
             AVX2,
             BMI1,
@@ -875,9 +811,9 @@ mod tests {
             AVX512VBMI,
             AVX512VBMI2,
         ];
-        assert_eq!(chosen(&c001), [Kernel::Avx512Vbmi, Kernel::Avx512Bw]);
-        assert_eq!(chosen(&c001[..8]), [Kernel::Avx512Bw, Kernel::Avx512Bw]);
-        assert_eq!(chosen(&c001[..5]), [Kernel::Avx2, Kernel::Avx2]);
+        assert_eq!(chosen(&xeon), [Kernel::Avx512Vbmi, Kernel::Avx512Bw]);
+        assert_eq!(chosen(&xeon[..8]), [Kernel::Avx512Bw, Kernel::Avx512Bw]);
+        assert_eq!(chosen(&xeon[..5]), [Kernel::Avx2, Kernel::Avx2]);
         assert_eq!(chosen(&[]), [Kernel::Portable, Kernel::Portable]);
     }
 }

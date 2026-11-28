@@ -1,12 +1,5 @@
-//! The differential target of the JSON reader (C206). For each input, in each profile:
-//!
-//! 1. The read paths of rscodec agree: the tokens of `visit`, the value walk, a walk that drops
-//!    each odd item, `Value::skip`, and `read` with a closure that reads nothing. Each gives the same
-//!    result, error, and offset, and the tokens and the value walk give the same tree.
-//! 2. `IJson` refuses what `Rfc8259` refuses, and also each noncharacter and each number that
-//!    binary64 does not hold, at its offset.
-//! 3. The accessors of each number give the values of the parsers of `core`.
-//! 4. serde_json and simdjson give the tree of `Rfc8259`, except for the rules in README.md.
+//! Compare reader paths, number conversions, profile errors, and two independent parsers.
+//! The README specifies the parser differences and the evidence required for each exception.
 
 #![cfg_attr(not(test), no_main)]
 

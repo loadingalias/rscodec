@@ -3,11 +3,8 @@
 
 use super::{Error, ErrorKind, block};
 
-/// A string or a key of the input, as written between its quotes. The reader checked it: it is
-/// UTF-8, and each escape is valid. It borrows the input.
-///
-/// `==` compares after unescape, with a `&str` or with another `Str`. Thus the key `"\u0061lg"`
-/// equals `"alg"`.
+/// A validated string or key that borrows the input. Equality compares decoded text,
+/// so `"\u0061lg"` equals `"alg"`.
 #[derive(Clone, Copy, Debug)]
 pub struct Str<'a> {
     raw: &'a str,

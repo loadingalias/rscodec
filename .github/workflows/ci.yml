@@ -1,15 +1,4 @@
-# The CI gate on each push to main: `cargo xtask check`, then the tests with
-# `std` and without it and the doctests, then the tests on wasm32-wasip1 in
-# Wasmtime, without simd128 and with it.
-#
-# Each version comes from a file that `machine update all` writes:
-# rust-toolchain.toml, .config/nextest.toml, and Cargo.lock. A pin change
-# reaches CI with the next commit, and it changes the cache keys. Wasmtime is
-# the exception: its step holds the version of ~/machine/tools.txt.
-#
-# The tests use the `ci` profile of .config/nextest.toml through
-# NEXTEST_PROFILE, not a `--profile` argument: `cargo xtask test` runs the
-# doctests only when it has no arguments.
+# Keep `cargo xtask test` argument-free for doctests. Select the Nextest CI profile through the environment.
 name: CI
 
 on:
@@ -153,6 +142,15 @@ jobs:
       - name: cargo xtask test
         shell: bash
         run: cargo xtask test
+
+      - name: Run the guide examples
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --example base64url --features base64
+          cargo run --locked --example jose_header --features json
+          cargo run --locked --example sparse_index --features json
+          cargo run --locked --example ceremony_options --features json,base64
 
       # The runner of wasm32-wasip1 in .cargo/config.toml. The SHA-256 is the
       # digest that GitHub publishes for the archive.

@@ -1,18 +1,11 @@
 # Test data
 
-The conformance tests of the JSON reader read these files, so they need no network. Each file in
-`JSONTestSuite/` and `kuhn/` is an unchanged copy of its upstream file, under the license of its
-upstream.
+The reader tests use unmodified JSONTestSuite and Kuhn UTF-8 fixtures. Their sources and licenses appear below.
 
-`fuzz/` holds the minimized corpus of the JSON fuzz target (`fuzz/README.md`). The kernel tests read
-each of its inputs. libFuzzer made the inputs from seeds of this repository and of JSONTestSuite, so
-the MIT license of `JSONTestSuite/LICENSE` applies to the inputs that come from JSONTestSuite.
+`fuzz/` holds minimized inputs. JSONTestSuite-derived inputs retain its MIT license.
+`fuzz-seeds/` holds two 4,096-byte number arrays, one valid and one malformed. [Replay the seeds](../../fuzz/README.md#build-and-replay)
 
-`fuzz-seeds/` holds the permanent valid and malformed arrays for the reader's number run.
-Each is exactly 4,096 bytes. The campaign recipe copies both files into its working corpus.
-
-The number tests also read Nigel Tao's data, which `fetched/` holds and Git ignores. It is too large
-for the repository: 14 files, 275 MB, 5,299,993 lines. Fetch it before the tests:
+Fetch the 14 number fixtures (275 MB) before testing. The 5,299,993 records give expected f16, f32, and f64 bits for decimal input.
 
 ```sh
 cd tests/data
@@ -27,8 +20,7 @@ done
 sha256sum -c numbers.sha256    # On macOS: shasum -a 256 -c numbers.sha256
 ```
 
-Each line holds the bits of the f16, f32, and f64 values of a string, and then the string. The
-upstream is <https://github.com/nigeltao/parse-number-fxx-test-data> at commit
+Numeric fixtures come from <https://github.com/nigeltao/parse-number-fxx-test-data> at commit
 `55d79b184b7d8fac2e143e89dc19b766ec4e54b8` (2022-04-13), under Apache-2.0.
 
 | Directory | Upstream | Version | License |

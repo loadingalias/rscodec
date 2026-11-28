@@ -1,38 +1,17 @@
-//! Lowercase hex ([RFC 4648, section 8]): each byte is two characters of `0`–`9` and `a`–`f`.
+//! Lowercase [hexadecimal](https://www.rfc-editor.org/rfc/rfc4648#section-8).
+//! Each byte encodes as two digits from `0`–`9` and `a`–`f`. Uppercase and whitespace are errors.
 //!
-//! The decoder takes only lowercase text, so each byte string has one text.
-//!
-//! The functions have two timing classes:
-//!
-//! - [`encode`] and [`decode`] are for public data, for example a digest. They run the fastest
-//!   kernel of the CPU.
-//! - [`encode_secret`] and [`decode_secret`] are for secret data, for example a key. They run only
-//!   the kernels whose instructions have data independent timing (see [`Kernel`]). They take the
-//!   proof [`Dit`] of a scope that holds `PSTATE.DIT`. After a refusal, `decode_secret` writes zero
-//!   to each byte of the output that it wrote.
-//!
-//! The source of each kernel has no branch and no table load that depends on the bytes or the
-//! characters. The time is to depend only on the lengths, and for an error, on its offset. A check
-//! of the compiled code holds this rule in the shipped builds on x86_64 and aarch64 Linux. A build
-//! whose target features add AVX-512 VBMI or AVX512-FP16 has no such check, and neither has
-//! WebAssembly. An [`Error`] holds no byte of the input.
+//! Use [`encode`] and [`decode`] for public data. Use [`encode_secret`] and [`decode_secret`] for keys.
+//! Secret decode clears the result region after a symbol error.
+//! [Timing evidence and limits](https://github.com/loadingalias/rscodec/blob/main/docs/content/base64-and-hex.md#timing-evidence)
 //!
 //! ```
 //! use rscodec::hex;
 //!
-//! // A digest is public.
-//! let mut text = [0; 4];
-//! assert_eq!(hex::encode(&[0xc0, 0xde], &mut text)?, b"c0de");
-//! // A key is secret.
-//! let mut key = [0; 2];
-//! # // A build that makes no proof has no secret call: `with_dit` gives `DitUnknown`.
-//! # if rscodec::with_dit(|_| ()).is_err() { return Ok(()); }
-//! rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))??;
-//! assert_eq!(key, [0xc0, 0xde]);
-//! # Ok::<(), Box<dyn core::error::Error>>(())
+//! let mut out = [0; 2];
+//! assert_eq!(hex::decode(b"c0de", &mut out)?, [0xc0, 0xde]);
+//! # Ok::<(), hex::Error>(())
 //! ```
-//!
-//! [RFC 4648, section 8]: https://www.rfc-editor.org/rfc/rfc4648#section-8
 
 use core::fmt;
 
@@ -129,15 +108,11 @@ pub const fn decoded_len(text: &[u8]) -> Result<usize, Error> {
     }
 }
 
-/// Encodes `bytes` into the start of `out`, and gives the text, which is ASCII. It runs the fastest
-/// kernel of the CPU, for public bytes. Encode a secret with [`encode_secret`].
-///
-/// When `-C target-feature` fixes a SIMD kernel, that kernel runs inline at each length.
+/// Encode public bytes into the start of `out` and return the ASCII text. For keys, use [`encode_secret`].
 ///
 /// # Errors
 ///
-/// Returns [`ErrorKind::Output`] if `out` is shorter than [`encoded_len`].
-// The short path runs inline in the caller: a call costs more than its work.
+/// [`ErrorKind::Output`] gives the required length if the buffer is too short.
 #[inline(always)]
 pub fn encode<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = text_of(bytes, out)?;
@@ -145,14 +120,11 @@ pub fn encode<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error
     Ok(out)
 }
 
-/// [`encode`] for secret bytes, for example a key. It runs only the kernels whose instructions have
-/// data independent timing. The proof [`Dit`] shows that the scope of [`with_dit`](crate::with_dit)
-/// holds `PSTATE.DIT`, so the function itself writes no DIT.
+/// Encode secret bytes inside [`with_dit`](crate::with_dit).
 ///
 /// # Errors
 ///
 /// As [`encode`].
-// The short path runs inline in the caller: a call costs more than its work.
 #[inline(always)]
 pub fn encode_secret<'o>(_: &Dit, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = text_of(bytes, out)?;
@@ -165,7 +137,6 @@ pub fn encode_secret<'o>(_: &Dit, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o
 /// # Errors
 ///
 /// As [`encode`].
-// The short path runs inline in the caller: a call costs more than its work.
 #[inline(always)]
 pub fn encode_with<'o>(backend: Backend, bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = text_of(bytes, out)?;
@@ -181,21 +152,12 @@ fn text_of<'o>(bytes: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     out.get_mut(..len).ok_or_else(|| Error::new(ErrorKind::Output, len))
 }
 
-/// Decodes the lowercase hex `text` into the start of `out`, and gives the bytes. It runs the
-/// fastest kernel of the CPU, for public text. Decode a secret with [`decode_secret`].
-///
-/// On x86_64, a result of up to 16 bytes comes from SSE2, inline and with no choice of kernel. When
-/// `-C target-feature` fixes a SIMD kernel, that kernel runs inline at each length.
-///
-/// The bytes of `out` after the result, and all of `out` after an error, are unspecified.
+/// Decode public text into the start of `out` and return the decoded bytes. Use [`decode_secret`] for secrets.
 ///
 /// # Errors
 ///
-/// - [`ErrorKind::Length`] if `text` has an odd length.
-/// - [`ErrorKind::Output`] if `out` is shorter than [`decoded_len`].
-/// - [`ErrorKind::Symbol`] at the first byte of `text` that is not `0`–`9` or `a`–`f`. The decoder
-///   reads all of `text` before it refuses it.
-// The short path runs inline in the caller: a call costs more than its work.
+/// Length and capacity errors leave `out` untouched. A symbol error gives the first invalid byte offset.
+/// After a character error, the result region is unspecified.
 #[inline(always)]
 pub fn decode<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = bytes_of(text, out)?;
@@ -203,16 +165,12 @@ pub fn decode<'o>(text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error>
     checked(Public, valid, text, out)
 }
 
-/// [`decode`] for secret text, for example a key. It runs only the kernels whose instructions have
-/// data independent timing, in the scope of the proof [`Dit`], as [`encode_secret`].
-///
-/// After a refusal for a symbol, each byte that it wrote to `out` is zero: the first
-/// [`decoded_len`] bytes. After a refusal for the length or the output, it wrote no byte.
+/// Decode secret text inside [`with_dit`](crate::with_dit). A symbol error clears the result region.
+/// Length and capacity errors leave `out` untouched.
 ///
 /// # Errors
 ///
 /// As [`decode`].
-// The short path runs inline in the caller: a call costs more than its work.
 #[inline(always)]
 pub fn decode_secret<'o>(_: &Dit, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = bytes_of(text, out)?;
@@ -225,7 +183,6 @@ pub fn decode_secret<'o>(_: &Dit, text: &[u8], out: &'o mut [u8]) -> Result<&'o 
 /// # Errors
 ///
 /// As [`decode`].
-// The short path runs inline in the caller: a call costs more than its work.
 #[inline(always)]
 pub fn decode_with<'o>(backend: Backend, text: &[u8], out: &'o mut [u8]) -> Result<&'o mut [u8], Error> {
     let out = bytes_of(text, out)?;
@@ -251,11 +208,8 @@ fn checked<'o>(class: impl Class, valid: bool, text: &[u8], out: &'o mut [u8]) -
     Ok(out)
 }
 
-/// The error of `text`, which has a byte that is not a digit. Its time depends only on the length.
-/// In the secret `class`, it writes zero to `out` first.
-///
-/// It is cold and out of line, so that the decoder keeps its registers for the valid text: a call
-/// on the hot path makes the caller save and load its vector registers (C109, Graviton4).
+/// Report the first invalid digit. Secret decode clears the output first.
+/// Keep refusal out of line to avoid spills on the valid path.
 #[cold]
 #[inline(never)]
 fn refusal(class: impl Class, text: &[u8], out: &mut [u8]) -> Error {
@@ -266,13 +220,8 @@ fn refusal(class: impl Class, text: &[u8], out: &mut [u8]) -> Error {
     )
 }
 
-/// A kernel of the codec: its code for one instruction set. The variants depend on the target
-/// architecture.
-///
-/// Each kernel uses only the instructions that Intel lists with data operand independent timing
-/// (DOIT) and Arm lists with data independent timing (DIT), so [`encode_secret`] and
-/// [`decode_secret`] can run it. WebAssembly has no timing list, so its kernels keep only the rule
-/// of the source.
+/// A hex implementation available on this architecture. Both timing classes use the same kernel choices.
+/// Timing guarantees depend on the compiled binary and hardware mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kernel {
     /// Scalar arithmetic with no table. It runs on each CPU.
@@ -383,10 +332,7 @@ mod kernel {
     use super::{Backend, Kernel, portable};
     use crate::{cpu::Timing, ct::Class};
 
-    /// The largest result of the SSE2 short path of x86_64 that decodes: a call costs more than its
-    /// work. An encode has no short path: the constants of an inline path load again after each
-    /// call of the kernel in a loop of the caller, and with no short path the encode of 32 bytes
-    /// took 0.73 times as long as faster-hex on the Xeon, against 0.90 (C109).
+    /// SSE2 decodes up to 16 result bytes inline. Calling the selected encoder avoids reloading its constants.
     #[cfg(target_arch = "x86_64")]
     const DECODE_INLINE_MAX: usize = 16;
 
@@ -541,11 +487,10 @@ mod tests {
         x86::{AVX2, AVX512BW, AVX512F, AVX512VBMI, AVX512VBMI2, AVX512VL, BMI1, BMI2, PCLMULQDQ, SSSE3},
     };
 
-    /// On the CPU of the C001 x86 host, a Xeon 6975P-C, both timing classes run the AVX-512BW
-    /// kernel, which uses only instructions of the DOIT list of Intel.
+    /// Both timing classes can use AVX-512BW for hex on a Xeon 6975P-C.
     #[test]
     fn each_class_runs_avx512bw() {
-        let c001 = [
+        let xeon = [
             SSSE3,
             AVX2,
             BMI1,
@@ -560,7 +505,7 @@ mod tests {
         .into_iter()
         .fold(Caps::NONE, Caps::union);
         for class in [Timing::Public, Timing::Secret] {
-            assert_eq!(Kernel::ALL[Kernel::fastest(c001, class)], Kernel::Avx512Bw);
+            assert_eq!(Kernel::ALL[Kernel::fastest(xeon, class)], Kernel::Avx512Bw);
         }
     }
 }

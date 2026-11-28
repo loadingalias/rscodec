@@ -1,44 +1,12 @@
 # Contributing
 
-## Setup
+Run `rustup toolchain install` in the checkout. Run `cargo install --locked cargo-nextest@0.9.150`.
+Fetch the [number data](tests/data/README.md) and [JSON corpora](benches/data/README.md). WebAssembly tests also need Wasmtime.
 
-1. Install [rustup](https://rustup.rs).
-2. In the repository, run `rustup toolchain install`. `rust-toolchain.toml` pins the nightly
-   toolchain, its components, and its targets.
-3. Install cargo-nextest at the version that `.config/nextest.toml` pins:
-   `cargo install --locked cargo-nextest@0.9.150`.
-4. Fetch the test data, which the repository does not hold. `benches/data/README.md` gives the
-   commands for three JSON corpora, and `tests/data/README.md` gives them for the number data (275 MB).
-5. For the WebAssembly tests, install [Wasmtime](https://wasmtime.dev). CI uses the version that
-   `.github/workflows/ci.yml` names.
+Run `cargo xtask fix`, `cargo xtask check`, and `cargo xtask test`.
+Sign off each commit with `git commit -s`. [Developer Certificate of Origin](https://developercertificate.org/)
 
-## Commands
+## Security
 
-| Command | Use |
-| --- | --- |
-| `cargo xtask fix` | Applies the Clippy fixes and formats the code. Then it fails on each lint that remains |
-| `cargo xtask check` | Checks the format, the lints, and rustdoc, and changes no file. This is the CI gate |
-| `cargo xtask test` | Runs the tests, then the tests of rscodec without `std`, then the doctests |
-| `cargo xtask test -E 'test(<name>)'` | Runs the tests that the Nextest filter selects |
-| `cargo xtask test --target wasm32-wasip1` | Runs the tests in Wasmtime |
-
-Each command uses `--locked`, so no command changes `Cargo.lock`.
-
-The fuzz targets are in `fuzz/`, a workspace of its own. `fuzz/README.md` gives their commands. On
-a workstation, run a target for at most 10 minutes.
-
-## Rules of a change
-
-- Each SIMD kernel gives the same output, error, and error offset as the portable kernel, for each
-  input. A test compares them.
-- A codec allocates no memory, and the library has no dependency.
-- A codec that can carry a secret has no branch on the data and no load at an index from the data.
-  After a change of a base64 or hex kernel, run `cargo run --release -p rscodec-ct -- scan`.
-- `Cargo.toml` and `clippy.toml` hold the lint policy. Each `unsafe` item has an
-  `#[expect(unsafe_code, reason = "...")]` that states why it is sound.
-
-## Sign-off and license
-
-Sign off each commit with `git commit -s`. The `Signed-off-by` line states that you agree with the
-[Developer Certificate of Origin 1.1](https://developercertificate.org/). Each contribution has the
-license of the repository, [Apache-2.0](LICENSE).
+Report vulnerabilities privately. Include the version, features, CPU, target, and a synthetic input.
+Security fixes go into the latest release. [Report a vulnerability](https://github.com/loadingalias/rscodec/security/advisories/new)

@@ -1,5 +1,4 @@
-# The fuzz targets of rscodec (C206): a workspace of its own, because libFuzzer and the sanitizers
-# need flags that the workspace of the crate does not take. README.md gives the commands.
+# Keep libFuzzer and its compiler flags outside the library workspace.
 [package]
 name = "rscodec-fuzz"
 version = "0.0.0"
@@ -13,9 +12,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "=0.4.13"
 rscodec = { path = "..", features = ["json"] }
-# The trusted reader of the design. Without `float_roundtrip`, serde_json reads some floats 1 ULP
-# away from the correctly rounded value.
-# RawValue checks the JSON spelling of an overflowing number without converting it.
+# Compare correctly rounded floats and check overflow syntax before converting the number.
 serde_json = { version = "=1.0.154", features = ["float_roundtrip", "raw_value"] }
 
 # build.rs builds simdjson, the second trusted reader, with its shim `oracle.cpp`.

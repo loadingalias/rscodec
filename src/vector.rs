@@ -191,7 +191,7 @@ pub(crate) mod aarch64 {
     /// Stores the first `N` bytes of `value`, 8, 4, 2, or 1, in `dst` with one store from the
     /// vector register (`str d`, `str s`, `str h`, `str b`). The asm fixes the instruction: from a
     /// lane of an intrinsic, LLVM can move the bytes to a general register with `fmov`, which is not
-    /// on the DIT list of Arm (C103).
+    /// on the Arm DIT list.
     #[inline]
     #[target_feature(enable = "neon")]
     pub(crate) fn store_first<const N: usize>(dst: &mut [u8; N], value: uint8x16_t) {

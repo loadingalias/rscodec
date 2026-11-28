@@ -1,10 +1,9 @@
 [package]
 name = "rscodec-ct"
 version = "0.0.0"
-description = "The timing evidence of the base-N codecs and of the secret member of the JSON writer: the path count, the scan, the painted stack, and DudeCT."
+description = "Instruction scans, path counts, stack checks, and timing tests for secret codec operations."
 edition.workspace = true
 license.workspace = true
-# A tool of this repository, not a library.
 publish = false
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]

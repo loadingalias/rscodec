@@ -33,14 +33,8 @@ pub(crate) const fn negative_mask(value: i16) -> usize {
     0_usize.wrapping_sub((value.cast_unsigned() >> 15) as usize)
 }
 
-/// The offset of the first value of `values` that is negative, or `values.len()` if none is. The
-/// time depends only on the number of values.
-///
-/// It counts the values before the first negative one: a mask turns on at a negative value and
-/// stays on, and the count stops when it turns on. Only `or`, `and`, and `add` run, with no select
-/// and no minimum, which a compiler can lower to a branch or to a load at an offset from the data:
-/// LLVM made a branch of `usize::min` on x86_64, and a load from a stack slot of the select of the
-/// last negative offset on aarch64 (C103).
+/// Count entries before the first negative value. Once set, `seen` prevents further increments.
+/// LLVM compiled a minimum into a branch on x86_64 and a select into a data-indexed stack load on AArch64.
 #[inline]
 pub(crate) fn first_negative(values: impl Iterator<Item = i16>) -> usize {
     let mut seen = 0_usize;

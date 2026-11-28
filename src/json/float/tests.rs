@@ -212,8 +212,7 @@ fn shortest_gives_the_digits_of_core_fmt() {
     }
 }
 
-/// The band around each threshold, in units of `2^−64`, in which the approximations of [`scale`]
-/// are closest to a decision: the margins that the printer had before C216.
+/// Sample both sides of each rounding threshold in units of 2⁻⁶⁴.
 const BAND: u64 = 4;
 const TENFOLD_BAND: u64 = 16;
 

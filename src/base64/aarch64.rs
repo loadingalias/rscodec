@@ -60,13 +60,7 @@ fn flags(lookups: &Lookups, chars: uint8x16_t) -> uint8x16_t {
     )
 }
 
-/// Encodes `bytes` into the characters `out`, with no padding, inline in the caller at each length.
-///
-/// A call in the encoder would put the constants of a loop of the caller in memory: a call keeps
-/// only the low 64 bits of `v8` to `v15`. With a call for an input longer than `SHORT_MAX` or
-/// shorter than one vector, base64url of 16 bytes took 1.14 times as long as base64-simd on
-/// Graviton4, and inline 0.97. The code at each call site is about three times as large, and an
-/// encode of 4 KiB or more took 1.00 to 1.14 times as long (C109).
+/// Encode without padding. Inlining keeps the caller's vector constants in registers across short encodes.
 #[inline(always)]
 #[target_feature(enable = "neon")]
 pub(super) fn encode(class: impl Class, profile: Profile, bytes: &[u8], out: &mut [u8]) {
@@ -201,8 +195,7 @@ fn decode_long(class: impl Class, profile: Profile, text: &[u8], out: &mut [u8])
     let blocks = text.len().saturating_sub(16) / 64;
     let (head, rest) = text.split_at(64 * blocks);
     let (head_out, rest_out) = out.split_at_mut(48 * blocks);
-    // One block for each step: in a native build, the schedule of two blocks for each step took
-    // 1.10 times as long at 65536 bytes (C109 probe 3).
+    // Two blocks per iteration took 10% longer at 64 KiB on Graviton4.
     for (src, dst) in head.as_chunks::<64>().0.iter().zip(head_out.as_chunks_mut::<48>().0) {
         valid = vandq_u8(valid, decode_64(&lookups, src, dst));
     }

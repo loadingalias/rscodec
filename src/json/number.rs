@@ -11,54 +11,21 @@ use super::{
 #[cfg(test)]
 mod tests;
 
-/// A number of the input, as written. The reader checked its grammar. It borrows the input. `==`
-/// compares the text, so `1.0` and `1.00` differ.
-///
-/// Each accessor reads the value exactly or refuses: [`Number::to_i64`] and [`Number::to_u64`]
-/// read an integer, [`Number::to_decimal`] reads each number of up to 38 significant digits, and
-/// [`Number::to_f64`] reads each number to the nearest `f64`. A value that does not fit gives
-/// [`ErrorKind::Range`] at the offset of the number.
+/// A validated number that borrows its original text. Equality compares the spelling, including trailing zeros.
+/// Integer accessors require integer syntax. [`Number::to_decimal`] preserves the decimal scale.
+/// [`Number::to_f64`] rounds to the nearest binary64 value.
 ///
 /// ```
-/// use rscodec::json::{self, Decimal, ErrorKind, Limits, Profile, Slot};
+/// use rscodec::json::{self, Decimal, Limits, Profile};
 ///
-/// const ORDER: Limits = Limits {
-///     input_bytes_max: 8192,
-///     depth_max: 8,
-///     string_bytes_max: 4096,
-///     members_max: 32,
-///     elements_max: 32,
-///     number_digits_max: 32,
+/// let limits = Limits {
+///     input_bytes_max: 32, depth_max: 0, string_bytes_max: 0,
+///     members_max: 0, elements_max: 0, number_digits_max: 8,
 /// };
-///
-/// let order = br#"{"expires":1767225600,"amount":12.50,"lat":52.5163}"#;
-/// let mut scratch = [Slot::EMPTY; 8];
-/// let (expires, amount, lat) = json::read(order, &ORDER, Profile::Rfc8259, &mut scratch, #[inline(always)] |reader| {
-///     let (mut expires, mut amount, mut lat) = (None, None, None);
-///     let mut members = reader.value().members()?;
-///     while let Some((key, value)) = members.next()? {
-///         if key == "expires" {
-///             expires = Some(value.number()?.to_u64()?);
-///         } else if key == "amount" {
-///             amount = Some(value.number()?.to_decimal()?);
-///         } else if key == "lat" {
-///             lat = Some(value.number()?.to_f64()?);
-///         }
-///     }
-///     Ok((expires, amount, lat))
+/// let amount = json::read(b"12.50", &limits, Profile::Rfc8259, &mut [], |reader| {
+///     reader.value().number()?.to_decimal()
 /// })?;
-/// assert_eq!(expires, Some(1_767_225_600));
-/// assert_eq!(amount, Some(Decimal { negative: false, coefficient: 1250, exponent: -2 }));
-/// assert_eq!(lat, Some(52.5163));
-///
-/// // An integer accessor refuses a fraction, at the offset of the number.
-/// let late = br#"{"expires":1.5}"#;
-/// let error = json::read(late, &ORDER, Profile::Rfc8259, &mut scratch, |reader| {
-///     let mut members = reader.value().members()?;
-///     members.next()?.map(|(_, value)| value.number()?.to_u64()).transpose()
-/// })
-/// .unwrap_err();
-/// assert_eq!((error.kind(), error.offset()), (ErrorKind::Type, 11));
+/// assert_eq!(amount, Decimal { negative: false, coefficient: 1250, exponent: -2 });
 /// # Ok::<(), json::Error>(())
 /// ```
 #[derive(Clone, Copy, Debug)]
@@ -224,7 +191,7 @@ impl<'a> Number<'a> {
     /// [`ErrorKind::Range`] at the offset of the number if its magnitude rounds to infinity. The
     /// recovery is [`Number::to_decimal`], or the text of [`Number::as_str`].
     // The common number reads here, and each other number in `f64_exact`. On aarch64 this function
-    // inlines into the read loop of its caller (C211 round 4: canada 0.91). On x86_64, with 16
+    // inlines into the read loop of its caller (9% faster on canada.json). On x86_64, with 16
     // registers, the inlined code moved state of the reader to the stack (native b1 1.12), so it
     // stays a call.
     #[cfg_attr(target_arch = "aarch64", inline(always))]

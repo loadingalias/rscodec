@@ -1,71 +1,25 @@
-//! JSON ([RFC 8259]): a reader with two profiles, limits, and a strict walk for typed decoders,
-//! and a writer.
+//! Read or write one [JSON](https://www.rfc-editor.org/rfc/rfc8259) document in caller-owned storage.
 //!
-//! Each read takes one document from a slice in memory:
-//!
-//! - [`visit`] gives each [`Token`] of the document to its closure, in order. Each string and
-//!   number borrows the input.
-//! - [`read`] gives a [`Reader`] to its closure, for a typed decoder. [`Reader::value`] gives the
-//!   next [`Value`], to read once with a type. [`Value::members`] and [`Value::elements`] walk a
-//!   container in a loop, and they skip what the loop does not read.
-//!
-//! The reader checks each rule of its [`Profile`] and each of its [`Limits`] on each byte, also on
-//! each byte that it skips. [`read`] reads to the end of the document after the closure returns,
-//! so a document is valid exactly when `read` or `visit` gives `Ok`. Each refusal is an [`Error`]
-//! with its cause and its offset, and the errors come in the order of their offsets.
-//!
-//! The reader allocates no memory. The caller lends a scratch of [`Slot`]s, which holds each open
-//! container and the keys of each open object for the duplicate check. A string with escapes
-//! decodes into a buffer that the caller lends ([`Str::decode`]). No code recurses, so a deep
-//! document does not grow the stack.
+//! [`read`] lends a typed [`Reader`]. [`visit`] emits borrowed [`Token`]s in input order.
+//! Both enforce the selected [`Profile`] and [`Limits`], including on skipped input.
+//! Lend one [`Slot`] per open container and per key of each open object.
+//! After a closure succeeds, the reader validates the remaining input.
 //!
 //! ```
 //! use rscodec::json::{self, ErrorKind, Limits, Profile, Slot};
 //!
-//! const LIMITS: Limits = Limits {
-//!     input_bytes_max: 8192,
-//!     depth_max: 8,
-//!     string_bytes_max: 4096,
-//!     members_max: 32,
-//!     elements_max: 32,
-//!     number_digits_max: 32,
+//! let limits = Limits {
+//!     input_bytes_max: 128, depth_max: 2, string_bytes_max: 32,
+//!     members_max: 4, elements_max: 4, number_digits_max: 8,
 //! };
-//!
-//! // A JOSE header. The walk compares each key after unescape, so `\u0061lg` is `alg`.
-//! let header = br#"{"\u0061lg":"ES256","kid":"key-1","x-unknown":[1,2]}"#;
-//! let mut scratch = [Slot::EMPTY; 8];
-//! let (alg, kid) = json::read(header, &LIMITS, Profile::IJson, &mut scratch, #[inline(always)] |reader| {
-//!     let (mut alg, mut kid) = (None, None);
-//!     let mut members = reader.value().members()?;
-//!     while let Some((key, value)) = members.next()? {
-//!         if key == "alg" {
-//!             alg = Some(value.str()?);
-//!         } else if key == "kid" {
-//!             kid = Some(value.str()?);
-//!         }
-//!     }
-//!     Ok((alg, kid))
-//! })?;
-//! // Each `Str` borrows the header. `==` compares after unescape, and `decode` copies only a
-//! // string with escapes.
-//! assert!(alg.is_some_and(|alg| alg == "ES256"));
-//! let mut buf = [0; 64];
-//! if let Some(kid) = kid {
-//!     assert_eq!(kid.decode(&mut buf)?, "key-1");
-//! }
-//!
-//! // Each profile refuses a duplicate key, also after unescape.
-//! let twice = br#"{"alg":"none","\u0061lg":"ES256"}"#;
-//! let error = json::read(twice, &LIMITS, Profile::IJson, &mut scratch, |_| Ok(())).unwrap_err();
+//! let mut slots = [Slot::EMPTY; 8];
+//! let doc = br#"{"alg":"none","\u0061lg":"ES256"}"#;
+//! let error = json::read(doc, &limits, Profile::IJson, &mut slots, |_| Ok(())).unwrap_err();
 //! assert_eq!((error.kind(), error.offset()), (ErrorKind::Duplicate, 14));
-//! # Ok::<(), json::Error>(())
 //! ```
 //!
-//! [`write()`] writes compact JSON into a slice that the caller lends, with no allocation. Its
-//! closure gets a [`Place`] for one value, and the types of [`Place`], [`Object`], and [`Array`]
-//! give each value one place, so the text is always valid JSON.
-//!
-//! [RFC 8259]: https://www.rfc-editor.org/rfc/rfc8259
+//! [`write()`] writes compact JSON and returns its byte length.
+//! [Reader and writer examples](https://github.com/loadingalias/rscodec/blob/main/docs/content/json.md)
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -120,21 +74,14 @@ pub enum Profile {
     ///
     /// [RFC 8259]: https://www.rfc-editor.org/rfc/rfc8259
     Rfc8259,
-    /// [`Profile::Rfc8259`] and I-JSON ([RFC 7493]): no noncharacter, and only numbers that
-    /// binary64 holds. The reader refuses a number whose magnitude rounds to infinity, a nonzero
-    /// number that rounds to zero, a number of more than 17 significant digits, and an integer
-    /// outside ±(2^53 − 1). An integer has no fraction and no exponent.
-    ///
-    /// [RFC 7493]: https://www.rfc-editor.org/rfc/rfc7493
+    /// [`Profile::Rfc8259`] with an [I-JSON](https://www.rfc-editor.org/rfc/rfc7493) interoperability policy.
+    /// Rejects noncharacters, binary64 overflow, nonzero underflow, and more than 17 significant digits.
+    /// Integers without a fraction or exponent must lie within ±(2^53 − 1).
     IJson,
 }
 
-/// The limits of one document. Each limit refuses the first item past it with
-/// [`ErrorKind::Limit`] and its offset. No limit truncates or saturates.
-///
-/// No default exists, because a limit that fits a header of 150 bytes refuses a file of 2 MB, and a
-/// limit that fits the file lets a hostile header use memory and time. State each limit for the
-/// documents that you read.
+/// Resource limits for one document. Set all six for the input you accept.
+/// Exceeding a limit gives [`ErrorKind::Limit`] with its offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Limits {
     /// The bytes of the input.
@@ -153,21 +100,11 @@ pub struct Limits {
     pub number_digits_max: u16,
 }
 
-/// Reads the document `input` with `decode`, which reads its values with the [`Reader`]. Then it
-/// reads the rest of the document, with each check. Thus it gives the result of `decode` only for
-/// a valid document.
-///
-/// It selects the kernel of the CPU once, and it calls `decode` at one place. Mark `decode`
-/// `#[inline(always)]`: the compiler does not inline a large closure without it, and the reader
-/// keeps its state in registers only when `decode` inlines. The kernel runs as one call for each
-/// block of 64 bytes, with plain values: a direct call when the build fixes the kernel, from
-/// `-C target-feature` or without `std`, and a call through a function pointer when the CPU selects
-/// it at run time.
+/// Reads one document with a typed decoder. After `decode` succeeds, the reader validates all remaining input.
 ///
 /// # Errors
 ///
-/// The first error of `decode`, or the first refusal of the input. [`ErrorKind::Limit`] with
-/// [`Limit::InputBytes`] at offset `limits.input_bytes_max` if the input is longer.
+/// Returns the caller error or the reader error. Oversized input gives [`Limit::InputBytes`] before parsing.
 #[inline]
 pub fn read<'a, T>(
     input: &'a [u8],
@@ -202,22 +139,13 @@ fn read_with<'a, T>(
     Ok(value)
 }
 
-/// Reads the document `input` and gives each token to `each`, in order. A `,`, a `:`, and
-/// whitespace are no tokens. It reads to the end of the document, so `Ok` means a valid document.
-///
-/// It selects the kernel of the CPU once. One loop reads the whole document, and the place in its
-/// code holds the state of the grammar. Mark the closure `#[inline(always)]`: the loop calls it at
-/// each place that gives a token, and the compiler does not inline a large closure with more than
-/// one caller. The state of the loop stays in registers only when the closure inlines.
-///
-/// A document of at least 4 KiB with an array of numbers at its middle takes a second loop, which
-/// reads each array of numbers with no cursor. Both loops give the same tokens and errors, and the
-/// closure compiles into each of them.
+/// Visits the tokens of one document in input order. Strings and numbers borrow `input`.
+/// A successful return means the full document passed validation. A callback can see tokens before a later error.
+/// Large callbacks on a measured hot path can benefit from `#[inline(always)]`.
 ///
 /// # Errors
 ///
-/// The first error of `each`, or the first refusal of the input. [`ErrorKind::Limit`] with
-/// [`Limit::InputBytes`] at offset `limits.input_bytes_max` if the input is longer.
+/// Returns the callback error or the reader error. Oversized input gives [`Limit::InputBytes`] before parsing.
 #[inline]
 pub fn visit<'a>(
     input: &'a [u8],
@@ -229,8 +157,7 @@ pub fn visit<'a>(
     visit_with(Backend::chosen(), input, limits, profile, scratch, each)
 }
 
-/// [`visit`] on the kernel of `backend`. Its check of the length repeats the one of `read_with`: a
-/// helper that gave both the reader changed the machine code of each typed decoder (C223).
+/// Keep the length check local. Sharing reader construction here changed the generated code of typed decoders.
 #[inline(always)]
 fn visit_with<'a>(
     backend: Backend,

@@ -182,10 +182,7 @@ fn jsontestsuite() -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// Each `y_` file accepts and each `n_` file refuses, in each profile, with three exceptions that
-/// the design decides. Each profile refuses a duplicate key ([CODEC Decisions] of 2026-11-17,
-/// item 2), so the two `y_` files with one refuse. `IJson` refuses the `y_` files with a
-/// noncharacter. Each `i_` file gives the result in the table, which the user docs list.
+/// Check each JSONTestSuite acceptance and rejection case against the documented profile differences.
 #[test]
 fn each_file_of_jsontestsuite_gives_its_decided_result() {
     use ErrorKind::{Duplicate, Noncharacter, Number, Surrogate, Syntax, Utf8};
@@ -511,8 +508,7 @@ fn each_noncharacter_refuses_only_in_ijson() {
     }
 }
 
-/// The hostile set of `docs/research/json.md` (profile A6) gives its typed errors. A document of
-/// depth 60,000 reads on a thread with a stack of 64 KiB, so the stack does not grow with depth.
+/// Hostile inputs give typed errors. A 60,000-level document must fit a thread with a 64 KiB stack.
 #[test]
 fn the_hostile_set_gives_its_typed_errors() {
     let tight = Limits {
@@ -1165,7 +1161,7 @@ fn the_walk_skips_the_rest_of_what_the_loop_left() {
 }
 
 /// The number run reads an array of numbers itself, and the cursor resumes at the first other
-/// byte (C224). Each document here takes the push loop with the run: it holds an array of 1,500
+/// byte. Each document here takes the push loop with the run: it holds an array of 1,500
 /// numbers at its middle. With the end of a run at each offset of a block of 64 bytes, each document
 /// gives the tree of serde_json: a run that ends at whitespace, at a `[ ]`, in an object, and in
 /// nested arrays. A run that ends at a byte that is not UTF-8, at a `]` after a `,`, or at the end of

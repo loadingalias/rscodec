@@ -1,21 +1,5 @@
-//! base-N encode and valid decode: base64url without padding up to 4 KiB, padded standard base64
-//! at 64 KiB, and lowercase hex.
-//!
-//! Each row of a case reads the same input and writes into the same output, both from a 64-byte
-//! boundary. Before timing, each encode must give the text of data-encoding, and each decode must
-//! give the original bytes.
-//!
-//! The rows of rscodec:
-//!
-//! - `rscodec`: the public functions.
-//! - `rscodec-secret`: the secret functions, in one scope of `with_dit` for the timed loop, as a loop
-//!   of secrets holds `PSTATE.DIT`.
-//! - `rscodec-secret-cold`: a scope of `with_dit` for each call of a secret function.
-//! - One row for each kernel that the host runs, for example `rscodec-avx2`.
-//!
-//! The secret functions run the kernel of one of the kernel rows. Thus `rscodec-secret` and that row
-//! give the cost of the secret class, and `rscodec-secret-cold` adds the cost of one scope for each
-//! call, for example the writes of `PSTATE.DIT` on aarch64.
+//! Benchmark public, secret, and explicit kernels on the same 64-byte-aligned buffers.
+//! Check encoded text against data-encoding and decoded output against the original bytes.
 
 #[path = "common/aligned.rs"]
 mod aligned;
@@ -149,13 +133,8 @@ fn decode_row(
     timed_row(group, codec, label, text, output, decode);
 }
 
-/// Registers the timed loop of a row, after the check of its output. Each call passes `input`
-/// through `black_box`, so the compiler cannot move the work out of the loop, and it shows `output`
-/// to `black_box` after the call, so each store stays.
-///
-/// The row gives the harness no state, so the harness passes no buffer through `black_box`, and the
-/// address of the output stays in a register. With the output as the state, each call loaded that
-/// address again, and that load bounded each call of a few cycles on Graviton4 (C109).
+/// Keep the input opaque and the output observable. Capturing the output slice keeps its address
+/// in a register. Passing it through the harness state added a load to each short call on Graviton4.
 #[expect(
     clippy::print_stdout,
     reason = "a benchmark binary reports the place of the buffers of each row on standard output, beside Criterion"

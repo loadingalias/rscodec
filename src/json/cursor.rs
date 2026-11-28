@@ -99,12 +99,8 @@ impl<'a> Cursor<'a> {
         Ok(at)
     }
 
-    /// Resumes the cursor at `at`, after the number run of the reader read each byte from the last
-    /// token that the cursor gave up to `at` (C224). The run reads only bytes of numbers, `,`, `[`,
-    /// and `]`, so each of them is ASCII and outside a string.
-    ///
-    /// If the block of the cursor holds `at`, its classes stay valid, and the cursor drops its
-    /// tokens before `at`. Else [`resume_block`] classifies the block of `at`.
+    /// Resume at `at` after consuming only ASCII number and array syntax outside strings.
+    /// Reuse the current block's masks when possible. Discard earlier tokens in either case.
     #[inline(always)]
     pub(super) fn resume(&mut self, at: usize) {
         let offset = at.wrapping_sub(self.start);

@@ -138,8 +138,7 @@ fn each_corpus_string_at_each_tail_length_writes_its_reference_escape_and_its_ex
     }
 }
 
-/// Each slice shorter than the document: each member that does not fit refuses at the written
-/// length and writes no byte, and the members after it still write when they fit.
+/// A member that exceeds capacity preserves the logical length. Later members can still fit.
 #[test]
 fn a_write_past_the_end_of_the_slice_refuses_and_keeps_the_written_length() {
     let members: [(&str, Tree); 6] = [
@@ -392,7 +391,7 @@ fn nan_and_infinity_refuse_and_a_closure_that_writes_no_value_refuses() {
     assert_eq!(written(64, |_| Ok(())), refused(ErrorKind::Type, 0));
 }
 
-/// The named float sweep of [CODEC Decisions], second session of 2026-11-19: each finite f32
+/// The exhaustive float sweep: each finite f32
 /// value as an f64, and 10^9 random finite f64 values, print the digits of `core::fmt`, and
 /// `Number::to_f64` reads each text back to its value. It runs once for each change to the printer
 /// or to the reader of numbers, with `--run-ignored only`, and its result goes to the evidence of

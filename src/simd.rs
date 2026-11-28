@@ -13,8 +13,7 @@ use crate::vector::wasm32;
 #[cfg(all(feature = "base64", target_arch = "x86_64"))]
 use crate::vector::x86;
 
-/// The largest input of the short path of a codec on aarch64, in bytes: it runs inline in the
-/// caller, and a longer input runs in a function of its own.
+/// Input threshold in bytes for AArch64 short kernels.
 #[cfg(target_arch = "aarch64")]
 pub(crate) const SHORT_MAX: usize = 64;
 
@@ -22,19 +21,10 @@ pub(crate) const SHORT_MAX: usize = 64;
 #[cfg(any(feature = "base64", target_arch = "aarch64"))]
 const IOTA: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
-/// Runs `block` over an input shorter than one vector, on arrays on the stack. Each block reads `IN`
-/// bytes of input and uses the first `step`. It writes `OUT` bytes of output, and the first
-/// `out_len(step)` of them are the result.
-///
-/// The input after its end is `fill`, and only the result goes to `output`. Thus no SIMD load or
-/// store passes the end of a slice, and no scalar code decodes a tail. `output` has the length
-/// `out_len` of all of `input`. In the secret `class`, each array is zero before the function
-/// returns. Gives the byte after the result in the output of the last block, for example the
-/// trailing bits of base64.
-///
-/// The arrays take and give their bytes in 16-byte pieces, each with loads or stores of a fixed
-/// size. Thus the compiler keeps an array of 16 bytes in registers: a copy of a variable length is
-/// a call to `memcpy`, and a vector load of bytes that smaller stores wrote waits for them.
+/// Stage up to `step` input bytes in an `IN`-byte array padded with `fill`.
+/// Each call writes an `OUT`-byte block. Copy only the encoded or decoded result to `output`.
+/// Return the byte after the final result for the base64 trailing-bit check.
+/// Fixed-width transfers avoid variable-size copies. Clear both staging arrays for secret data.
 #[inline(always)]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 #[cfg_attr(

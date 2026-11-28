@@ -5,10 +5,8 @@ use core::cmp::Ordering;
 
 use super::string;
 
-/// One slot of the scratch that the caller lends to [`read`](super::read). The reader uses one
-/// slot for each open container and one slot for each key of each open object. Thus a header of
-/// one object with 8 members needs 9 slots, and an array of depth 32 needs 32 slots. Lend an
-/// array, for example `[Slot::EMPTY; 16]`, or a `Vec`.
+/// Reader storage. Lend one slot per open container and per key of each open object.
+/// An object with eight scalar members needs nine slots. Initialize each slot with [`Slot::EMPTY`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
     /// A key: its length after unescape and a sample of its bytes after unescape. A container: its

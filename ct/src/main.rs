@@ -1,23 +1,13 @@
-//! The timing evidence of the base-N codecs of rscodec (C103), and of the secret base64url member
-//! of its JSON writer (C220). Run it as
-//! `cargo run --release -p rscodec-ct -- <command>`.
+//! Check base64, hex, and the JSON writer's secret base64url path.
+//! Run `cargo run --locked --release -p rscodec-ct -- <command>`.
 //!
-//! - `paths [case]`: each call runs under the CPU counters of instructions and branches. Each length
-//!   and outcome must give one count over random inputs, in each class and on each kernel of the
-//!   CPU, or only for the cases whose names start with `case`. It needs Linux.
-//! - `scan [binary] [x86_64|aarch64]`: reads the disassembly of a binary, by default this one. It finds loads from a
-//!   constant table with an index register, indirect jumps and calls, instructions of the secret
-//!   code outside the DOIT list of Intel or the DIT list of Arm, and writes of `PSTATE.DIT`.
-//! - `stack [public]`: runs each secret call on a private stack, and finds no run of 8 bytes of its
-//!   secret bytes or 16 characters of its secret text in that stack after the call. With `public`,
-//!   the control: the same search over the public calls must find a residue.
+//! - `paths [case]` compares hardware instruction and branch counts for each length and outcome. Requires Linux counters.
+//! - `scan [binary] [x86_64|aarch64]` checks disassembly. The default binary is this executable.
+//! - `stack [public]` searches a painted stack for secret residue. The public control must find residue.
 //! - `dudect [samples] [random|zero|aa] [case] [bytes] [calls] [warm|unwarmed] [codec|buffers]`
-//!   compares fixed and random inputs of the same length. The A/A control gives each class fresh random inputs.
-//!   Length counts the decoded bytes. An explicit warm-up mode fixes the timed call count.
-//!   The buffer control copies over both byte ranges.
+//!   compares input classes at one decoded length. The A/A control gives both classes random inputs.
 //!
-//! Each command prints its record. It exits with 1 when a check fails, and with 2 when this host
-//! cannot run the check.
+//! Exit codes are 0 for a pass, 1 for a finding, and 2 when the host cannot run the check.
 
 #![expect(
     clippy::print_stdout,

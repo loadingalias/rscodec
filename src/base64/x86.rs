@@ -439,7 +439,7 @@ pub(super) mod avx512vbmi {
 fn encode_64(bytes: &[u8], out: &mut [u8], mut block: impl FnMut(__m512i) -> __m512i) {
     let zero = _mm512_setzero_si512();
     // Step `i` reads the bytes from `96 i` to `96 i + 112`. `out` has 64 characters for each 48
-    // bytes, so a shift of its length counts the whole blocks, with no division (C109). The last
+    // bytes, so a shift of its length counts the whole blocks, with no division. The last
     // whole block reads a full vector only if 16 bytes follow it.
     let whole = out.len() >> 6;
     let steps = whole.saturating_sub(usize::from((out.len() & 63) * 3 / 4 < 16)) >> 1;

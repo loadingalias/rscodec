@@ -1,19 +1,6 @@
-//! JSON: read each document into the tree of each crate, decode the documents of profile A into
-//! one struct for each class, write each tree back as compact text, print f64 values as text, and
-//! read number text as f64 values.
-//!
-//! A cell is one class of documents, and one call reads, decodes, or writes each document of the
-//! class. serde_json reads each document into the reference tree once. Before timing, each read
-//! must give that tree, each decode must give the struct of serde_json, and serde_json must read the
-//! text of each write back into the tree. Each printed f64 must parse back to its bits.
-//!
-//! rscodec has no tree: its read row walks each token, decodes each string with an escape into a
-//! buffer of the row, and reads each number as the tree of serde_json holds it. Its check builds
-//! the serde_json tree from the tokens and those numbers.
-//!
-//! Each document is a copy at a 64-byte boundary, and each row of a cell reads the same copies, so
-//! the rows differ only in their code (the same-run rule). simd-json reads in place, so its rows
-//! copy each document into one buffer of the row, also at a 64-byte boundary.
+//! Benchmark token visits, tree reads, typed decoding, writing, and float conversion.
+//! Each row processes all documents in its input class. Check semantic results against serde_json.
+//! simd-json mutates its input, so its timed read includes a copy into a reusable aligned buffer.
 
 #[path = "common/aligned.rs"]
 mod aligned;

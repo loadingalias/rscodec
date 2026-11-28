@@ -1,15 +1,6 @@
-//! The facts layer: the CPU features that the kernels of the codecs can use ([CODEC Layers]).
-//!
-//! It has the shape of `rscrypto::platform` (selected on 2026-11-18). [`Caps`] is a set of single
-//! CPU features. [`caps_static`] is the set that `-C target-feature` turns on, as a constant. With
-//! `std`, [`caps`] detects the CPU once for each process and includes the static set. Without
-//! `std`, [`caps`] is [`caps_static`]. Each set holds a feature only with each feature that it
-//! implies, because a `#[target_feature]` function can run each implied feature.
-//!
-//! Each codec owns the table of its kernels. Each kernel names the features that it needs and its
-//! [`Timing`] class. A codec chooses its kernel for each class from these facts: at compile time
-//! where [`caps_static`] holds the features of the fastest kernel of the class, and otherwise once
-//! for each process, in a [`Kept`].
+//! Compile-time CPU features and cached runtime detection.
+//! Each kernel specifies its required features and timing class. Detection checks all implied features
+//! before dispatch can call a function with `#[target_feature]`.
 
 use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
@@ -207,9 +198,7 @@ pub(crate) fn caps() -> Caps {
     }
 }
 
-/// Removes each feature whose implied features are not all in `caps`: the rule of
-/// `rscrypto::platform`. A `#[target_feature(enable = "...")]` function can run the instructions of
-/// each feature that its features imply, so detection reports a feature only with all of them.
+/// Remove a feature if any implied feature is absent. Rust can emit instructions for all implied features.
 /// [`caps_static`] needs no closure, because the compiler closes `cfg(target_feature)`.
 ///
 /// Each entry of `IMPLIED` pairs a feature with the features that rustc turns on with it:
@@ -308,8 +297,7 @@ const fn runnable(detected: Caps) -> Caps {
     detected
 }
 
-/// The timing class of a kernel, and of a function of a codec (selected on 2026-11-18,
-/// [CODEC Base-N]). Only the base-N codecs have a secret class: each kernel of JSON is public.
+/// Base64 and hex distinguish public and secret operations. JSON kernels handle public structure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Timing {
     /// For public data, for example a digest or a signature. A function of the class runs the
@@ -438,16 +426,9 @@ macro_rules! choice {
 }
 pub(crate) use choice;
 
-/// The proof that `PSTATE.DIT` (data independent timing) is set on this thread, where the CPU has
-/// DIT. Only [`with_dit`] makes one, and it lends it only for its scope.
-///
-/// Each secret function, for example `hex::encode_secret`, takes a `&Dit`, so it runs only in a
-/// scope that holds DIT, and it reads and writes no DIT itself. Arm guarantees the timing of its
-/// DIT instructions only while `PSTATE.DIT` is 1. On a CPU without DIT, and on each target other
-/// than aarch64, the proof holds nothing.
-///
-/// `PSTATE.DIT` is a state of a thread, so a `Dit` is neither `Send` nor `Sync`, and a reference to
-/// it cannot pass to another thread:
+/// A thread-bound token for secret codec calls. [`with_dit`] lends it for one scope.
+/// On Arm CPUs with DIT, the token requires `PSTATE.DIT` to remain set.
+/// Other CPUs have no corresponding hardware guarantee.
 ///
 /// ```compile_fail
 /// rscodec::with_dit(|dit| std::thread::scope(|scope| scope.spawn(|| dit).join().ok()));
@@ -477,30 +458,26 @@ impl core::fmt::Display for DitUnknown {
 #[cfg(any(feature = "base64", feature = "hex"))]
 impl core::error::Error for DitUnknown {}
 
-/// Runs `scope` with `PSTATE.DIT` set on this thread, where the CPU has DIT, and restores the
-/// earlier value of `PSTATE.DIT` after it, also after a panic. `scope` gets the proof [`Dit`].
+/// Runs secret operations in one scope. On Arm CPUs with DIT, sets `PSTATE.DIT` and
+/// restores the previous state on return or unwind. Code inside the scope must keep DIT set.
+/// Nested scopes leave an already-set bit alone.
 ///
-/// Hold one scope for a loop of secrets: the scope writes DIT at most twice, and the secret
-/// functions in it write nothing. If DIT is set already, for example in an outer scope, the scope
-/// writes nothing. On a CPU without DIT, and on each target other than aarch64, it only calls
-/// `scope`. Code in the scope must not clear `PSTATE.DIT`.
-///
-/// On aarch64, if the build cannot tell whether the CPU has DIT, `scope` does not run, and the
-/// result is [`DitUnknown`]. Thus a [`Dit`] never exists while DIT is clear on a CPU that has it.
-///
-/// The writes of DIT read and write memory for the compiler, so no load moves before the write
-/// that sets DIT, and no store moves after the write that restores it. The secret functions of
-/// rscodec read their input and write their output in memory, so their work stays in the scope.
-/// The proof gives no such guarantee for code in `scope` that works only on values in registers.
+/// On AArch64, unknown DIT support gives [`DitUnknown`] before the closure runs.
+/// On CPUs known to lack DIT and on other architectures, the closure runs directly.
+/// The compiler barriers order the codec's input loads and output stores.
+/// They do not order arbitrary register-only computations.
 ///
 /// ```
-/// use rscodec::hex;
+/// # #[cfg(feature = "hex")]
+/// # {
+/// use rscodec::{hex, with_dit};
 ///
-/// let mut key = [0; 2];
-/// # // A build that makes no proof has no secret call: `with_dit` gives `DitUnknown`.
-/// # if rscodec::with_dit(|_| ()).is_err() { return Ok(()); }
-/// rscodec::with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut key).map(|key| key.len()))??;
-/// assert_eq!(key, [0xc0, 0xde]);
+/// let mut out = [0; 2];
+/// match with_dit(|dit| hex::decode_secret(dit, b"c0de", &mut out)) {
+///     Ok(result) => assert_eq!(result?, [0xc0, 0xde]),
+///     Err(_) => assert!(cfg!(target_arch = "aarch64")),
+/// }
+/// # }
 /// # Ok::<(), Box<dyn core::error::Error>>(())
 /// ```
 #[cfg(any(feature = "base64", feature = "hex"))]

@@ -1,30 +1,14 @@
-//! The scan of the disassembly. From each entry of the harness, it follows each direct call and
-//! jump to the code that the entry runs. In that code it finds:
+//! Inspect instructions reachable from the harness entries. Follow direct calls, jumps, and
+//! x86_64 calls resolved through global offset table relocations.
 //!
-//! - a load from a constant table with an index register: the form of a lookup table;
-//! - an indirect jump or call whose target comes from the data, and in the code of a secret entry,
-//!   an indirect call that the scan cannot follow;
-//! - a call out of the binary, as to `memcpy@plt`;
-//! - a load or store whose address comes from the data;
-//! - in the code of a secret entry, an instruction with a data operand that is not on the DOIT list
-//!   of Intel or the DIT list of Arm;
-//! - in the code of a secret entry, a write of `PSTATE.DIT`.
+//! Track loaded data through registers, flags, and stack slots to a fixed point in each function.
+//! Stack, constant, and closure-environment loads have separate handling. Calls reset register facts.
+//! Base64 padding is public because it determines decoded length.
 //!
-//! The data is each value of a load of memory other than the stack, constant data, and the
-//! environment of a closure. It flows through the general, vector, and mask registers, the flags,
-//! and the slots of the stack, over the control flow of each function, to a fixed point. A call
-//! ends what the scan knows of the registers: each function of the closure has its own scan.
-//!
-//! On x86_64, a call to a function of another crate can load its target from a slot of the global
-//! offset table (GOT). The relocation of the slot in `objdump -R` gives the function, so the scan
-//! follows the call as a direct call.
-//!
-//! A compare with the padding `=` gives public flags: the padding gives the length of the bytes,
-//! which is public.
-//!
-//! In the whole binary, each write that sets `PSTATE.DIT` must be followed by `sb`, or by
-//! `dsb nsh` and `isb`, on each path before the next call or return. The scan reads the
-//! output of `objdump -d`, of GNU binutils or of LLVM.
+//! Report data-dependent addresses, indexed constant tables, and data-dependent indirect transfers.
+//! Secret entries also flag unresolved calls, unlisted instructions with data operands, and DIT writes.
+//! Across the binary, each instruction that enables DIT must reach a speculation barrier before any call or return.
+//! Read GNU or LLVM objdump output.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},

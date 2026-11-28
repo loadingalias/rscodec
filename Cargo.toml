@@ -1,43 +1,32 @@
 [package]
 name = "rscodec"
-version = "0.1.0-alpha.2"
-description = "Codecs for Rust: base64, base64url, hex, and JSON (in development). Each codec is a leaf feature with portable and SIMD backends and no C."
+version = "0.1.0"
+description = "Allocation-free base64, base64url, hex, and JSON with portable and SIMD backends."
 repository = "https://github.com/loadingalias/rscodec"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 keywords = ["base64", "hex", "json", "simd", "no-std"]
 categories = ["encoding", "no-std", "no-std::no-alloc", "parser-implementations"]
-# The crate is at the workspace root: the package holds only its sources, its license, and its
-# README.
-include = ["/src", "/LICENSE", "/README.md"]
+include = ["/src", "/examples", "/docs/content", "/LICENSE", "/README.md"]
 
-# No codec is a default feature, so docs.rs selects each. The `Kernel` enums differ between the
-# architectures.
 [package.metadata.docs.rs]
 all-features = true
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [features]
 default = ["std"]
-# Without `std`, the crate needs only `core`, and it selects each SIMD backend at compile time
-# from `-C target-feature`. With `std`, it detects the CPU at run time.
+# Enable runtime CPU detection where available.
 std = []
-# base64 (RFC 4648 section 4, padded) and base64url (section 5, no padding).
 base64 = []
-# Lowercase hex (RFC 4648 section 8).
 hex = []
-# JSON (RFC 8259): the pull reader, its two profiles, the strict walk for typed decoders, and
-# the writer.
 json = []
 
 [lints]
 workspace = true
 
-# The competitors of `benches/`. None enters the library closure. Each is pinned to a release at
-# least 7 days old, in its fastest configuration.
 [dev-dependencies]
-# The tests and the benchmarks use each leaf. Only the builds of these targets enable them.
+# Enable all codecs for tests and benchmarks.
 rscodec = { path = ".", default-features = false, features = ["base64", "hex", "json"] }
 criterion = { version = "=0.8.2", default-features = false }
 # base-N
@@ -58,8 +47,7 @@ flexon = { version = "=0.4.9", features = ["nightly"] }
 # The `num-bigint` default feature only widens integers past i64.
 jiter = { version = "=0.19.0", default-features = false }
 ryu = "=1.0.23"
-# `derive` gives the structs of the typed-decode rows, which each competitor reads with
-# `from_slice`. The library and its tests do not use serde.
+# Benchmark the same typed records in each reader.
 serde = { version = "=1.0.229", features = ["derive"] }
 # Without `float_roundtrip`, serde_json reads 11,975 of the 111,080 floats of canada.json 1 ULP
 # away from the correctly rounded value. The bar takes only correct output.
@@ -71,11 +59,25 @@ simd-json = { version = "=0.19.0", default-features = false, features = ["serde_
 sonic-rs = { version = "=0.5.11", features = ["avx512"] }
 zmij = "=1.0.23"
 
-# simdutf, the C++ leader of base64 decode, through its binding crate. A build for MSVC cannot
-# compile it on another host, so `cargo xtask check --target x86_64-pc-windows-msvc` leaves it out.
-# The WebAssembly targets have no C++ standard library, so their tests leave it out too.
+# Exclude the C++ benchmark dependency on WebAssembly and when cross-checking MSVC.
 [target.'cfg(not(any(target_env = "msvc", target_family = "wasm")))'.dev-dependencies]
 simdutf = "=0.7.0"
+
+[[example]]
+name = "base64url"
+required-features = ["base64"]
+
+[[example]]
+name = "jose_header"
+required-features = ["json"]
+
+[[example]]
+name = "sparse_index"
+required-features = ["json"]
+
+[[example]]
+name = "ceremony_options"
+required-features = ["json", "base64"]
 
 [[bench]]
 name = "base_n"
@@ -119,8 +121,7 @@ missing_debug_implementations = "deny"
 unreachable_pub = "deny"
 
 [workspace.lints.clippy]
-# The complete production-ready default set. The negative priority lets every
-# individually reviewed lint below take precedence.
+# Individual lints take precedence over this group.
 default = { level = "deny", priority = -1 }
 
 # Concurrency and async correctness.
@@ -163,12 +164,11 @@ expl_impl_clone_on_copy = "deny"
 iter_not_returning_iterator = "deny"
 same_functions_in_if_condition = "deny"
 
-# Import from `core` when the item is there; it keeps a later `no_std` split open.
+# Keep core-only builds independent of the standard library.
 alloc_instead_of_core = "deny"
 std_instead_of_core = "deny"
 
-# Libraries report through return values, not direct output. xtask, the one
-# command-line tool, carries a reasoned `expect`.
+# Command-line tools opt in to printing.
 print_stderr = "deny"
 print_stdout = "deny"
 

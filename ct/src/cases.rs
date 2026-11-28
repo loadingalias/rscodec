@@ -327,9 +327,7 @@ mod entry {
     pub(super) type HexWith = fn(hex::Backend, &[u8], &mut [u8]) -> usize;
     pub(super) type Base64With = fn(base64::Backend, &[u8], &mut [u8]) -> usize;
 
-    /// The length of the result, or `usize::MAX` for a refusal. A caller reads the kind and the
-    /// offset of a refusal, so the whole result goes through `black_box`: else the compiler drops
-    /// the work of the offset, and the harness would not run the code of a caller (C103).
+    /// Keep the whole error observable so the compiler computes its offset.
     fn length<E>(result: Result<&mut [u8], E>) -> usize {
         core::hint::black_box(result).map_or(usize::MAX, |out| out.len())
     }

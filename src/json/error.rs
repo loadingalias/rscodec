@@ -19,7 +19,7 @@ pub enum ErrorKind {
     /// [`Profile::IJson`](super::Profile::IJson): the character at the offset, or the escape at the
     /// offset, is a noncharacter.
     Noncharacter,
-    /// [`Profile::IJson`](super::Profile::IJson): binary64 does not hold the number at the offset.
+    /// The number at the offset violates the numeric limits of [`Profile::IJson`](super::Profile::IJson).
     Number,
     /// The value of the number at the offset does not fit the type that the accessor of
     /// [`Number`](super::Number) reads. The recovery is a wider type:
@@ -42,9 +42,8 @@ pub enum ErrorKind {
     /// [`Number::to_u64`](super::Number::to_u64) give it for a number with a fraction or an
     /// exponent. The writer gives it at offset 0 when its closure writes no value.
     Type,
-    /// The writer: the slice ends before the end of the value that the call writes. The offset is
-    /// the written length, which the call did not change. The recovery is a longer slice, or a new
-    /// slice after the caller takes the written bytes.
+    /// Insufficient output space. The offset is the logical length before the failed write.
+    /// Retry the document with a larger buffer.
     Full,
     /// The writer: JSON has no number for the NaN or the infinity that the call writes. The offset
     /// is the written length. The recovery is a finite value, or `null`.

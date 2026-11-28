@@ -1,10 +1,5 @@
-//! The painted stack. The secret functions clear each temporary copy of their input and result
-//! before they return (C106). Thus each secret call runs on a private, painted stack, and after it
-//! returns, no run of 8 of its secret bytes and no run of 16 of its secret characters is in that
-//! stack. A shorter run is not found, so an input of under 8 bytes has no check.
-//!
-//! `stack public` is the control: the public functions do not clear their copies, so the same
-//! search must find a residue of some public call.
+//! Run each secret operation on a painted stack. Search for runs of eight decoded bytes or 16 encoded characters.
+//! Shorter residues fall below the detection threshold. The public control must find at least one residue.
 
 use std::collections::HashSet;
 

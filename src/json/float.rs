@@ -1,25 +1,16 @@
-//! The shortest decimal form of a binary64 value that reads back exactly, in the layout of `{:?}`
-//! of `core::fmt`.
+//! Print the shortest decimal that reads back to the input binary64 value, in Rust's debug format.
 //!
-//! The method is the one of zmij (Zverovich, 2025), which comes from Schubfach (Giulietti). A
-//! value `v = c × 2^q` has the rounding interval of half a unit in the last place on each side.
-//! For `k = ⌊log10(width of the interval)⌋`, one 128-bit power of ten scales `v` to
-//! `X = v × 10^(−k−1)`. The integer part of `X` holds the 15 or 16 leading digits, and the
-//! interval is less than 1 wide at that scale. Thus at most one integer is in the interval, and if
-//! one is, it is the shortest form. Otherwise the interval holds an integer at the scale `10^k`,
-//! and the digit after the integer part of `X`, rounded to the nearest with a tie up as
-//! `core::fmt` does, gives the nearest such integer. No loop and no division by 10 run.
+//! The printer follows zmij (Zverovich, 2025) and Schubfach (Giulietti). Adjacent binary64 values
+//! set the rounding interval. One 128-bit power of ten scales the input so the interval can contain
+//! at most one integer. If it contains one, those digits suffice. Otherwise the next digit selects
+//! the nearest decimal at the finer scale.
 //!
-//! The decisions follow zmij with no margin and no second path (C216). Schubfach proves that the
-//! 128-bit table of [`scale`] decides each bound of the interval exactly, with the parity of `c` for
-//! a bound that is a candidate, and that no value is closer to a threshold than the error of the
-//! approximations unless it is on it. The 17th digit takes the bias of zmij against the floor of the
-//! fraction. A tie of that digit, which only a fraction of exactly a quarter gives, rounds up, as
-//! `core::fmt` does; zmij rounds it down. The tests compare each form with `core::fmt`.
+//! [`scale`] uses a 192-bit product and significand parity to decide interval endpoints.
+//! The 17th digit uses zmij's bias for the rounded-down table. An exact last-digit tie rounds up
+//! to match `core::fmt`. zmij rounds that tie down.
 //!
-//! [`read`] goes the other way: the binary64 value nearest to a decimal of up to 64 bits. It is
-//! the parse of unrounded scaling (Cox, 2026, "Floating-Point Printing and Parsing Can Be Simple
-//! And Fast"), which Cox proves with Ivy ("Fast Unrounded Scaling: Proof by Ivy", Theorem 1).
+//! [`read`] converts a decimal significand of up to 64 bits with Cox's unrounded scaling
+//! (“Floating-Point Printing and Parsing Can Be Simple And Fast”, 2026, and “Fast Unrounded Scaling: Proof by Ivy”, Theorem 1).
 
 #[cfg(test)]
 mod tests;
