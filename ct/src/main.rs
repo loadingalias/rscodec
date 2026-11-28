@@ -1,5 +1,5 @@
 //! Check base64, hex, and the JSON writer's secret base64url path.
-//! Run `cargo run --locked --release -p rscodec-ct -- <command>`.
+//! Run `cargo run --locked --release -p rscodec-ct --config 'profile.release.overflow-checks=false' -- <command>`.
 //!
 //! - `paths [case]` compares hardware instruction and branch counts for each length and outcome. Requires Linux counters.
 //! - `scan [binary] [x86_64|aarch64]` checks disassembly. The default binary is this executable.

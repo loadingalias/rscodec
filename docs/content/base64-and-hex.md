@@ -87,14 +87,15 @@ Other architectures use the portable code. [Platform test coverage](support.md)
 
 Secret kernels avoid branches and memory addresses derived from secret bytes. Length, padding, validity, error kind, and error offset are public.
 An instruction scan checks the compiled binary. Hardware counters, stack inspection, and timing samples test different properties.
+A default build uses the default target features. A native build uses `-C target-cpu=native`.
 
-| Check                                   | Recorded result                                                                                                                                                                                                                 |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Arm instruction transfer                | At `7074899`, the corrected scanner found six transfers through general `FMOV`. The decoders now use the DIT-listed byte transfer `UMOV`. The timing effect of the old instruction is unmeasured.                               |
-| Corrected instruction scan              | Zero findings in 19 entries per Linux build. Arm GNU and musl each used default features and Neoverse V2. x86_64 musl used default features.                                                                                    |
-| Corrected Arm stack check               | A Linux ARM64 VM found no residue in 2,256 secret calls. The public control found residue in 40 of 6,171 calls. The check searches for runs of eight decoded bytes or 16 encoded characters, excluding single-byte repetitions. |
-| Path counts at `e03f296`                | For each tested length and outcome, instructions and branches had one count. Xeon tested 15,036 cases and Graviton4 tested 9,050. These runs preceded the transfer correction.                                                  |
-| Fixed versus random inputs at `28bdb86` | All six secret operations passed at 16, 32, 64, and 4,096 decoded bytes on default Xeon, default Graviton4, and native Graviton4. At 4,096 bytes the largest absolute t statistic was 3.15 against a threshold of 8.            |
+| Check                                   | Recorded result                                                                                                                                                                                                                                                |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Arm instruction transfer                | At `7074899`, the corrected scanner found six transfers through general `FMOV`. The decoders now use the DIT-listed byte transfer `UMOV`. The timing effect of the old instruction is unmeasured.                                                              |
+| Instruction scan at `4d652b3`           | Zero findings in 19 entries for each build: default Xeon 6975P-C, default Graviton4, and native Graviton4. Corrected cross-builds also had zero findings: Arm musl with default features and with Neoverse V2, and x86_64 musl with default features.          |
+| Stack check at `4d652b3`                | Each build left no residue in 2,256 secret calls. The public control found residue in 36 of 11,745 calls on Xeon and 40 of 6,171 on Graviton4. The check searches for runs of eight decoded bytes or 16 encoded characters, excluding single-byte repetitions. |
+| Path counts at `4d652b3`                | For each tested length and outcome, instructions and branches had one count. Xeon tested 15,036 cases. Each Graviton4 build tested 9,050.                                                                                                                      |
+| Fixed versus random inputs at `28bdb86` | All six secret operations passed at 16, 32, 64, and 4,096 decoded bytes on default Xeon, default Graviton4, and native Graviton4. At 4,096 bytes the largest absolute t statistic was 3.15 against a threshold of 8.                                           |
 
 Graviton4 native standard base64 encode at 4,096 bytes exceeded the timing threshold in two of 35 runs on four instances.
 The largest absolute t statistic was 17.04. All 12 default-build runs passed. The cause is unknown.
@@ -104,7 +105,8 @@ Intel's hardware timing guarantee requires the operating system to enable data o
 Native x86_64 builds that emit unlisted VBMI or FP16 instructions and WebAssembly engines have no timing claim.
 
 From the checkout, scan your Linux build with GNU `objdump` available.
+The command turns off overflow checks, as the default release profile of a dependent crate does.
 
 ```sh
-cargo run --locked --release -p rscodec-ct -- scan
+cargo run --locked --release -p rscodec-ct --config 'profile.release.overflow-checks=false' -- scan
 ```
